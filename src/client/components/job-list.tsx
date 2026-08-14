@@ -4,7 +4,6 @@ import { JobRow } from "./job-row";
 import { CreateJob } from "./create-job";
 import { Pagination } from "./pagination";
 import { Plus, Search } from "lucide-preact";
-import type { JobStatus } from "../types";
 
 const STATUSES: { value: string; label: string }[] = [
   { value: "", label: "All" },

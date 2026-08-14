@@ -3,9 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.21.0",
   "scripts": {
     "dev": "wrangler d1 execute open-fieldservice-db --local --file=src/server/schema.sql && concurrently -n ui,api -c cyan,green \"vite\" \"wrangler dev --port 8787\"",
-    "build": "vite build"
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@clawnify/app": "^0.1.0",
@@ -17,10 +21,18 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.21.3",
+    "@eslint/js": "^10.0.1",
     "@preact/preset-vite": "^2.9.0",
+    "@types/node": "^26.2.0",
     "concurrently": "^9.0.0",
+    "eslint": "^10.8.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.11.0",
     "typescript": "^5.7.0",
+    "typescript-eslint": "^8.67.0",
     "vite": "^6.0.0",
+    "vitest": "4.1.0",
     "wrangler": "^4.0.0"
   }
 }

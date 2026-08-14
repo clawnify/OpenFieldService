@@ -87,6 +87,40 @@ const JobSchema = z.object({
   updated_at: z.string(),
 }).openapi("Job");
 
+const MaterialSchema = z.object({
+  id: z.number().int(),
+  name: z.string(),
+  unit: z.string(),
+  unit_cost: z.number(),
+  in_stock: z.number(),
+  created_at: z.string(),
+});
+
+type Customer = z.infer<typeof CustomerSchema>;
+type Technician = z.infer<typeof TechnicianSchema>;
+type ServiceType = z.infer<typeof ServiceTypeSchema>;
+type JobNote = z.infer<typeof JobNoteSchema>;
+type Job = z.infer<typeof JobSchema>;
+type Material = z.infer<typeof MaterialSchema>;
+
+interface ChecklistItem {
+  id: number;
+  job_id: number;
+  label: string;
+  checked: number;
+  sort_order: number;
+}
+
+interface JobMaterial {
+  id: number;
+  job_id: number;
+  material_id: number;
+  quantity: number;
+  unit_cost: number;
+  material_name: string | null;
+  material_unit: string | null;
+}
+
 const IdParam = z.object({ id: z.string().openapi({ description: "Resource ID" }) });
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -210,7 +244,7 @@ app.openapi(listJobs, async (c) => {
     params
   );
 
-  const jobs = await query<Record<string, unknown>>(
+  const jobs = await query<Job>(
     `SELECT j.*, c.name as customer_name, c.phone as customer_phone,
        t.name as technician_name, t.color as technician_color,
        st.name as service_type_name, st.color as service_type_color
@@ -239,7 +273,7 @@ const getJob = createRoute({
 
 app.openapi(getJob, async (c) => {
   const { id } = c.req.valid("param");
-  const job = await get<Record<string, unknown>>(
+  const job = await get<Job>(
     `SELECT j.*, c.name as customer_name, c.phone as customer_phone,
        t.name as technician_name, t.color as technician_color,
        st.name as service_type_name, st.color as service_type_color
@@ -251,13 +285,13 @@ app.openapi(getJob, async (c) => {
     [id]
   );
   if (!job) return c.json({ error: "Job not found" }, 404);
-  const notes = await query<Record<string, unknown>>(
+  const notes = await query<JobNote>(
     "SELECT * FROM job_notes WHERE job_id = ? ORDER BY created_at DESC", [id]
   );
-  const checklist = await query<Record<string, unknown>>(
+  const checklist = await query<ChecklistItem>(
     "SELECT * FROM job_checklist WHERE job_id = ? ORDER BY sort_order ASC", [id]
   );
-  const jobMaterials = await query<Record<string, unknown>>(
+  const jobMaterials = await query<JobMaterial>(
     `SELECT jm.*, m.name as material_name, m.unit as material_unit
      FROM job_materials jm LEFT JOIN materials m ON jm.material_id = m.id
      WHERE jm.job_id = ? ORDER BY jm.id ASC`, [id]
@@ -342,7 +376,7 @@ app.openapi(createJob, async (c) => {
     ]
   );
 
-  const job = await get<Record<string, unknown>>(
+  const job = await get<Job>(
     `SELECT j.*, c.name as customer_name, c.phone as customer_phone,
        t.name as technician_name, t.color as technician_color,
        st.name as service_type_name, st.color as service_type_color
@@ -389,7 +423,7 @@ const updateJob = createRoute({
 app.openapi(updateJob, async (c) => {
   const { id } = c.req.valid("param");
   const data = c.req.valid("json");
-  const existing = await get<Record<string, unknown>>("SELECT * FROM jobs WHERE id = ?", [id]);
+  const existing = await get<Job>("SELECT * FROM jobs WHERE id = ?", [id]);
   if (!existing) return c.json({ error: "Job not found" }, 404);
 
   const fields: string[] = [];
@@ -440,7 +474,7 @@ app.openapi(addJobNote, async (c) => {
   const { id } = c.req.valid("param");
   const { content } = c.req.valid("json");
   await run("INSERT INTO job_notes (job_id, content) VALUES (?, ?)", [id, content]);
-  const note = await get<Record<string, unknown>>(
+  const note = await get<JobNote>(
     "SELECT * FROM job_notes WHERE job_id = ? ORDER BY id DESC LIMIT 1", [id]
   );
   return c.json(note!, 201);
@@ -496,7 +530,7 @@ app.openapi(listCustomers, async (c) => {
   }
 
   const countRow = await get<{ count: number }>(`SELECT COUNT(*) as count FROM customers c ${where}`, params);
-  const customers = await query<Record<string, unknown>>(
+  const customers = await query<Customer>(
     `SELECT c.*, COALESCE(jc.cnt, 0) as job_count
      FROM customers c
      LEFT JOIN (SELECT customer_id, COUNT(*) as cnt FROM jobs GROUP BY customer_id) jc ON jc.customer_id = c.id
@@ -520,7 +554,7 @@ const listAllCustomers = createRoute({
 });
 
 app.openapi(listAllCustomers, async (c) => {
-  const customers = await query<Record<string, unknown>>("SELECT id, name, address FROM customers ORDER BY name ASC");
+  const customers = await query<Pick<Customer, "id" | "name" | "address">>("SELECT id, name, address FROM customers ORDER BY name ASC");
   return c.json({ customers }, 200);
 });
 
@@ -536,9 +570,9 @@ const getCustomer = createRoute({
 
 app.openapi(getCustomer, async (c) => {
   const { id } = c.req.valid("param");
-  const customer = await get<Record<string, unknown>>("SELECT * FROM customers WHERE id = ?", [id]);
+  const customer = await get<Customer>("SELECT * FROM customers WHERE id = ?", [id]);
   if (!customer) return c.json({ error: "Customer not found" }, 404);
-  const jobs = await query<Record<string, unknown>>(
+  const jobs = await query<Job>(
     `SELECT j.*, t.name as technician_name, t.color as technician_color,
        st.name as service_type_name, st.color as service_type_color
      FROM jobs j
@@ -581,7 +615,7 @@ app.openapi(createCustomer, async (c) => {
     [data.name, data.email || "", data.phone || "", data.address || "",
     data.city || "", data.state || "", data.zip || "", data.notes || ""]
   );
-  const customer = await get<Record<string, unknown>>("SELECT * FROM customers ORDER BY id DESC LIMIT 1");
+  const customer = await get<Customer>("SELECT * FROM customers ORDER BY id DESC LIMIT 1");
   return c.json(customer!, 201);
 });
 
@@ -655,7 +689,7 @@ const listTechnicians = createRoute({
 });
 
 app.openapi(listTechnicians, async (c) => {
-  const technicians = await query<Record<string, unknown>>(
+  const technicians = await query<Technician>(
     `SELECT t.*, COALESCE(jc.cnt, 0) as job_count
      FROM technicians t
      LEFT JOIN (SELECT technician_id, COUNT(*) as cnt FROM jobs WHERE status IN ('scheduled','confirmed','in_progress') GROUP BY technician_id) jc ON jc.technician_id = t.id
@@ -676,7 +710,7 @@ const listAllTechnicians = createRoute({
 });
 
 app.openapi(listAllTechnicians, async (c) => {
-  const technicians = await query<Record<string, unknown>>(
+  const technicians = await query<Pick<Technician, "id" | "name" | "color">>(
     "SELECT id, name, color FROM technicians WHERE active = 1 ORDER BY name ASC"
   );
   return c.json({ technicians }, 200);
@@ -706,7 +740,7 @@ app.openapi(createTechnician, async (c) => {
     "INSERT INTO technicians (name, email, phone, color) VALUES (?, ?, ?, ?)",
     [data.name, data.email || "", data.phone || "", data.color || "#16a34a"]
   );
-  const tech = await get<Record<string, unknown>>("SELECT * FROM technicians ORDER BY id DESC LIMIT 1");
+  const tech = await get<Technician>("SELECT * FROM technicians ORDER BY id DESC LIMIT 1");
   return c.json(tech!, 201);
 });
 
@@ -776,7 +810,7 @@ const listServiceTypes = createRoute({
 });
 
 app.openapi(listServiceTypes, async (c) => {
-  const types = await query<Record<string, unknown>>("SELECT * FROM service_types ORDER BY name ASC");
+  const types = await query<ServiceType>("SELECT * FROM service_types ORDER BY name ASC");
   return c.json({ service_types: types }, 200);
 });
 
@@ -805,7 +839,7 @@ app.openapi(createServiceType, async (c) => {
     "INSERT INTO service_types (name, description, default_duration, default_price, color) VALUES (?, ?, ?, ?, ?)",
     [data.name, data.description || "", data.default_duration || 60, data.default_price || 0, data.color || "#6b7280"]
   );
-  const st = await get<Record<string, unknown>>("SELECT * FROM service_types ORDER BY id DESC LIMIT 1");
+  const st = await get<ServiceType>("SELECT * FROM service_types ORDER BY id DESC LIMIT 1");
   return c.json(st!, 201);
 });
 
@@ -889,7 +923,7 @@ app.openapi(getSchedule, async (c) => {
     where += " AND j.technician_id = ?";
     params.push(q.technician_id);
   }
-  const jobs = await query<Record<string, unknown>>(
+  const jobs = await query<Job>(
     `SELECT j.*, c.name as customer_name, c.phone as customer_phone,
        t.name as technician_name, t.color as technician_color,
        st.name as service_type_name, st.color as service_type_color
@@ -964,20 +998,13 @@ const listMaterials = createRoute({
   responses: {
     200: {
       description: "All materials",
-      content: { "application/json": { schema: z.object({ materials: z.array(z.object({
-        id: z.number().int(),
-        name: z.string(),
-        unit: z.string(),
-        unit_cost: z.number(),
-        in_stock: z.number(),
-        created_at: z.string(),
-      })) }) } },
+      content: { "application/json": { schema: z.object({ materials: z.array(MaterialSchema) }) } },
     },
   },
 });
 
 app.openapi(listMaterials, async (c) => {
-  const materials = await query<Record<string, unknown>>("SELECT * FROM materials ORDER BY name ASC");
+  const materials = await query<Material>("SELECT * FROM materials ORDER BY name ASC");
   return c.json({ materials }, 200);
 });
 

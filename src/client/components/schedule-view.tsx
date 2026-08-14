@@ -15,7 +15,7 @@ function getDaysInRange(start: string, end: string): string[] {
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export function ScheduleView() {
-  const { scheduleJobs, scheduleStart, scheduleEnd, setScheduleRange, navigate, technicianLookup } = useApp();
+  const { scheduleJobs, scheduleStart, scheduleEnd, setScheduleRange, navigate } = useApp();
 
   const days = getDaysInRange(scheduleStart, scheduleEnd);
   const todayStr = new Date().toISOString().split("T")[0];

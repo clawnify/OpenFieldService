@@ -1,7 +1,6 @@
-import { useState } from "preact/hooks";
 import { useApp } from "../context";
 import { Pagination } from "./pagination";
-import { Search, Trash2 } from "lucide-preact";
+import { Trash2 } from "lucide-preact";
 import type { InvoiceStatus } from "../types";
 
 const STATUSES: { value: string; label: string }[] = [
