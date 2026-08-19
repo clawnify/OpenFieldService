@@ -674,8 +674,19 @@ body {
    * Scoped to .lead-form specifically rather than widening the shared
    * .form-group rule globally, which would silently change every other
    * existing form's mobile sizing (Customers, Jobs) — out of this phase's
-   * scope. */
-  .lead-form input, .lead-form select, .lead-form textarea { font-size: 16px; }
+   * scope.
+   * Phase 8.6 fix (real Playwright/Chromium finding, 2026-08-19): the
+   * original `.lead-form input` selector never actually won — it ties in
+   * specificity with the unscoped `.form-group input { font-size: 13px }`
+   * rule below (both one class + one element), and CSS resolves same-
+   * specificity ties by source order, not by media-query intent, so the
+   * later, always-on 13px rule silently overrode this one at every mobile
+   * width. Re-scoped through `.form-group` (two classes) to out-specify
+   * it, exactly the same fix already applied to
+   * `.form-group select.setting-select-input` above — this bug's own
+   * precedent, just not followed here originally. Verified live at
+   * 430px/390px: computed font-size is now 16px, not 13px. */
+  .lead-form .form-group input, .lead-form .form-group select, .lead-form .form-group textarea { font-size: 16px; }
   /* .form-grid is a fixed 2-column grid at every viewport width app-wide —
    * a pre-existing gap affecting every form in this app (Customers, Jobs),
    * not something Phase 8.4 introduces. Collapsing it globally would change
