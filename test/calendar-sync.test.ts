@@ -295,6 +295,152 @@ describe("job sync", () => {
   });
 });
 
+// Business-timezone / DST correctness — see mem:risks/google-calendar-timezone-default.
+// buildEventInput()/toGoogleEventBody() (calendar-sync.ts + google-calendar.ts) were
+// already correct: they send a plain local "YYYY-MM-DDTHH:mm:ss" (no offset, no `Z`)
+// paired with an explicit IANA `timeZone`, exactly Google's documented contract for a
+// timed event — never a `Date`/`toISOString()` UTC conversion. The real defect is that
+// `_meta.timezone` (the single authoritative source both this module and the Phase 9
+// day-before-reminder notification already read via the identical `SELECT value FROM
+// _meta WHERE key = 'timezone'` pattern) defaults to 'UTC' (migrations/0001_baseline.sql)
+// and is never updated unless an operator runs the documented manual SQL — so a real
+// 11:00 local appointment is sent to Google as 11:00 *UTC*, which a Pacific-time Google
+// account then displays 7-8 hours earlier (04:00 PDT / 03:00 PST) depending on DST. The
+// first test below reproduces that exact defect at the payload level; the rest prove the
+// existing code is already correct for every DST/boundary case once the business
+// timezone is actually configured — no code change to the payload-building logic was
+// needed or made.
+describe("job sync — business timezone correctness (root cause + DST)", () => {
+  async function connectedAdmin() {
+    google = mockGoogleApi();
+    const auth = await authHeaders();
+    await connectGoogleCalendar((auth.headers as Record<string, string>).cookie);
+    return auth;
+  }
+
+  it("REPRODUCES JOB-34: an unconfigured (default 'UTC') business timezone sends the local appointment time to Google labeled as UTC, not the real local time", async () => {
+    await connectedAdmin();
+    // _meta.timezone deliberately left untouched at its seeded default here —
+    // this is the exact real-world condition that produced the reported bug.
+    const timezoneRow = await queryDb<{ value: string }>("SELECT value FROM _meta WHERE key = 'timezone'");
+    expect(timezoneRow[0].value).toBe("UTC");
+
+    const customer = await createCustomer();
+    await createJob(customer.id, "2026-08-20", { scheduled_time: "11:00", duration: 90 });
+
+    const [[, event]] = [...google.state.events.entries()];
+    // The code faithfully sends what _meta says — "11:00 UTC" — which is the
+    // root cause: nothing in the app ever prompted anyone to set this to the
+    // real business timezone, so every event is silently mislabeled.
+    expect(event.start).toMatchObject({ dateTime: "2026-08-20T11:00:00", timeZone: "UTC" });
+    expect(event.end).toMatchObject({ dateTime: "2026-08-20T12:30:00", timeZone: "UTC" });
+  });
+
+  async function setBusinessTimezone(tz: string) {
+    await queryDb("UPDATE _meta SET value = ? WHERE key = 'timezone'", [tz]);
+  }
+
+  it("summer (PDT): 11:00 local stays 11:00 in the Google payload, tagged with the IANA zone (never a fixed offset)", async () => {
+    await connectedAdmin();
+    await setBusinessTimezone("America/Vancouver");
+    const customer = await createCustomer();
+    await createJob(customer.id, "2026-08-20", { scheduled_time: "11:00", duration: 90 });
+
+    const [[, event]] = [...google.state.events.entries()];
+    expect(event.start).toMatchObject({ dateTime: "2026-08-20T11:00:00", timeZone: "America/Vancouver" });
+    expect(event.end).toMatchObject({ dateTime: "2026-08-20T12:30:00", timeZone: "America/Vancouver" });
+  });
+
+  it("winter (PST): 11:00 local stays 11:00 in the Google payload — same IANA zone string as summer, DST resolution is left entirely to Google", async () => {
+    await connectedAdmin();
+    await setBusinessTimezone("America/Vancouver");
+    const customer = await createCustomer();
+    await createJob(customer.id, "2026-12-15", { scheduled_time: "11:00", duration: 90 });
+
+    const [[, event]] = [...google.state.events.entries()];
+    expect(event.start).toMatchObject({ dateTime: "2026-12-15T11:00:00", timeZone: "America/Vancouver" });
+    expect(event.end).toMatchObject({ dateTime: "2026-12-15T12:30:00", timeZone: "America/Vancouver" });
+  });
+
+  it("odd-minute duration is preserved exactly (no rounding/timezone artifacts)", async () => {
+    await connectedAdmin();
+    await setBusinessTimezone("America/Vancouver");
+    const customer = await createCustomer();
+    await createJob(customer.id, "2026-08-20", { scheduled_time: "09:05", duration: 37 });
+
+    const [[, event]] = [...google.state.events.entries()];
+    expect(event.start).toMatchObject({ dateTime: "2026-08-20T09:05:00" });
+    expect(event.end).toMatchObject({ dateTime: "2026-08-20T09:42:00" });
+  });
+
+  it("midnight-adjacent start (00:15) stays on the same local date", async () => {
+    await connectedAdmin();
+    await setBusinessTimezone("America/Vancouver");
+    const customer = await createCustomer();
+    await createJob(customer.id, "2026-08-20", { scheduled_time: "00:15", duration: 30 });
+
+    const [[, event]] = [...google.state.events.entries()];
+    expect(event.start).toMatchObject({ dateTime: "2026-08-20T00:15:00", timeZone: "America/Vancouver" });
+    expect(event.end).toMatchObject({ dateTime: "2026-08-20T00:45:00", timeZone: "America/Vancouver" });
+  });
+
+  it("late-night start (23:30) stays on the same local date; only the computed end (correctly) rolls into the next calendar day", async () => {
+    await connectedAdmin();
+    await setBusinessTimezone("America/Vancouver");
+    const customer = await createCustomer();
+    await createJob(customer.id, "2026-08-20", { scheduled_time: "23:30", duration: 45 });
+
+    const [[, event]] = [...google.state.events.entries()];
+    expect(event.start).toMatchObject({ dateTime: "2026-08-20T23:30:00", timeZone: "America/Vancouver" });
+    expect(event.end).toMatchObject({ dateTime: "2026-08-21T00:15:00", timeZone: "America/Vancouver" });
+  });
+
+  it("reschedule across a DST boundary (Aug -> Dec) preserves the 11:00 wall-clock time and updates the same event, not a new one", async () => {
+    const auth = await connectedAdmin();
+    await setBusinessTimezone("America/Vancouver");
+    const customer = await createCustomer();
+    const job = await createJob(customer.id, "2026-08-20", { scheduled_time: "11:00", duration: 90 });
+    const firstEventId = [...google.state.events.keys()][0];
+
+    await put(`/api/jobs/${job.id}`, { scheduled_date: "2026-12-15" }, auth);
+
+    expect(google.state.events.size).toBe(1);
+    expect([...google.state.events.keys()][0]).toBe(firstEventId); // deterministic id unchanged
+    const event = google.state.events.get(firstEventId)!;
+    expect(event.start).toMatchObject({ dateTime: "2026-12-15T11:00:00", timeZone: "America/Vancouver" });
+  });
+
+  it("changing only the time (update) preserves wall-clock semantics", async () => {
+    const auth = await connectedAdmin();
+    await setBusinessTimezone("America/Vancouver");
+    const customer = await createCustomer();
+    const job = await createJob(customer.id, "2026-08-20", { scheduled_time: "11:00", duration: 90 });
+
+    await put(`/api/jobs/${job.id}`, { scheduled_time: "13:30" }, auth);
+
+    expect(google.state.events.size).toBe(1);
+    const [[, event]] = [...google.state.events.entries()];
+    expect(event.start).toMatchObject({ dateTime: "2026-08-20T13:30:00", timeZone: "America/Vancouver" });
+    expect(event.end).toMatchObject({ dateTime: "2026-08-20T15:00:00", timeZone: "America/Vancouver" });
+  });
+
+  it("cancellation/delete is unaffected by a non-UTC business timezone", async () => {
+    const auth = await connectedAdmin();
+    await setBusinessTimezone("America/Vancouver");
+    const customer = await createCustomer();
+    const job = await createJob(customer.id, "2026-08-20", { scheduled_time: "11:00" });
+    expect(google.state.events.size).toBe(1);
+
+    await post(`/api/jobs/${job.id}/transition`, { to_status: "cancelled" }, auth);
+
+    expect(google.state.events.size).toBe(0);
+    const mapping = await queryDb<{ sync_status: string }>(
+      "SELECT sync_status FROM calendar_event_mappings WHERE job_id = ?", [job.id]
+    );
+    expect(mapping[0].sync_status).toBe("deleted");
+  });
+});
+
 describe("token refresh and reauthorization", () => {
   it("refreshes an expired access token transparently before syncing", async () => {
     google = mockGoogleApi();

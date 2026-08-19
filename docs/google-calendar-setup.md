@@ -75,17 +75,26 @@ openssl rand -base64 32
 Rotating this key invalidates every stored token — every user would need to
 reconnect.
 
-## 5. Business timezone
+## 5. Business timezone — REQUIRED, not optional
 
 Google Calendar events are built from each job's `scheduled_date`/`scheduled_time`
 plus an explicit IANA timezone (never a raw UTC offset, so events don't shift
 when viewed from another timezone). This is stored in the `_meta` table
 (`timezone`, defaults to `UTC`) since the app has no other timezone setting.
-Update it for your business's locale:
+
+**If you skip this step, every synced appointment will display at the wrong
+time in Google Calendar** — an appointment scheduled for 11:00 local time gets
+sent to Google labeled `UTC`, and Google Calendar then shows it converted into
+whatever timezone the viewing Google account is set to (e.g. an 11:00
+appointment appears as 04:00 to a Pacific-time viewer). This is not cosmetic —
+technicians and customers can act on the wrong appointment time. Update it for
+your business's locale before connecting any real calendar:
 
 ```sql
-UPDATE _meta SET value = 'America/New_York' WHERE key = 'timezone';
+UPDATE _meta SET value = 'America/Vancouver' WHERE key = 'timezone';
 ```
+
+(substitute your own IANA zone — `America/New_York`, `America/Toronto`, etc.)
 
 ## 6. Verify
 
