@@ -1,5 +1,6 @@
 import { useState } from "preact/hooks";
 import { useApp } from "../context";
+import { ConfirmDialog } from "./confirm-dialog";
 import { Plus, Trash2, Edit3 } from "lucide-preact";
 
 export function MaterialList() {
@@ -8,6 +9,8 @@ export function MaterialList() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState({ name: "", unit: "", unit_cost: 0, in_stock: 0 });
   const [newForm, setNewForm] = useState({ name: "", unit: "ea", unit_cost: 0, in_stock: 0 });
+  const [pendingDelete, setPendingDelete] = useState<{ id: number; name: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const startEdit = (m: typeof materials[0]) => {
     setEditForm({ name: m.name, unit: m.unit, unit_cost: m.unit_cost, in_stock: m.in_stock });
@@ -17,6 +20,19 @@ export function MaterialList() {
   const saveEdit = async (id: number) => {
     await updateMaterial(id, editForm);
     setEditingId(null);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try {
+      await deleteMaterial(pendingDelete.id);
+      setPendingDelete(null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const handleCreate = async () => {
@@ -94,7 +110,7 @@ export function MaterialList() {
                         <div class="action-btns">
                           <button class="btn-icon" onClick={() => startEdit(m)}><Edit3 size={14} /></button>
                           {isAgent && (
-                            <button class="btn-icon danger" onClick={() => deleteMaterial(m.id)}><Trash2 size={14} /></button>
+                            <button class="btn-icon danger" onClick={() => setPendingDelete({ id: m.id, name: m.name })}><Trash2 size={14} /></button>
                           )}
                         </div>
                       </td>
@@ -106,6 +122,18 @@ export function MaterialList() {
           </table>
         )}
       </div>
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete this material?"
+          message={`This permanently deletes ${pendingDelete.name}. This cannot be undone.`}
+          confirmLabel="Delete"
+          danger
+          submitting={deleting}
+          onConfirm={handleConfirmDelete}
+          onClose={() => setPendingDelete(null)}
+        />
+      )}
     </div>
   );
 }

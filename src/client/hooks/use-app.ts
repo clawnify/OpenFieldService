@@ -2,11 +2,11 @@ import { useState, useCallback, useEffect } from "preact/hooks";
 import { api } from "../api";
 import type {
   Job, Customer, Technician, ServiceType, Material, Invoice, Stats, PaginatedState,
-  CustomerLookup, TechnicianLookup, Priority,
+  CustomerLookup, TechnicianLookup, Priority, JobType, Role,
 } from "../types";
 import type { AppContextValue } from "../context";
 
-export function useAppState(isAgent: boolean, navigate: (to: string) => void): AppContextValue {
+export function useAppState(isAgent: boolean, navigate: (to: string) => void, role?: Role): AppContextValue {
   const [stats, setStats] = useState<Stats>({ jobs: 0, customers: 0, technicians: 0, service_types: 0, today_jobs: 0, upcoming_jobs: 0, completed_jobs: 0, revenue: 0, invoices_outstanding: 0, invoices_overdue: 0 });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -89,13 +89,21 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
     setMaterials(data.materials);
   }, []);
 
+  // Technicians get a full financial blackout server-side, including reads
+  // (see mem:project/fsm-upgrade-plan, Phase 5: canManageFinancials()) — a
+  // technician actor calling GET /api/invoices always gets a guaranteed 403.
+  // Skipping the call entirely for that role (rather than letting it throw)
+  // fixes a real bug this audit found: the initial-load Promise.all in the
+  // effect below used to reject on that 403, surfacing a bare "Forbidden"
+  // error banner to every technician immediately after login.
   const fetchInvoices = useCallback(async (pag: PaginatedState, status: string) => {
+    if (role === "technician") return;
     const params = new URLSearchParams({ page: String(pag.page), limit: String(pag.limit) });
     if (status) params.set("status", status);
     const data = await api<{ invoices: Invoice[]; total: number }>("GET", `/api/invoices?${params}`);
     setInvoices(data.invoices);
     setInvoicesPag((prev) => ({ ...prev, total: data.total }));
-  }, []);
+  }, [role]);
 
   const fetchSchedule = useCallback(async (start: string, end: string) => {
     const data = await api<{ jobs: Job[] }>("GET", `/api/schedule?start=${start}&end=${end}`);
@@ -158,7 +166,7 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
 
   const addJob = useCallback(async (data: {
     customer_id: number; technician_id?: number | null; service_type_id?: number | null;
-    scheduled_date: string; scheduled_time?: string; duration?: number; price?: number;
+    job_type?: JobType; scheduled_date: string; scheduled_time?: string; duration?: number; price?: number;
     address?: string; notes?: string; priority?: Priority; is_recurring?: number; recurrence_interval?: string;
   }) => {
     await api("POST", "/api/jobs", data);
@@ -168,6 +176,18 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
 
   const updateJob = useCallback(async (id: number, data: Partial<Job>) => {
     await api("PUT", `/api/jobs/${id}`, data);
+    await fetchJobs(jobsPag, jobsSearch, jobsStatusFilter);
+    if (selectedJob && selectedJob.id === id) {
+      const res = await api<{ job: Job }>("GET", `/api/jobs/${id}`);
+      setSelectedJob(res.job);
+    }
+    await Promise.all([fetchStats(), fetchSchedule(scheduleStart, scheduleEnd)]);
+  }, [jobsPag, jobsSearch, jobsStatusFilter, selectedJob, scheduleStart, scheduleEnd, fetchJobs, fetchStats, fetchSchedule]);
+
+  const transitionJob = useCallback(async (id: number, toStatus: string, extra?: {
+    reason?: string; eligibility_code?: string; eligibility_code_expiry?: string;
+  }) => {
+    await api("POST", `/api/jobs/${id}/transition`, { to_status: toStatus, ...extra });
     await fetchJobs(jobsPag, jobsSearch, jobsStatusFilter);
     if (selectedJob && selectedJob.id === id) {
       const res = await api<{ job: Job }>("GET", `/api/jobs/${id}`);
@@ -351,14 +371,12 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
 
   const setInvoicesPage = useCallback((page: number) => setInvoicesPag((p) => ({ ...p, page })), []);
 
-  const addInvoice = useCallback(async (data: { customer_id: number; job_id?: number | null; tax_rate?: number; notes?: string; due_date?: string; lines: { description: string; quantity: number; unit_price: number }[] }) => {
-    await api("POST", "/api/invoices", data);
-    await fetchInvoices(invoicesPag, invoicesStatusFilter);
-    await fetchStats();
-  }, [invoicesPag, invoicesStatusFilter, fetchInvoices, fetchStats]);
-
-  const updateInvoice = useCallback(async (id: number, data: Partial<Invoice>) => {
-    await api("PUT", `/api/invoices/${id}`, data);
+  /** Every financial mutation (issue/void/rebate/payment, plus the pre-existing
+   *  update/delete) needs the exact same three-way refresh — the list, the
+   *  currently-selected invoice detail if it's the one that changed, and the
+   *  dashboard stats (outstanding/overdue counts). Centralized once instead of
+   *  repeated per action. */
+  const refreshInvoiceState = useCallback(async (id: number) => {
     await fetchInvoices(invoicesPag, invoicesStatusFilter);
     if (selectedInvoice && selectedInvoice.id === id) {
       const res = await api<{ invoice: Invoice }>("GET", `/api/invoices/${id}`);
@@ -366,6 +384,45 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
     }
     await fetchStats();
   }, [invoicesPag, invoicesStatusFilter, selectedInvoice, fetchInvoices, fetchStats]);
+
+  const addInvoice = useCallback(async (data: { customer_id: number; job_id?: number | null; tax_rate?: number; notes?: string; due_date?: string; lines: { description: string; quantity: number; unit_price_cents: number }[] }) => {
+    await api("POST", "/api/invoices", data);
+    await fetchInvoices(invoicesPag, invoicesStatusFilter);
+    await fetchStats();
+  }, [invoicesPag, invoicesStatusFilter, fetchInvoices, fetchStats]);
+
+  const updateInvoice = useCallback(async (id: number, data: { notes?: string; due_date?: string }) => {
+    await api("PUT", `/api/invoices/${id}`, data);
+    await refreshInvoiceState(id);
+  }, [refreshInvoiceState]);
+
+  const issueInvoice = useCallback(async (id: number) => {
+    await api("POST", `/api/invoices/${id}/issue`, {});
+    await refreshInvoiceState(id);
+  }, [refreshInvoiceState]);
+
+  const voidInvoice = useCallback(async (id: number, reason: string) => {
+    await api("POST", `/api/invoices/${id}/void`, { reason });
+    await refreshInvoiceState(id);
+  }, [refreshInvoiceState]);
+
+  const setInvoiceRebate = useCallback(async (id: number, rebateAmountCents: number) => {
+    await api("PUT", `/api/invoices/${id}/rebate`, { rebate_amount_cents: rebateAmountCents });
+    await refreshInvoiceState(id);
+  }, [refreshInvoiceState]);
+
+  const recordPayment = useCallback(async (
+    invoiceId: number,
+    data: { amount_cents: number; payer_type: string; method: string; reference?: string; notes?: string; paid_at?: string }
+  ) => {
+    await api("POST", `/api/invoices/${invoiceId}/payments`, data);
+    await refreshInvoiceState(invoiceId);
+  }, [refreshInvoiceState]);
+
+  const voidPayment = useCallback(async (paymentId: number, invoiceId: number, reason: string) => {
+    await api("POST", `/api/payments/${paymentId}/void`, { reason });
+    await refreshInvoiceState(invoiceId);
+  }, [refreshInvoiceState]);
 
   const deleteInvoice = useCallback(async (id: number) => {
     await api("DELETE", `/api/invoices/${id}`);
@@ -390,7 +447,7 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
   return {
     navigate, isAgent, stats,
     jobs, jobsPag, setJobsPage, jobsSearch, setJobsSearch, jobsStatusFilter, setJobsStatusFilter,
-    addJob, updateJob, deleteJob,
+    addJob, updateJob, transitionJob, deleteJob,
     selectedJob, selectJob, addJobNote, deleteJobNote,
     addChecklistItem, toggleChecklistItem, deleteChecklistItem,
     addJobMaterial, deleteJobMaterial, createInvoiceFromJob,
@@ -402,6 +459,7 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
     materials, addMaterial, updateMaterial, deleteMaterial,
     invoices, invoicesPag, setInvoicesPage, invoicesStatusFilter, setInvoicesStatusFilter,
     selectedInvoice, selectInvoice, addInvoice, updateInvoice, deleteInvoice,
+    issueInvoice, voidInvoice, setInvoiceRebate, recordPayment, voidPayment,
     scheduleJobs, scheduleStart, scheduleEnd, setScheduleRange,
     customerLookup, technicianLookup,
     loading, error, setError,

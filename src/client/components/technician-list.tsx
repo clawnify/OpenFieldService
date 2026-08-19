@@ -1,13 +1,16 @@
 import { useState } from "preact/hooks";
 import { useApp } from "../context";
 import { CreateTechnician } from "./create-technician";
+import { ConfirmDialog } from "./confirm-dialog";
 import { Plus, Trash2, Edit3 } from "lucide-preact";
 
 export function TechnicianList() {
-  const { technicians, updateTechnician, deleteTechnician, isAgent } = useApp();
+  const { technicians, updateTechnician, deleteTechnician, isAgent, setError } = useApp();
   const [showCreate, setShowCreate] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState({ name: "", email: "", phone: "", color: "" });
+  const [pendingDelete, setPendingDelete] = useState<{ id: number; name: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const startEdit = (t: typeof technicians[0]) => {
     setEditForm({ name: t.name, email: t.email, phone: t.phone, color: t.color });
@@ -17,6 +20,19 @@ export function TechnicianList() {
   const saveEdit = async (id: number) => {
     await updateTechnician(id, editForm);
     setEditingId(null);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try {
+      await deleteTechnician(pendingDelete.id);
+      setPendingDelete(null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -92,7 +108,7 @@ export function TechnicianList() {
                         <div class="action-btns">
                           <button class="btn-icon" onClick={() => startEdit(t)}><Edit3 size={14} /></button>
                           {isAgent && (
-                            <button class="btn-icon danger" onClick={() => deleteTechnician(t.id)}><Trash2 size={14} /></button>
+                            <button class="btn-icon danger" onClick={() => setPendingDelete({ id: t.id, name: t.name })}><Trash2 size={14} /></button>
                           )}
                         </div>
                       </td>
@@ -106,6 +122,18 @@ export function TechnicianList() {
       </div>
 
       {showCreate && <CreateTechnician onClose={() => setShowCreate(false)} />}
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete this technician?"
+          message={`This permanently deletes ${pendingDelete.name}. This cannot be undone.`}
+          confirmLabel="Delete"
+          danger
+          submitting={deleting}
+          onConfirm={handleConfirmDelete}
+          onClose={() => setPendingDelete(null)}
+        />
+      )}
     </div>
   );
 }

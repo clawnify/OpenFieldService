@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "pnpm@11.21.0",
   "scripts": {
-    "dev": "wrangler d1 execute open-fieldservice-db --local --file=src/server/schema.sql && concurrently -n ui,api -c cyan,green \"vite\" \"wrangler dev --port 8787\"",
+    "dev": "wrangler d1 migrations apply open-fieldservice-db --local && concurrently -n ui,api -c cyan,green \"vite\" \"wrangler dev --port 8787\"",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

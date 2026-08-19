@@ -5,3 +5,7 @@ data.db-shm
 data.db-wal
 .wrangler/
 coverage/
+.dev.vars
+.dev-server.stdout.log
+.dev-server.stderr.log
+.serena/

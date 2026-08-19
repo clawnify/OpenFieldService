@@ -7,3 +7,39 @@ compatibility_flags = ["nodejs_compat"]
 binding = "DB"
 database_name = "open-fieldservice-db"
 database_id = "local"
+
+# Technician compliance media (pre/post-work photos, customer signatures) — see
+# src/server/storage.ts. Worker-proxied upload/download only; never a public
+# bucket, never credentials sent to the client. Before deploying for real,
+# create the bucket once with `wrangler r2 bucket create open-fieldservice-media`
+# — local dev/test use Miniflare's local R2 emulation and need no cloud setup.
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "open-fieldservice-media"
+
+# Google Calendar integration — client ID and redirect URI aren't secret and can
+# live here. GOOGLE_CLIENT_SECRET and TOKEN_ENCRYPTION_KEY are secrets: set them
+# in .dev.vars locally (see .dev.vars.example) and with `wrangler secret put` in
+# production. See docs/google-calendar-setup.md for how to obtain these.
+#
+# RESEND_FROM_ADDRESS (Phase 9.2) is the notification "from" address Resend's
+# send API requires — not a credential, so (like the Google vars above) it
+# lives here rather than as a secret. RESEND_API_KEY / TWILIO_ACCOUNT_SID /
+# TWILIO_AUTH_TOKEN / TWILIO_FROM_NUMBER ARE secrets: set them in .dev.vars
+# locally and with `wrangler secret put` in production — never here. Leaving
+# RESEND_FROM_ADDRESS blank (like GOOGLE_CLIENT_ID above) means email
+# delivery just isn't configured yet; the dispatcher treats that as a normal,
+# retryable "provider_not_configured" outcome, never a crash.
+[vars]
+GOOGLE_CLIENT_ID = ""
+GOOGLE_REDIRECT_URI = "http://localhost:8787/api/integrations/google-calendar/callback"
+RESEND_FROM_ADDRESS = ""
+
+# Phase 9.2 — drains the notification outbox and scans for day-before
+# reminders. Every minute so the documented 1-minute first-retry backoff
+# (see src/server/notification-dispatcher.ts) is actually honored promptly;
+# the reminder scan itself is idempotent (dedupe-keyed) so running it this
+# often is safe — it's a no-op after the first successful enqueue each
+# business day. Not deployed by this phase (see the Phase 9.2 report).
+[triggers]
+crons = ["* * * * *"]

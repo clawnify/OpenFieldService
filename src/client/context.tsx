@@ -2,7 +2,7 @@ import { createContext } from "preact";
 import { useContext } from "preact/hooks";
 import type {
   Job, Customer, Technician, ServiceType, Material, Invoice, Stats, PaginatedState,
-  CustomerLookup, TechnicianLookup, Priority,
+  CustomerLookup, TechnicianLookup, Priority, JobType,
 } from "./types";
 
 export interface AppContextValue {
@@ -22,6 +22,7 @@ export interface AppContextValue {
     customer_id: number;
     technician_id?: number | null;
     service_type_id?: number | null;
+    job_type?: JobType;
     scheduled_date: string;
     scheduled_time?: string;
     duration?: number;
@@ -33,6 +34,9 @@ export interface AppContextValue {
     recurrence_interval?: string;
   }) => Promise<void>;
   updateJob: (id: number, data: Partial<Job>) => Promise<void>;
+  transitionJob: (id: number, toStatus: string, extra?: {
+    reason?: string; eligibility_code?: string; eligibility_code_expiry?: string;
+  }) => Promise<void>;
   deleteJob: (id: number) => Promise<void>;
 
   // Job detail
@@ -86,9 +90,16 @@ export interface AppContextValue {
   setInvoicesStatusFilter: (s: string) => void;
   selectedInvoice: Invoice | null;
   selectInvoice: (id: number | null) => Promise<void>;
-  addInvoice: (data: { customer_id: number; job_id?: number | null; tax_rate?: number; notes?: string; due_date?: string; lines: { description: string; quantity: number; unit_price: number }[] }) => Promise<void>;
-  updateInvoice: (id: number, data: Partial<Invoice>) => Promise<void>;
+  addInvoice: (data: { customer_id: number; job_id?: number | null; tax_rate?: number; notes?: string; due_date?: string; lines: { description: string; quantity: number; unit_price_cents: number }[] }) => Promise<void>;
+  updateInvoice: (id: number, data: { notes?: string; due_date?: string }) => Promise<void>;
   deleteInvoice: (id: number) => Promise<void>;
+  issueInvoice: (id: number) => Promise<void>;
+  voidInvoice: (id: number, reason: string) => Promise<void>;
+  setInvoiceRebate: (id: number, rebateAmountCents: number) => Promise<void>;
+  recordPayment: (invoiceId: number, data: {
+    amount_cents: number; payer_type: string; method: string; reference?: string; notes?: string; paid_at?: string;
+  }) => Promise<void>;
+  voidPayment: (paymentId: number, invoiceId: number, reason: string) => Promise<void>;
 
   // Schedule
   scheduleJobs: Job[];

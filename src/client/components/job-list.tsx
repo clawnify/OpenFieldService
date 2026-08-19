@@ -1,17 +1,15 @@
 import { useState } from "preact/hooks";
 import { useApp } from "../context";
+import { useAuth } from "../auth-context";
 import { JobRow } from "./job-row";
 import { CreateJob } from "./create-job";
 import { Pagination } from "./pagination";
-import { Plus, Search } from "lucide-preact";
+import { STATUS_LABELS } from "./status-badge";
+import { Plus, Search, X } from "lucide-preact";
 
 const STATUSES: { value: string; label: string }[] = [
   { value: "", label: "All" },
-  { value: "scheduled", label: "Scheduled" },
-  { value: "confirmed", label: "Confirmed" },
-  { value: "in_progress", label: "In Progress" },
-  { value: "completed", label: "Completed" },
-  { value: "cancelled", label: "Cancelled" },
+  ...Object.entries(STATUS_LABELS).map(([value, label]) => ({ value, label })),
 ];
 
 export function JobList() {
@@ -19,27 +17,47 @@ export function JobList() {
     jobs, jobsPag, setJobsPage, jobsSearch, setJobsSearch,
     jobsStatusFilter, setJobsStatusFilter, isAgent,
   } = useApp();
+  const { user } = useAuth();
+  // Phase 7.2 security fix: POST /api/jobs now 403s a technician actor
+  // server-side (mem:risks/job-creation-rbac) — hiding the button is a UX
+  // improvement only, the server enforcement is what actually matters.
+  const canCreateJob = user?.role !== "technician";
   const [showCreate, setShowCreate] = useState(false);
 
   return (
     <div class="page">
       <div class="page-header">
         <h1>Jobs</h1>
-        <button class="btn btn-primary" onClick={() => setShowCreate(true)}>
-          <Plus size={16} /> New Job
-        </button>
+        {canCreateJob && (
+          <button class="btn btn-primary" onClick={() => setShowCreate(true)}>
+            <Plus size={16} /> New Job
+          </button>
+        )}
+      </div>
+
+      <div class="jobs-search-row">
+        <Search size={18} class="jobs-search-icon" aria-hidden="true" />
+        <input
+          type="text"
+          class="jobs-search-input"
+          placeholder="Search jobs by customer, job number, address, or phone..."
+          aria-label="Search jobs by customer, job number, address, or phone"
+          value={jobsSearch}
+          onInput={(e) => setJobsSearch((e.target as HTMLInputElement).value)}
+        />
+        {jobsSearch && (
+          <button
+            type="button"
+            class="jobs-search-clear"
+            aria-label="Clear search"
+            onClick={() => setJobsSearch("")}
+          >
+            <X size={16} />
+          </button>
+        )}
       </div>
 
       <div class="toolbar">
-        <div class="search-box">
-          <Search size={14} class="search-icon" />
-          <input
-            type="text"
-            placeholder="Search jobs..."
-            value={jobsSearch}
-            onInput={(e) => setJobsSearch((e.target as HTMLInputElement).value)}
-          />
-        </div>
         <div class="filter-group">
           {STATUSES.map((s) => (
             <button

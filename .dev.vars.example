@@ -1,0 +1,20 @@
+# Copy this file to .dev.vars (gitignored) and fill in real values for local
+# development. Never commit .dev.vars or real credentials.
+#
+# See docs/google-calendar-setup.md for how to create these in Google Cloud.
+
+GOOGLE_CLIENT_SECRET=
+
+# Base64-encoded 32-byte key used to encrypt OAuth tokens at rest.
+# Generate one with: openssl rand -base64 32
+TOKEN_ENCRYPTION_KEY=
+
+# Phase 9.2 notification delivery — Resend (email) and Twilio (SMS). Leaving
+# any of these blank is safe: the dispatcher treats an unconfigured channel
+# as a normal, retryable "provider_not_configured" outcome, never a crash.
+# RESEND_FROM_ADDRESS is NOT a secret — set it in wrangler.toml's [vars]
+# instead, see the comment there.
+RESEND_API_KEY=
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_FROM_NUMBER=

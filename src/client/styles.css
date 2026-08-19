@@ -174,6 +174,63 @@ body {
   align-items: center;
 }
 
+/* ── Jobs search (scoped to job-list.tsx — a deliberately more prominent,
+ *  easier-to-discover search bar than the generic .search-box other list
+ *  pages use, per the "Jobs search" UI review; other pages' .search-box is
+ *  untouched) ────────────────────────────────────────────────────────── */
+
+.jobs-search-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.jobs-search-icon {
+  position: absolute;
+  left: 14px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.jobs-search-input {
+  width: 100%;
+  padding: 12px 40px 12px 42px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-family: var(--font);
+  background: var(--card-bg);
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.jobs-search-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-light);
+}
+
+.jobs-search-clear {
+  position: absolute;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.jobs-search-clear:hover { background: var(--row-hover); color: var(--text); }
+
+@media (max-width: 640px) {
+  .jobs-search-input { padding: 11px 38px 11px 40px; font-size: 16px; } /* 16px avoids iOS auto-zoom on focus */
+}
+
 /* ── Toolbar ─────────────────────────────────────────────────────────── */
 
 .toolbar {
@@ -251,6 +308,13 @@ body {
   font-size: 13px;
 }
 
+/* .card's overflow:hidden clips a wide table instead of letting it scroll —
+ * see the Phase 7.1 fix (.schedule-list-table-wrap) for the original
+ * discovery of this. Generic wrapper for any card-hosted table with more
+ * columns than comfortably fit at phone width (e.g. the Lead list, Phase
+ * 8.4) — apply as a child of .card, around .table. */
+.table-wrap { overflow-x: auto; }
+
 .table th {
   text-align: left;
   padding: 10px 12px;
@@ -277,6 +341,9 @@ body {
 .text-bold { font-weight: 600; }
 .text-muted { color: var(--text-muted); }
 .text-right { text-align: right; }
+
+.link { color: var(--primary); cursor: pointer; }
+.link:hover { text-decoration: underline; }
 
 .identifier {
   font-family: 'SF Mono', 'Fira Code', monospace;
@@ -440,6 +507,78 @@ body {
   outline: none;
 }
 
+.compliance-item {
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.compliance-item:first-of-type { border-top: none; padding-top: 0; }
+
+.compliance-item-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* The trailing span carries dynamic, unbounded-length text (a signer's name,
+ * a photo count) — push it right when there's room but let it wrap onto its
+ * own line rather than overflow when there isn't, instead of forcing a
+ * min-width on the sidebar to accommodate the longest possible value. */
+.compliance-item-header span:last-child {
+  margin-left: auto;
+  font-weight: 400;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.compliance-photo-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.compliance-photo-thumb {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.compliance-photo-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.compliance-photo-thumb .btn-icon {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  background: rgba(255, 255, 255, 0.85);
+  padding: 2px;
+  opacity: 1;
+}
+
+.compliance-summary { margin-top: 8px; font-size: 12px; }
+
+.signature-canvas {
+  /* Sits directly in the modal (no padded wrapper), unlike the form-grid/
+   * modal-footer around it — inset it to the same 20px the modal already
+   * uses elsewhere so the drawable area doesn't start right at the modal's
+   * edge (drawing at the very edge is easy to clip on a touch device). */
+  display: block;
+  width: calc(100% - 40px);
+  height: 160px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  touch-action: none;
+  background: #fff;
+  margin: 8px 20px;
+}
+
 .detail-title-row {
   display: flex;
   align-items: center;
@@ -495,6 +634,55 @@ body {
   color: var(--text-secondary);
   white-space: pre-wrap;
   line-height: 1.6;
+}
+
+/* Compliance checklist (job-compliance.tsx) renders its report form via the
+ * shared .form-grid, but here it's already nested inside a padded
+ * .detail-sidebar-section — drop the modal-oriented 20px padding so the
+ * fields use the width actually available instead of compounding padding
+ * on narrow screens, where every pixel of width matters most. */
+.compliance-item .form-grid { padding: 0; gap: 10px; }
+.compliance-item .action-btns { flex-wrap: wrap; }
+
+/* Tablet: the fixed 260px sidebar (which hosts the Phase 4 compliance
+ * checklist) still fits beside the main column down to ~900px, but gets
+ * cramped below that — stack it under the main content instead of letting
+ * it squeeze the job details into an unreadably narrow strip. */
+@media (max-width: 900px) {
+  .detail-layout { flex-direction: column; }
+  .detail-sidebar { width: 100%; }
+  .detail-meta-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+}
+
+/* Phone: tighten page chrome and enlarge the specific touch targets a
+ * technician actually uses in the field (photo capture/delete, report
+ * save/submit, signature capture, status transitions) without touching the
+ * base .btn/.btn-icon classes used everywhere else in the app. */
+@media (max-width: 640px) {
+  .page { padding: 16px; }
+  .detail-meta-grid { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
+
+  .compliance-item .btn { min-height: 40px; padding: 9px 14px; font-size: 13px; }
+  .compliance-photo-thumb { width: 76px; height: 76px; }
+  .compliance-photo-thumb .btn-icon { width: 26px; height: 26px; }
+  .signature-canvas { height: 200px; }
+
+  .status-btn { padding: 10px 12px; font-size: 13px; }
+
+  /* Phase 8.4 — Lead create/edit forms; same 16px-avoids-iOS-zoom pattern
+   * already used by .schedule-list-filters/.schedule-edit-grid (Phase 7).
+   * Scoped to .lead-form specifically rather than widening the shared
+   * .form-group rule globally, which would silently change every other
+   * existing form's mobile sizing (Customers, Jobs) — out of this phase's
+   * scope. */
+  .lead-form input, .lead-form select, .lead-form textarea { font-size: 16px; }
+  /* .form-grid is a fixed 2-column grid at every viewport width app-wide —
+   * a pre-existing gap affecting every form in this app (Customers, Jobs),
+   * not something Phase 8.4 introduces. Collapsing it globally would change
+   * every other form's narrow-viewport layout, out of scope here — scoped
+   * to .lead-form only so the new Lead forms are provably safe down to a
+   * 390px phone width without touching anything else. */
+  .lead-form .form-grid { grid-template-columns: 1fr; }
 }
 
 /* ── Status Buttons ──────────────────────────────────────────────────── */
@@ -673,6 +861,17 @@ body {
   border-top: 1px solid var(--border);
 }
 
+/* Scrolls independently between a fixed .modal-header and .modal-footer, so
+ * a long form (e.g. New Customer) never pushes the footer's Cancel/Create
+ * buttons out of reach — the outer .modal's own max-height/overflow-y stay
+ * as a fallback safety net, untouched, so every other modal that doesn't
+ * opt into this class is completely unaffected. */
+.modal-body-scroll {
+  max-height: 60vh;
+  overflow-y: auto;
+  padding-bottom: 8px;
+}
+
 /* ── Forms ────────────────────────────────────────────────────────────── */
 
 .form-grid {
@@ -681,6 +880,102 @@ body {
   grid-template-columns: 1fr 1fr;
   gap: 14px;
 }
+
+/* Grouped form sections (New/Edit Customer) — a labeled heading plus a
+ * consistent 20px inset applied ONCE at the section level, so a plain
+ * .checkbox-row (which isn't itself a .form-grid) still lines up with the
+ * fields above/below it instead of sitting flush against the modal edge
+ * (this was the cause of the "rebate checkbox looks detached" issue — it
+ * had no inset of its own before). */
+.form-section { padding: 14px 20px; }
+.form-section + .form-section { border-top: 1px solid var(--border-subtle); }
+.form-section-heading {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+.form-section .form-grid { padding: 0; }
+
+/* ── Customer search select (customer-search-select.tsx) ────────────────
+ * Searchable combobox for "Referred By Customer" — modeled on the existing
+ * .search-box / .jobs-search-input patterns above rather than introducing
+ * a new input style. */
+
+.customer-select { position: relative; }
+
+.customer-select-chosen {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  background: var(--card-bg);
+}
+
+.customer-select-input-row { position: relative; }
+
+.customer-select-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+}
+
+.customer-select-input-row input {
+  width: 100%;
+  padding: 7px 12px 7px 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: var(--font);
+  background: var(--card-bg);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.customer-select-input-row input:focus { border-color: var(--primary); }
+
+.customer-select-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+}
+
+.customer-select-empty {
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.customer-select-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: none;
+  background: none;
+  font-size: 13px;
+  font-family: var(--font);
+  cursor: pointer;
+}
+
+.customer-select-option:hover,
+.customer-select-option.highlighted { background: var(--row-hover); }
 
 .form-group { display: flex; flex-direction: column; gap: 4px; }
 .form-group.full-width { grid-column: 1 / -1; }
@@ -798,11 +1093,36 @@ body {
   flex-shrink: 0;
 }
 
-/* ── Schedule Grid ───────────────────────────────────────────────────── */
+/* ── Schedule: month header ──────────────────────────────────────────── */
+
+.schedule-month-label {
+  font-size: 14px;
+  font-weight: 600;
+  min-width: 160px;
+  text-align: center;
+}
+
+/* ── Schedule: month grid ────────────────────────────────────────────── */
+
+.schedule-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  margin-bottom: 6px;
+}
+
+.schedule-weekday {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 0 4px 4px;
+}
 
 .schedule-grid {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
+  grid-auto-rows: minmax(110px, auto);
   gap: 1px;
   background: var(--border);
   border: 1px solid var(--border);
@@ -812,37 +1132,41 @@ body {
 
 .schedule-day {
   background: var(--card-bg);
-  min-height: 160px;
   display: flex;
   flex-direction: column;
+  cursor: pointer;
+  transition: background 0.15s;
 }
 
+.schedule-day:hover { background: var(--row-hover); }
 .schedule-day.today { background: #f0fdf4; }
+.schedule-day.today:hover { background: #e6fbee; }
+
+/* Phase 7.1 fix: .schedule-day was previously mouse-only (no tabIndex, no
+ * focus style) — a keyboard user could not open DayDetail at all. */
+.schedule-day:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+
+.schedule-day.other-month { background: var(--border-subtle); }
+.schedule-day.other-month:hover { background: var(--border-subtle); }
+.schedule-day.other-month .schedule-day-num { color: var(--text-muted); }
 
 .schedule-day-header {
-  padding: 8px 10px;
+  padding: 6px 8px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.schedule-day-name {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  color: var(--text-muted);
+  justify-content: flex-end;
 }
 
 .schedule-day-num {
   font-size: 13px;
   font-weight: 600;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
+  flex-shrink: 0;
 }
 
 .schedule-day-num.today {
@@ -851,7 +1175,7 @@ body {
 }
 
 .schedule-day-jobs {
-  padding: 4px;
+  padding: 0 4px 4px;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -863,7 +1187,7 @@ body {
   display: block;
   width: 100%;
   text-align: left;
-  padding: 4px 8px;
+  padding: 3px 6px;
   border: none;
   background: var(--bg);
   border-left: 3px solid var(--primary);
@@ -875,16 +1199,309 @@ body {
 
 .schedule-job:hover { background: var(--border-subtle); }
 
-.schedule-job-time { font-size: 10px; font-weight: 600; color: var(--text-muted); }
-.schedule-job-title { font-size: 12px; font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.schedule-job-service { font-size: 10px; color: var(--text-secondary); }
-.schedule-job-tech { font-size: 10px; color: var(--text-muted); }
+.schedule-job-time {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+/* Short abbreviation badge (STATUS_ABBR) — deliberately replaces a bare
+ * color dot: color alone is not an accessible status indicator (Phase 7
+ * accessibility fix — a sighted color-blind user could not previously tell
+ * "scheduled" from "in_progress" on the month grid at all). aria-label on
+ * the element itself carries the full status name for screen readers. */
+.schedule-job-status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 3px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.schedule-job-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.schedule-job-customer {
+  font-size: 10px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.schedule-job-tech {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.schedule-more {
+  border: none;
+  background: none;
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  padding: 2px 6px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.schedule-more:hover { background: var(--border-subtle); }
 
 .schedule-empty {
   font-size: 11px;
   color: var(--text-muted);
-  padding: 8px;
+  padding: 6px;
   text-align: center;
+}
+
+@media (max-width: 900px) {
+  .schedule-grid { grid-auto-rows: minmax(88px, auto); }
+  .schedule-job-customer, .schedule-job-tech { display: none; }
+}
+
+@media (max-width: 640px) {
+  .schedule-weekday { font-size: 10px; }
+  .schedule-grid { grid-auto-rows: minmax(60px, auto); }
+  .schedule-job-title { font-size: 10px; }
+}
+
+/* Drag-and-drop staging target feedback (Phase 7) — native HTML5 DnD, admin/
+ * dispatcher only (never rendered draggable for a technician actor). Drop
+ * itself never mutates; it only opens ScheduleEditModal pre-filled with the
+ * target date, still requiring its own Review → Confirm step. */
+.schedule-day.drag-over, .schedule-week-col.drag-over {
+  outline: 2px dashed var(--primary);
+  outline-offset: -2px;
+  background: var(--primary-light);
+}
+
+/* ── Schedule: view toggle (Month/Week/Day/List) ────────────────────────
+ * Phase 7 — Advanced Scheduler. Shares .btn's visual language rather than
+ * introducing a second control style. */
+
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.view-toggle-btn {
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  background: var(--card-bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font);
+  border-right: 1px solid var(--border);
+}
+
+.view-toggle-btn:last-child { border-right: none; }
+.view-toggle-btn:hover { background: var(--row-hover); }
+.view-toggle-btn.active { background: var(--primary); color: #fff; }
+
+/* ── Schedule: List / Dispatcher view ───────────────────────────────────
+ * Filters the already date-range-scoped scheduleJobs client-side — no new
+ * API call, reuses the same GET /api/schedule fetch every other view uses. */
+
+.schedule-list-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 14px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* Phase 7.1 fix: the List view's table has more columns (up to 8, with the
+ * Reschedule action) than most tables elsewhere in the app and the shared
+ * .card class uses `overflow: hidden` — without this wrapper the table
+ * would silently CLIP on narrow viewports instead of scrolling. Scoped to
+ * just this table rather than changing .card globally, which every other
+ * list page in the app also uses and which this phase must not risk
+ * altering behavior for. */
+.schedule-list-table-wrap { overflow-x: auto; }
+
+/* ── Schedule: Week view ─────────────────────────────────────────────── */
+
+.schedule-week-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 8px;
+}
+
+.schedule-week-col {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: outline 0.1s;
+}
+
+.schedule-week-col.today { background: #f0fdf4; border-color: #bbf7d0; }
+
+.schedule-week-col-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.schedule-week-col-jobs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.schedule-week-add {
+  align-self: stretch;
+  justify-content: center;
+}
+
+/* ── Schedule: Day view + shared row card (Week/Day) ────────────────────
+ * Richer than a month tile — real screen space, so status/priority/address
+ * are shown as visible text/icons, not abbreviated. */
+
+.schedule-day-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 640px;
+}
+
+.schedule-row {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: box-shadow 0.15s;
+}
+
+.schedule-row:hover, .schedule-row:focus-visible { box-shadow: var(--shadow); }
+.schedule-row:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.schedule-row.compact { padding: 6px 8px; font-size: 12px; gap: 2px; }
+
+.schedule-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.schedule-row-address {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.schedule-row-reschedule {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+@media (max-width: 900px) {
+  .schedule-week-grid { grid-template-columns: repeat(7, minmax(120px, 1fr)); overflow-x: auto; }
+}
+
+@media (max-width: 640px) {
+  /* A 7-column week grid cannot fit a phone width without either clipping
+   * or horizontal scroll — deliberately choosing a horizontally-scrollable
+   * strip (each day column keeps a usable minimum width) over shrinking
+   * columns until their content clips, per the "no clipped controls" and
+   * "avoid horizontal overflow where practical" mobile requirements: this
+   * is the one scheduler surface where a full 7-day grid genuinely cannot
+   * avoid it, so the column itself becomes the deliberate scroll container
+   * rather than the whole page. */
+  .schedule-week-grid { grid-template-columns: repeat(7, minmax(140px, 1fr)); }
+  .view-toggle-btn { padding: 8px 10px; font-size: 12px; }
+  .schedule-list-filters { grid-template-columns: 1fr 1fr; }
+  .schedule-list-filters input, .schedule-list-filters select { font-size: 16px; } /* avoid iOS auto-zoom */
+  .schedule-edit-grid input, .schedule-edit-grid select { font-size: 16px; } /* avoid iOS auto-zoom */
+  .schedule-row-reschedule { min-height: 38px; padding: 8px 12px; }
+}
+
+/* ── Schedule: day detail modal ──────────────────────────────────────── */
+
+.day-detail-body {
+  padding: 8px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.day-detail-job {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.day-detail-job:hover { background: var(--row-hover); border-color: var(--primary); }
+
+.day-detail-job-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.day-detail-job-time {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+
+.day-detail-job-address {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
 }
 
 /* ── Checklist ───────────────────────────────────────────────────────── */
@@ -930,3 +1547,557 @@ body {
 
 [data-agent] .btn-icon { opacity: 1 !important; }
 [data-agent] .table-row .action-btns { visibility: visible !important; }
+
+/* ── Auth ────────────────────────────────────────────────────────────── */
+
+.auth-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 360px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 28px 24px;
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 14px;
+  margin-bottom: 20px;
+}
+
+.auth-title { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+.auth-subtitle { font-size: 13px; color: var(--text-secondary); margin-bottom: 18px; }
+
+.auth-card form .form-group { margin-bottom: 14px; }
+
+.auth-error {
+  background: #fef2f2;
+  color: var(--danger);
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+
+.password-input-wrap { position: relative; display: flex; }
+.password-input-wrap input { flex: 1; padding-right: 34px; }
+
+.password-toggle {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 6px;
+  display: flex;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+}
+
+.password-toggle:hover { color: var(--text); background: var(--row-hover); }
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  margin-bottom: 16px;
+}
+
+.checkbox-row input { width: auto; }
+
+.btn-block { width: 100%; justify-content: center; }
+
+/* ── Confirm dialog ──────────────────────────────────────────────────── */
+
+.confirm-body { padding: 4px 20px 20px; font-size: 13px; color: var(--text-secondary); }
+
+/* ── Global Settings (business-friendly UI) ─────────────────────────────
+ * Scoped to global-settings.tsx and eligibility-tracker.tsx's help affordance. */
+
+.settings-category { margin-bottom: 24px; }
+
+.settings-card { padding: 16px; margin-bottom: 12px; }
+
+.settings-group-heading {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.setting-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+
+.setting-row:first-of-type { border-top: none; padding-top: 8px; }
+
+.setting-row-main { flex: 1; min-width: 220px; }
+
+.setting-row-label {
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.setting-help-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: help;
+  border-radius: 50%;
+  padding: 0;
+}
+
+.setting-help-icon:hover { color: var(--primary); background: var(--row-hover); }
+
+.setting-row-description {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 2px 0 6px;
+  max-width: 480px;
+}
+
+.setting-row-value { font-size: 16px; font-weight: 700; color: var(--text); }
+
+.setting-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.setting-option-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+
+.setting-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: var(--border-subtle);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.setting-option-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.setting-option-editor-row { display: flex; gap: 6px; align-items: center; }
+.setting-option-editor-row input { flex: 1; }
+
+.setting-option-add-row { display: flex; gap: 6px; }
+.setting-option-add-row input { flex: 1; }
+
+.history-list {
+  padding: 8px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.history-entry {
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.history-entry-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--primary); margin-bottom: 4px; }
+.history-entry-value { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+
+@media (max-width: 640px) {
+  .setting-row { flex-direction: column; align-items: stretch; }
+  .setting-row-actions { justify-content: flex-start; }
+  .setting-row-description { max-width: none; }
+}
+
+/* ── Role badge ──────────────────────────────────────────────────────── */
+
+.role-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* ── Sidebar user footer ─────────────────────────────────────────────── */
+
+.sidebar-user {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.sidebar-user-info { min-width: 0; }
+
+.sidebar-user-name {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-user-role { font-size: 11px; color: var(--text-muted); }
+
+.sidebar-user-actions { display: flex; gap: 2px; flex-shrink: 0; }
+
+/* ── Google Calendar integration ─────────────────────────────────────── */
+
+.inline-notice {
+  background: var(--primary-light);
+  color: var(--primary-hover);
+  border: 1px solid #bbf7d0;
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+
+.inline-error {
+  background: #fef2f2;
+  color: var(--danger);
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-size: 13px;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-link {
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
+.integration-card { padding: 24px; margin-bottom: 16px; }
+
+.integration-connect {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 24px 16px;
+  gap: 6px;
+}
+
+.integration-connect-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--primary-light);
+  color: var(--primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+
+.integration-connect h2 { font-size: 16px; font-weight: 700; }
+.integration-connect p { max-width: 420px; font-size: 13px; margin-bottom: 8px; }
+
+.integration-status-row {
+  display: flex;
+  gap: 32px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+
+.integration-status-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.integration-status-value {
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.integration-actions { display: flex; gap: 8px; }
+
+.sync-result {
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: var(--row-hover);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.integration-settings { padding: 20px; }
+.integration-settings h3 { font-size: 14px; font-weight: 700; margin-bottom: 12px; }
+.integration-settings-footer { display: flex; justify-content: flex-end; margin-top: 4px; }
+
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.google-sync-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  flex-wrap: wrap;
+}
+
+.google-sync-badge.synced { background: var(--primary-light); color: var(--primary-hover); }
+.google-sync-badge.failed { background: #fef2f2; color: var(--danger); }
+.google-sync-badge.muted { background: var(--border-subtle); color: var(--text-muted); }
+
+/* ══ Phase 6 — Technician Mobile Experience ═════════════════════════════
+ * Additive only: every rule below either targets a brand-new class
+ * (tech-*) or is media-query-gated to phone widths, so desktop layouts and
+ * every other role's experience are unaffected. */
+
+/* ── Contact actions (job-detail.tsx Customer/Address meta items) ──────── */
+
+.contact-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+/* ── Sticky primary action bar (job-detail.tsx, phone only) ────────────
+ * Mirrors the sidebar's status-transition buttons rather than replacing
+ * them — see job-detail.tsx's primaryTransition comment. Hidden above the
+ * phone breakpoint entirely so desktop/tablet keep the existing sidebar-only
+ * layout. */
+.tech-sticky-actions { display: none; }
+
+@media (max-width: 640px) {
+  .tech-sticky-actions {
+    display: block;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px));
+    background: var(--card-bg);
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.08);
+    z-index: 30;
+  }
+
+  .tech-sticky-btn {
+    width: 100%;
+    justify-content: center;
+    min-height: 46px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .tech-sticky-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  /* Room for the fixed bar so it never overlaps the page's last content. */
+  .job-detail-page { padding-bottom: 84px; }
+}
+
+/* ── My Jobs Today (technician-home.tsx) ────────────────────────────────
+ * Card-based, not table-based, deliberately — this is the primary
+ * technician landing view and must work down to a 320px phone with no
+ * horizontal scrolling, which an HTML table cannot do without either
+ * clipping or a scroll container. */
+
+.tech-job-section.emphasize .section-title { color: var(--danger); }
+.tech-job-section.muted { opacity: 0.85; }
+
+.tech-job-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.tech-job-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.tech-job-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: pointer;
+  transition: box-shadow 0.15s;
+}
+
+.tech-job-card:hover, .tech-job-card:focus-visible { box-shadow: var(--shadow); }
+.tech-job-card:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.tech-job-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tech-job-card-customer { font-size: 15px; font-weight: 700; }
+
+.tech-job-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.tech-job-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.tech-job-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tech-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 40px 20px;
+  color: var(--text-muted);
+  text-align: center;
+  background: var(--card-bg);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 24px;
+}
+
+@media (max-width: 640px) {
+  .tech-job-cards { grid-template-columns: 1fr; }
+  .tech-job-card-actions .btn { flex: 1; justify-content: center; min-height: 38px; }
+}
+.google-sync-badge .btn { margin-left: auto; }
+
+/* ── Notification preferences & history (Phase 9.3) ──────────────────── */
+
+.notification-pref-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.notification-pref-row:first-of-type { border-top: none; padding-top: 0; }
+
+.notification-pref-state {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 20px;
+}
+
+.notification-pref-state.on { color: var(--primary); background: rgba(22, 163, 74, 0.12); }
+.notification-pref-state.off { color: var(--text-muted); background: var(--row-hover); }
+.notification-pref-state.warn { color: #b45309; background: #fef3c7; }
+
+.notification-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.notification-history-table th:last-child, .notification-history-table td:last-child { width: 32px; }
+
+.notification-history-message-row td {
+  padding-top: 0;
+  padding-bottom: 10px;
+  font-size: 12px;
+  border-top: none;
+}
+
+.notification-attempts-table {
+  margin: 8px 0 4px;
+  font-size: 12px;
+}
+
+.notification-attempts-table th, .notification-attempts-table td { padding: 6px 8px; }
+
+@media (max-width: 640px) {
+  .notification-pref-row { flex-direction: column; }
+  .notification-pref-row .btn { align-self: flex-start; }
+}
+
+@media (max-width: 430px) {
+  .notification-history-table th:nth-child(3), .notification-history-table td:nth-child(3) { display: none; }
+}

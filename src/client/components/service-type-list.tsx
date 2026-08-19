@@ -1,13 +1,16 @@
 import { useState } from "preact/hooks";
 import { useApp } from "../context";
 import { CreateServiceType } from "./create-service-type";
+import { ConfirmDialog } from "./confirm-dialog";
 import { Plus, Trash2, Edit3 } from "lucide-preact";
 
 export function ServiceTypeList() {
-  const { serviceTypes, updateServiceType, deleteServiceType, isAgent } = useApp();
+  const { serviceTypes, updateServiceType, deleteServiceType, isAgent, setError } = useApp();
   const [showCreate, setShowCreate] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState({ name: "", description: "", default_duration: 60, default_price: 0, color: "#6b7280" });
+  const [pendingDelete, setPendingDelete] = useState<{ id: number; name: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const startEdit = (s: typeof serviceTypes[0]) => {
     setEditForm({
@@ -23,6 +26,19 @@ export function ServiceTypeList() {
   const saveEdit = async (id: number) => {
     await updateServiceType(id, editForm);
     setEditingId(null);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try {
+      await deleteServiceType(pendingDelete.id);
+      setPendingDelete(null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -84,7 +100,7 @@ export function ServiceTypeList() {
                         <div class="action-btns">
                           <button class="btn-icon" onClick={() => startEdit(s)}><Edit3 size={14} /></button>
                           {isAgent && (
-                            <button class="btn-icon danger" onClick={() => deleteServiceType(s.id)}><Trash2 size={14} /></button>
+                            <button class="btn-icon danger" onClick={() => setPendingDelete({ id: s.id, name: s.name })}><Trash2 size={14} /></button>
                           )}
                         </div>
                       </td>
@@ -98,6 +114,18 @@ export function ServiceTypeList() {
       </div>
 
       {showCreate && <CreateServiceType onClose={() => setShowCreate(false)} />}
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete this service type?"
+          message={`This permanently deletes ${pendingDelete.name}. This cannot be undone.`}
+          confirmLabel="Delete"
+          danger
+          submitting={deleting}
+          onConfirm={handleConfirmDelete}
+          onClose={() => setPendingDelete(null)}
+        />
+      )}
     </div>
   );
 }

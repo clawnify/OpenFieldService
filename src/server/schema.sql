@@ -1,3 +1,9 @@
+-- HISTORICAL BASELINE — kept as a human-readable snapshot of the schema as of
+-- migrations/0001_baseline.sql. Schema changes are no longer made here: they go in
+-- new numbered files under migrations/, applied via
+-- `wrangler d1 migrations apply open-fieldservice-db --local` (see package.json "dev").
+-- Editing this file has no effect on any database.
+
 -- Customers
 CREATE TABLE IF NOT EXISTS customers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,6 +126,90 @@ CREATE TABLE IF NOT EXISTS invoice_lines (
   total REAL NOT NULL DEFAULT 0
 );
 
+-- Users (authentication and administration)
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'staff',
+  active INTEGER NOT NULL DEFAULT 1,
+  last_login_at TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Sessions (server-side session tokens backing the auth cookie)
+CREATE TABLE IF NOT EXISTS sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash TEXT NOT NULL UNIQUE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- Default administrator account, seeded once so the app is reachable on first run.
+-- Email: admin@fieldscheduler.local   Password: ChangeMe123!
+-- Change this password immediately after first login (Change My Password in the dashboard).
+INSERT OR IGNORE INTO users (id, name, email, password_hash, role, active)
+VALUES (1, 'Administrator', 'admin@fieldscheduler.local', 'pbkdf2$100000$MRKZi18lsdnQ4dUqDaT2Bw$-oGMJCsCbFbs4tCQ7fVtK8MU2Jzco8_tV3X2DNAHftA', 'admin', 1);
+
+-- Google Calendar connection, one per Field Scheduler user (each user has their own).
+-- Tokens are AES-GCM encrypted at rest (see src/server/crypto.ts); never selected
+-- into API responses in plaintext form.
+CREATE TABLE IF NOT EXISTS calendar_integrations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL DEFAULT 'google',
+  google_account_email TEXT NOT NULL DEFAULT '',
+  google_calendar_id TEXT NOT NULL DEFAULT 'primary',
+  google_calendar_summary TEXT NOT NULL DEFAULT 'Primary Calendar',
+  access_token_encrypted TEXT NOT NULL DEFAULT '',
+  refresh_token_encrypted TEXT NOT NULL DEFAULT '',
+  token_expires_at TEXT NOT NULL DEFAULT '',
+  scope TEXT NOT NULL DEFAULT '',
+  sync_enabled INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'connected',
+  connected_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Short-lived CSRF nonce for the OAuth redirect round-trip; rows are deleted as
+-- soon as the callback consumes them (or ignored/expired otherwise).
+CREATE TABLE IF NOT EXISTS calendar_oauth_states (
+  state TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  return_origin TEXT NOT NULL DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Maps a Field Scheduler job to the Google Calendar event synced for it, per user
+-- (each connected user gets their own event for the same job). The unique
+-- constraint is what prevents duplicate events on repeated syncs/updates.
+CREATE TABLE IF NOT EXISTS calendar_event_mappings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL DEFAULT 'google',
+  calendar_id TEXT NOT NULL DEFAULT '',
+  external_event_id TEXT NOT NULL DEFAULT '',
+  last_synced_at TEXT,
+  sync_status TEXT NOT NULL DEFAULT 'pending',
+  sync_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(user_id, job_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_calendar_integrations_user ON calendar_integrations(user_id);
+CREATE INDEX IF NOT EXISTS idx_calendar_oauth_states_user ON calendar_oauth_states(user_id);
+CREATE INDEX IF NOT EXISTS idx_event_mappings_user ON calendar_event_mappings(user_id);
+CREATE INDEX IF NOT EXISTS idx_event_mappings_job ON calendar_event_mappings(job_id);
+
 -- Auto-incrementing identifier counter
 CREATE TABLE IF NOT EXISTS _meta (
   key TEXT PRIMARY KEY,
@@ -129,6 +219,10 @@ INSERT OR IGNORE INTO _meta (key, value) VALUES ('job_counter', '0');
 INSERT OR IGNORE INTO _meta (key, value) VALUES ('identifier_prefix', 'JOB');
 INSERT OR IGNORE INTO _meta (key, value) VALUES ('invoice_counter', '0');
 INSERT OR IGNORE INTO _meta (key, value) VALUES ('invoice_prefix', 'INV');
+-- IANA timezone used when building Google Calendar events from job date/time,
+-- so wall-clock times don't shift when viewed in another timezone. No timezone
+-- setting existed before this integration; change it for your business's locale.
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('timezone', 'UTC');
 
 -- Example service types (users customize for their vertical)
 INSERT OR IGNORE INTO service_types (id, name, description, default_duration, default_price, color)

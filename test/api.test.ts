@@ -1,95 +1,29 @@
-import { env, exports as workerExports } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-
-interface JsonResponse<T> {
-  response: Response;
-  body: T;
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<JsonResponse<T>> {
-  const response = await workerExports.default.fetch(`http://example.test${path}`, init);
-  const body = await response.json() as T;
-  return { response, body };
-}
-
-async function post<T>(path: string, body: unknown): Promise<JsonResponse<T>> {
-  return request<T>(path, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-}
-
-async function createCustomer(name = "Ada Heating") {
-  const result = await post<{ id: number; name: string }>("/api/customers", {
-    name,
-    email: "service@example.test",
-    phone: "555-0100",
-    address: "100 Main St",
-    city: "Burnaby",
-    state: "BC",
-    zip: "V5A 1A1",
-  });
-  expect(result.response.status).toBe(201);
-  return result.body;
-}
-
-async function createJob(customerId: number, scheduledDate: string, overrides: Record<string, unknown> = {}) {
-  const result = await post<{ id: number; scheduled_date: string }>("/api/jobs", {
-    customer_id: customerId,
-    service_type_id: 1,
-    scheduled_date: scheduledDate,
-    ...overrides,
-  });
-  expect(result.response.status).toBe(201);
-  return result.body;
-}
-
-async function executeStatements(statements: string[]) {
-  await env.DB.batch(statements.map((statement) => env.DB.prepare(statement)));
-}
-
-async function applySchema() {
-  await executeStatements(JSON.parse(env.TEST_SCHEMA_STATEMENTS) as string[]);
-}
+import {
+  applySchema, authHeaders, createCustomer, createJob,
+  post, put, del, request, resetDatabase,
+} from "./helpers.js";
 
 beforeAll(async () => {
   await applySchema();
 });
 
 beforeEach(async () => {
-  await executeStatements([
-    "DELETE FROM invoice_lines",
-    "DELETE FROM invoices",
-    "DELETE FROM job_materials",
-    "DELETE FROM materials",
-    "DELETE FROM job_checklist",
-    "DELETE FROM job_notes",
-    "DELETE FROM jobs",
-    "DELETE FROM service_types",
-    "DELETE FROM technicians",
-    "DELETE FROM customers",
-    "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter')",
-    "DELETE FROM sqlite_sequence",
-  ]);
-  await applySchema();
+  await resetDatabase();
 });
 
 describe("existing field service API", () => {
   it("creates, searches, updates, and reads customers with service history", async () => {
+    const auth = await authHeaders();
     const customer = await createCustomer();
     await createJob(customer.id, "2026-01-10");
 
-    const update = await request<{ ok: boolean }>(`/api/customers/${customer.id}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ phone: "555-0199" }),
-    });
+    const update = await put<{ ok: boolean }>(`/api/customers/${customer.id}`, { phone: "555-0199" }, auth);
     const search = await request<{ customers: Array<{ id: number; job_count: number }>; total: number }>(
-      "/api/customers?search=Ada&page=1&limit=50",
+      "/api/customers?search=Ada&page=1&limit=50", auth,
     );
     const detail = await request<{ customer: { phone: string }; jobs: Array<{ scheduled_date: string }> }>(
-      `/api/customers/${customer.id}`,
+      `/api/customers/${customer.id}`, auth,
     );
 
     expect(update.body.ok).toBe(true);
@@ -99,18 +33,15 @@ describe("existing field service API", () => {
   });
 
   it("creates, updates, and lists technicians", async () => {
+    const auth = await authHeaders();
     const created = await post<{ id: number; name: string; active: number }>("/api/technicians", {
       name: "Grace Hopper",
       email: "grace@example.test",
       color: "#123456",
-    });
-    const update = await request<{ ok: boolean }>(`/api/technicians/${created.body.id}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ active: 0 }),
-    });
-    const list = await request<{ technicians: Array<{ id: number; active: number }> }>("/api/technicians");
-    const activeLookup = await request<{ technicians: Array<{ id: number }> }>("/api/technicians/all");
+    }, auth);
+    const update = await put<{ ok: boolean }>(`/api/technicians/${created.body.id}`, { active: 0 }, auth);
+    const list = await request<{ technicians: Array<{ id: number; active: number }> }>("/api/technicians", auth);
+    const activeLookup = await request<{ technicians: Array<{ id: number }> }>("/api/technicians/all", auth);
 
     expect(created.response.status).toBe(201);
     expect(update.body.ok).toBe(true);
@@ -119,19 +50,16 @@ describe("existing field service API", () => {
   });
 
   it("retains seeded service types and supports catalog CRUD", async () => {
-    const initial = await request<{ service_types: Array<{ id: number }> }>("/api/service-types");
+    const auth = await authHeaders();
+    const initial = await request<{ service_types: Array<{ id: number }> }>("/api/service-types", auth);
     const created = await post<{ id: number; name: string }>("/api/service-types", {
       name: "Heat Pump Tune-up",
       default_duration: 75,
       default_price: 189.5,
       color: "#abcdef",
-    });
-    const update = await request<{ ok: boolean }>(`/api/service-types/${created.body.id}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ default_duration: 90 }),
-    });
-    const removed = await request<{ ok: boolean }>(`/api/service-types/${created.body.id}`, { method: "DELETE" });
+    }, auth);
+    const update = await put<{ ok: boolean }>(`/api/service-types/${created.body.id}`, { default_duration: 90 }, auth);
+    const removed = await del<{ ok: boolean }>(`/api/service-types/${created.body.id}`, auth);
 
     expect(initial.body.service_types).toHaveLength(6);
     expect(created.response.status).toBe(201);
@@ -140,20 +68,17 @@ describe("existing field service API", () => {
   });
 
   it("retains seeded materials and supports inventory catalog CRUD", async () => {
-    const initial = await request<{ materials: Array<{ id: number }> }>("/api/materials");
+    const auth = await authHeaders();
+    const initial = await request<{ materials: Array<{ id: number }> }>("/api/materials", auth);
     const created = await post<{ ok: boolean }>("/api/materials", {
       name: "Contactor",
       unit: "ea",
       unit_cost: 42.25,
       in_stock: 8,
-    });
-    const list = await request<{ materials: Array<{ id: number; name: string; unit_cost: number }> }>("/api/materials");
+    }, auth);
+    const list = await request<{ materials: Array<{ id: number; name: string; unit_cost: number }> }>("/api/materials", auth);
     const contactor = list.body.materials.find((material) => material.name === "Contactor");
-    const update = await request<{ ok: boolean }>(`/api/materials/${contactor?.id}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ in_stock: 7 }),
-    });
+    const update = await put<{ ok: boolean }>(`/api/materials/${contactor?.id}`, { in_stock: 7 }, auth);
 
     expect(initial.body.materials).toHaveLength(5);
     expect(created.response.status).toBe(201);
@@ -162,6 +87,7 @@ describe("existing field service API", () => {
   });
 
   it("applies existing customer-address and service defaults when creating jobs", async () => {
+    const auth = await authHeaders();
     const customer = await createCustomer();
     const created = await createJob(customer.id, "2026-03-14", { scheduled_time: "10:30" });
     const detail = await request<{ job: {
@@ -170,7 +96,7 @@ describe("existing field service API", () => {
       duration: number;
       price: number;
       scheduled_time: string;
-    } }>(`/api/jobs/${created.id}`);
+    } }>(`/api/jobs/${created.id}`, auth);
 
     expect(detail.body.job).toMatchObject({
       identifier: "JOB-1",
@@ -181,15 +107,46 @@ describe("existing field service API", () => {
     });
   });
 
+  it("finds jobs by customer name, job number, address, or phone (see the job-list.tsx search bar's placeholder promise)", async () => {
+    const auth = await authHeaders();
+    const customer = await createCustomer(); // "Ada Heating", phone "555-0100", address "100 Main St"
+    const job = await createJob(customer.id, "2026-03-20");
+    const otherCustomer = await createCustomer("Unrelated Co");
+    await createJob(otherCustomer.id, "2026-03-21");
+
+    const jobDetail = await request<{ job: { identifier: string } }>(`/api/jobs/${job.id}`, auth);
+
+    const byName = await request<{ jobs: { id: number }[] }>("/api/jobs?search=Ada", auth);
+    expect(byName.body.jobs.map((j) => j.id)).toEqual([job.id]);
+
+    const byJobNumber = await request<{ jobs: { id: number }[] }>(`/api/jobs?search=${jobDetail.body.job.identifier}`, auth);
+    expect(byJobNumber.body.jobs.map((j) => j.id)).toEqual([job.id]);
+
+    // createCustomer() always seeds the same "100 Main St" address regardless
+    // of the name override, so both fixture customers legitimately match this
+    // search — assert the target job is included, not that it's the only hit.
+    const byAddress = await request<{ jobs: { id: number }[] }>("/api/jobs?search=Main St", auth);
+    expect(byAddress.body.jobs.map((j) => j.id)).toContain(job.id);
+
+    // Same fixture limitation as the address case above — phone is also a
+    // fixed default in createCustomer() regardless of name.
+    const byPhone = await request<{ jobs: { id: number }[] }>("/api/jobs?search=555-0100", auth);
+    expect(byPhone.body.jobs.map((j) => j.id)).toContain(job.id);
+
+    const noMatch = await request<{ jobs: { id: number }[] }>("/api/jobs?search=nonexistent-xyz", auth);
+    expect(noMatch.body.jobs).toEqual([]);
+  });
+
   it("adds job materials and returns them from job detail", async () => {
+    const auth = await authHeaders();
     const customer = await createCustomer();
     const job = await createJob(customer.id, "2026-04-01");
     const added = await post<{ ok: boolean }>(`/api/jobs/${job.id}/materials`, {
       material_id: 2,
       quantity: 2,
-    });
+    }, auth);
     const detail = await request<{ job: { job_materials: Array<{ material_name: string; quantity: number; unit_cost: number }> } }>(
-      `/api/jobs/${job.id}`,
+      `/api/jobs/${job.id}`, auth,
     );
 
     expect(added.body.ok).toBe(true);
@@ -198,36 +155,39 @@ describe("existing field service API", () => {
     ]);
   });
 
-  it("creates invoices with calculated line and tax totals", async () => {
+  it("creates invoices with calculated line and tax totals (integer cents, not floating-point dollars — see src/server/financial.ts)", async () => {
+    const auth = await authHeaders();
     const customer = await createCustomer();
-    const created = await post<{ id: number; identifier: string; subtotal: number; tax_amount: number; total: number }>(
+    const created = await post<{ id: number; identifier: string; subtotal_cents: number; tax_amount_cents: number; total_cents: number }>(
       "/api/invoices",
       {
         customer_id: customer.id,
         tax_rate: 5,
         due_date: "2026-05-31",
         lines: [
-          { description: "Diagnostic", quantity: 1, unit_price: 100 },
-          { description: "Part", quantity: 2, unit_price: 25 },
+          { description: "Diagnostic", quantity: 1, unit_price_cents: 10000 },
+          { description: "Part", quantity: 2, unit_price_cents: 2500 },
         ],
       },
+      auth,
     );
-    const detail = await request<{ invoice: { lines: unknown[]; total: number } }>(`/api/invoices/${created.body.id}`);
+    const detail = await request<{ invoice: { lines: unknown[]; total_cents: number } }>(`/api/invoices/${created.body.id}`, auth);
 
     expect(created.response.status).toBe(201);
-    expect(created.body).toMatchObject({ identifier: "INV-1", subtotal: 150, tax_amount: 7.5, total: 157.5 });
+    expect(created.body).toMatchObject({ identifier: "INV-1", subtotal_cents: 15000, tax_amount_cents: 750, total_cents: 15750 });
     expect(detail.body.invoice.lines).toHaveLength(2);
-    expect(detail.body.invoice.total).toBe(157.5);
+    expect(detail.body.invoice.total_cents).toBe(15750);
   });
 
   it("returns arbitrary schedule ranges longer than seven days with inclusive boundaries", async () => {
+    const auth = await authHeaders();
     const customer = await createCustomer();
     await createJob(customer.id, "2026-01-01");
     await createJob(customer.id, "2026-01-20");
     await createJob(customer.id, "2026-02-15");
 
     const schedule = await request<{ jobs: Array<{ scheduled_date: string }> }>(
-      "/api/schedule?start=2026-01-01&end=2026-01-31",
+      "/api/schedule?start=2026-01-01&end=2026-01-31", auth,
     );
 
     expect(schedule.response.status).toBe(200);
