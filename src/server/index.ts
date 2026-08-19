@@ -22,6 +22,7 @@ import {
   publishSetting,
   retireSetting,
 } from "./settings.js";
+import { BUSINESS_TIMEZONE_SETTING_KEY, isValidIanaTimezone } from "./business-timezone.js";
 import {
   ACTIVE_STATUSES,
   JOB_TYPES,
@@ -4388,6 +4389,14 @@ app.openapi(publishSettingRoute, async (c) => {
   }
   if (data.data_type === "json") {
     try { JSON.parse(data.value); } catch { return c.json({ error: "Value is not valid JSON" }, 400); }
+  }
+  // BUSINESS_TIMEZONE must be a real, DST-safe IANA zone id (e.g.
+  // "America/Vancouver") — never a fixed offset ("-07:00"/"UTC-7") or a
+  // legacy abbreviation ("PST"), both of which silently break every winter/
+  // summer. See src/server/business-timezone.ts#isValidIanaTimezone for why
+  // Intl.DateTimeFormat's own (too permissive) validation isn't used alone.
+  if (data.key === BUSINESS_TIMEZONE_SETTING_KEY && !isValidIanaTimezone(data.value)) {
+    return c.json({ error: `"${data.value}" is not a valid IANA timezone (e.g. "America/Vancouver"). Fixed offsets and abbreviations like "PST" are not accepted — they aren't DST-safe.` }, 400);
   }
 
   try {

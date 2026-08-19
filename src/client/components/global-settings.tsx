@@ -54,6 +54,12 @@ export function GlobalSettings() {
   const [pendingOptions, setPendingOptions] = useState(false);
   const [savingOptions, setSavingOptions] = useState(false);
 
+  // Select (fixed choice list, e.g. Business Timezone) editing
+  const [editingSelect, setEditingSelect] = useState<SettingCatalogEntry | null>(null);
+  const [selectDraft, setSelectDraft] = useState("");
+  const [pendingSelect, setPendingSelect] = useState(false);
+  const [savingSelect, setSavingSelect] = useState(false);
+
   // Retire (works for both catalog and custom settings)
   const [retireTarget, setRetireTarget] = useState<GlobalSetting | null>(null);
   const [retiring, setRetiring] = useState(false);
@@ -190,6 +196,35 @@ export function GlobalSettings() {
     }
   };
 
+  // ── Select editing (fixed choice list) ──
+
+  const startEditSelect = (entry: SettingCatalogEntry) => {
+    const current = findCurrent(entry.key);
+    setSelectDraft(current?.value ?? entry.options?.[0]?.value ?? "");
+    setEditingSelect(entry);
+  };
+
+  const confirmSelect = async () => {
+    if (!editingSelect) return;
+    setSavingSelect(true);
+    try {
+      await api("POST", "/api/settings", {
+        key: editingSelect.key,
+        value: selectDraft,
+        data_type: editingSelect.dataType,
+        category: editingSelect.category,
+        description: editingSelect.description,
+      });
+      setEditingSelect(null);
+      setPendingSelect(false);
+      await fetchSettings();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSavingSelect(false);
+    }
+  };
+
   // ── Retire ──
 
   const confirmRetire = async () => {
@@ -311,6 +346,42 @@ export function GlobalSettings() {
                           <div class="setting-row-actions">
                             <button class="btn btn-sm" onClick={() => startEditOptions(entry)}>
                               <Pencil size={13} /> Edit List
+                            </button>
+                            {current && (
+                              <button class="btn-icon" title="Version history" onClick={() => openHistory(entry.key)}>
+                                <History size={14} />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    }
+                    if (entry.kind === "select") {
+                      return (
+                        <div class="setting-row" key={entry.key}>
+                          <div class="setting-row-main">
+                            <div class="setting-row-label">
+                              {entry.label}
+                              <button
+                                type="button" class="setting-help-icon" title={entry.description}
+                                aria-label={`About ${entry.label}: ${entry.description}`}
+                              >
+                                <HelpCircle size={13} />
+                              </button>
+                            </div>
+                            <p class="setting-row-description">{entry.description}</p>
+                            {current ? (
+                              <>
+                                <div class="setting-row-value">{formatSettingValue(entry, current.value)}</div>
+                                <p class="text-muted" style={{ fontSize: 12 }}>Effective since {formatSettingDate(current.effective_from)}</p>
+                              </>
+                            ) : (
+                              <p class="text-muted" style={{ fontSize: 12 }}>Not configured yet.</p>
+                            )}
+                          </div>
+                          <div class="setting-row-actions">
+                            <button class="btn btn-sm" onClick={() => startEditSelect(entry)}>
+                              <Pencil size={13} /> {current ? "Edit" : "Configure"}
                             </button>
                             {current && (
                               <button class="btn-icon" title="Version history" onClick={() => openHistory(entry.key)}>
@@ -507,6 +578,60 @@ export function GlobalSettings() {
           submitting={savingOptions}
           onConfirm={confirmOptions}
           onClose={() => setPendingOptions(false)}
+        />
+      )}
+
+      {editingSelect && (
+        <div class="modal-overlay" onClick={() => !savingSelect && setEditingSelect(null)}>
+          <div class="modal modal-sm" onClick={(e) => e.stopPropagation()}>
+            <div class="modal-header">
+              <h2>{editingSelect.label}</h2>
+              <button class="btn-icon" aria-label="Close" onClick={() => setEditingSelect(null)}><X size={18} /></button>
+            </div>
+            <div class="form-grid">
+              <div class="form-group full-width">
+                <p class="text-muted" style={{ fontSize: 13, marginTop: 0 }}>{editingSelect.description}</p>
+              </div>
+              <div class="form-group full-width">
+                <label htmlFor="setting-select-value">{editingSelect.label} *</label>
+                <select
+                  id="setting-select-value"
+                  class="setting-select-input"
+                  value={selectDraft}
+                  onChange={(e) => setSelectDraft((e.target as HTMLSelectElement).value)}
+                  autoFocus required
+                >
+                  {(editingSelect.options ?? []).map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn" onClick={() => setEditingSelect(null)} disabled={savingSelect}>Cancel</button>
+              <button
+                type="button" class="btn btn-primary" disabled={savingSelect || !selectDraft}
+                onClick={() => setPendingSelect(true)}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingSelect && editingSelect && (
+        <ConfirmDialog
+          title={`Change ${editingSelect.label}?`}
+          message={
+            editingSelect.key === "BUSINESS_TIMEZONE"
+              ? `This affects scheduling, Google Calendar synchronization, and time-based reminders for future operations. Existing scheduled times and already-synced Google Calendar events are not changed retroactively — only jobs created, updated, or re-synced after this change will use the new timezone.`
+              : `Set "${editingSelect.label}" to ${(editingSelect.options ?? []).find((o) => o.value === selectDraft)?.label ?? selectDraft}, effective immediately? This is published as a new version — anything already evaluated under the previous value is unaffected.`
+          }
+          confirmLabel="Save"
+          submitting={savingSelect}
+          onConfirm={confirmSelect}
+          onClose={() => setPendingSelect(false)}
         />
       )}
 

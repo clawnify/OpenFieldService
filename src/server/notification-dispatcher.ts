@@ -1,4 +1,5 @@
 import { get, query, run } from "./db.js";
+import { getBusinessTimezone } from "./business-timezone.js";
 import { resolvePreferences, enqueueAppointmentReminder, getCustomerContact, type NotificationChannel } from "./notifications.js";
 import { renderEmail, renderSms, TemplateError } from "./notification-templates.js";
 import { createResendEmailProvider } from "./notification-resend.js";
@@ -366,20 +367,15 @@ export async function runDispatchCycle(providers: Providers, limit = DISPATCH_BA
 
 // ── Day-before reminder scan ─────────────────────────────────────────────
 
-/** Independent read of `_meta.timezone` — deliberately duplicated rather
- *  than importing `calendar-sync.ts`'s own private `getTimezone()`, which
- *  is explicitly protected this phase (Section 31: do not modify
- *  calendar-sync.ts/google-calendar.ts). Same query, same 'UTC' fallback —
- *  reuses the project's ALREADY-ESTABLISHED business-timezone convention
- *  (migration 0001's `_meta.timezone` row, seeded 'UTC', documented as
- *  "change it for your business's locale") rather than inventing a second
- *  one or guessing a BC timezone (see the Phase 9.2 report's "Timezone"
- *  section for the full reasoning — this is the resolution of Section 14's
- *  stop condition, not a bypass of it). */
-export async function getBusinessTimezone(): Promise<string> {
-  const row = await get<{ value: string }>("SELECT value FROM _meta WHERE key = 'timezone'");
-  return row?.value || "UTC";
-}
+/** Re-exported (not just imported) for backward compatibility with every
+ *  existing import of `getBusinessTimezone` from THIS module (tests
+ *  included) — the real implementation now lives in `business-timezone.ts`,
+ *  the ONE shared resolver Google Calendar sync and this notification
+ *  dispatcher both call, reading the admin-editable `BUSINESS_TIMEZONE`
+ *  Global Setting (falling back to legacy `_meta.timezone`, then a safe
+ *  default — see that module's own doc comment). This file no longer
+ *  queries `_meta` independently. */
+export { getBusinessTimezone };
 
 /** Pure calendar-day arithmetic in the given IANA timezone — never touches
  *  wall-clock hours, so DST transitions can't shift the result by an hour

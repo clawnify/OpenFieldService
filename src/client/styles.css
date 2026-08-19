@@ -1746,6 +1746,7 @@ body {
   .setting-row { flex-direction: column; align-items: stretch; }
   .setting-row-actions { justify-content: flex-start; }
   .setting-row-description { max-width: none; }
+  .form-group select.setting-select-input { font-size: 16px; } /* avoid iOS auto-zoom on focus — must out-specify .form-group select's own 13px rule */
 }
 
 /* ── Role badge ──────────────────────────────────────────────────────── */

@@ -185,8 +185,11 @@ describe("job sync", () => {
 
     expect(google.state.events.size).toBe(1);
     const [[, event]] = [...google.state.events.entries()];
-    expect(event.start).toMatchObject({ dateTime: "2026-08-20T10:00:00", timeZone: "UTC" });
-    expect(event.end).toMatchObject({ dateTime: "2026-08-20T12:00:00", timeZone: "UTC" });
+    // America/Vancouver, not UTC — migrations/0012 now seeds BUSINESS_TIMEZONE
+    // for every environment (see the "job sync — business timezone correctness"
+    // describe block below for the full fresh-environment/DST coverage).
+    expect(event.start).toMatchObject({ dateTime: "2026-08-20T10:00:00", timeZone: "America/Vancouver" });
+    expect(event.end).toMatchObject({ dateTime: "2026-08-20T12:00:00", timeZone: "America/Vancouver" });
     expect(event.location).toBe("100 Main St, Burnaby, BC, V5A 1A1");
     expect(event.description).toContain("Customer: Ada Heating");
 
@@ -299,17 +302,25 @@ describe("job sync", () => {
 // buildEventInput()/toGoogleEventBody() (calendar-sync.ts + google-calendar.ts) were
 // already correct: they send a plain local "YYYY-MM-DDTHH:mm:ss" (no offset, no `Z`)
 // paired with an explicit IANA `timeZone`, exactly Google's documented contract for a
-// timed event — never a `Date`/`toISOString()` UTC conversion. The real defect is that
-// `_meta.timezone` (the single authoritative source both this module and the Phase 9
-// day-before-reminder notification already read via the identical `SELECT value FROM
-// _meta WHERE key = 'timezone'` pattern) defaults to 'UTC' (migrations/0001_baseline.sql)
-// and is never updated unless an operator runs the documented manual SQL — so a real
-// 11:00 local appointment is sent to Google as 11:00 *UTC*, which a Pacific-time Google
-// account then displays 7-8 hours earlier (04:00 PDT / 03:00 PST) depending on DST. The
-// first test below reproduces that exact defect at the payload level; the rest prove the
-// existing code is already correct for every DST/boundary case once the business
-// timezone is actually configured — no code change to the payload-building logic was
-// needed or made.
+// timed event — never a `Date`/`toISOString()` UTC conversion.
+//
+// The original root cause (JOB-34) was that the only timezone source, hidden
+// `_meta.timezone`, defaulted to 'UTC' with no admin-facing way to change it. This
+// has since been promoted into the Global Settings `BUSINESS_TIMEZONE` key
+// (migrations/0012), resolved through the single shared
+// `src/server/business-timezone.ts#getBusinessTimezone()` — the same resolver
+// `notification-dispatcher.ts`'s day-before reminder uses (see
+// test/notification-dispatcher.test.ts and test/business-timezone.test.ts for that
+// side and the resolver's own unit coverage). `calendar-sync.ts` no longer queries
+// `_meta` on its own. The tests below prove: (1) a completely unconfigured
+// environment now resolves to the safe 'America/Vancouver' default — never UTC —
+// closing the fresh-environment risk at the Calendar-integration level; (2) the
+// legacy `_meta.timezone` value is still honored as a backward-compat fallback for
+// a database that hasn't published `BUSINESS_TIMEZONE` yet; (3) publishing
+// `BUSINESS_TIMEZONE` (the normal admin path) correctly drives the Calendar payload,
+// including changing it mid-stream (Vancouver -> Toronto) and every DST/boundary
+// case — no code change to the payload-building logic itself was needed for any of
+// this, only to which source it reads the zone id from.
 describe("job sync — business timezone correctness (root cause + DST)", () => {
   async function connectedAdmin() {
     google = mockGoogleApi();
@@ -318,26 +329,99 @@ describe("job sync — business timezone correctness (root cause + DST)", () => 
     return auth;
   }
 
-  it("REPRODUCES JOB-34: an unconfigured (default 'UTC') business timezone sends the local appointment time to Google labeled as UTC, not the real local time", async () => {
+  it("CLOSES THE JOB-34 ROOT CAUSE: a completely unconfigured environment (no BUSINESS_TIMEZONE setting, _meta.timezone still at its schema-default 'UTC') resolves to the safe America/Vancouver default, never silently to UTC", async () => {
     await connectedAdmin();
-    // _meta.timezone deliberately left untouched at its seeded default here —
-    // this is the exact real-world condition that produced the reported bug.
+    // resetDatabase() wipes global_settings (nothing published this run) but
+    // deliberately never touches _meta — reset it back to the schema default
+    // explicitly so this test is self-contained and doesn't depend on
+    // execution order relative to the other tests below that set
+    // _meta.timezone to a real value. This is the exact "fresh,
+    // never-configured" condition that used to produce JOB-34's bug; it must
+    // no longer resolve to UTC.
+    await queryDb("UPDATE _meta SET value = 'UTC' WHERE key = 'timezone'");
     const timezoneRow = await queryDb<{ value: string }>("SELECT value FROM _meta WHERE key = 'timezone'");
     expect(timezoneRow[0].value).toBe("UTC");
+    const settingsRow = await queryDb("SELECT 1 FROM global_settings WHERE key = 'BUSINESS_TIMEZONE'");
+    expect(settingsRow).toHaveLength(0);
 
     const customer = await createCustomer();
     await createJob(customer.id, "2026-08-20", { scheduled_time: "11:00", duration: 90 });
 
     const [[, event]] = [...google.state.events.entries()];
-    // The code faithfully sends what _meta says — "11:00 UTC" — which is the
-    // root cause: nothing in the app ever prompted anyone to set this to the
-    // real business timezone, so every event is silently mislabeled.
-    expect(event.start).toMatchObject({ dateTime: "2026-08-20T11:00:00", timeZone: "UTC" });
-    expect(event.end).toMatchObject({ dateTime: "2026-08-20T12:30:00", timeZone: "UTC" });
+    expect(event.start).toMatchObject({ dateTime: "2026-08-20T11:00:00", timeZone: "America/Vancouver" });
+    expect(event.end).toMatchObject({ dateTime: "2026-08-20T12:30:00", timeZone: "America/Vancouver" });
   });
 
+  it("backward compatibility: honors a legacy _meta.timezone value when BUSINESS_TIMEZONE hasn't been published yet", async () => {
+    await connectedAdmin();
+    await queryDb("UPDATE _meta SET value = 'America/Toronto' WHERE key = 'timezone'");
+
+    const customer = await createCustomer();
+    await createJob(customer.id, "2026-08-20", { scheduled_time: "11:00", duration: 90 });
+
+    const [[, event]] = [...google.state.events.entries()];
+    expect(event.start).toMatchObject({ dateTime: "2026-08-20T11:00:00", timeZone: "America/Toronto" });
+  });
+
+  it("a published BUSINESS_TIMEZONE takes priority over a legacy _meta.timezone value", async () => {
+    await connectedAdmin();
+    await queryDb("UPDATE _meta SET value = 'America/Toronto' WHERE key = 'timezone'");
+    await setBusinessTimezone("America/Vancouver");
+
+    const customer = await createCustomer();
+    await createJob(customer.id, "2026-08-20", { scheduled_time: "11:00", duration: 90 });
+
+    const [[, event]] = [...google.state.events.entries()];
+    expect(event.start).toMatchObject({ dateTime: "2026-08-20T11:00:00", timeZone: "America/Vancouver" });
+  });
+
+  it("Toronto value propagates correctly as America/Toronto", async () => {
+    await connectedAdmin();
+    await setBusinessTimezone("America/Toronto");
+    const customer = await createCustomer();
+    await createJob(customer.id, "2026-08-20", { scheduled_time: "11:00", duration: 90 });
+
+    const [[, event]] = [...google.state.events.entries()];
+    expect(event.start).toMatchObject({ dateTime: "2026-08-20T11:00:00", timeZone: "America/Toronto" });
+    expect(event.end).toMatchObject({ dateTime: "2026-08-20T12:30:00", timeZone: "America/Toronto" });
+  });
+
+  it("changing BUSINESS_TIMEZONE mid-stream changes the payload timezone on the NEXT sync, without touching the job's stored scheduled_date/scheduled_time or creating a duplicate event", async () => {
+    const auth = await connectedAdmin();
+    await setBusinessTimezone("America/Vancouver");
+    const customer = await createCustomer();
+    const job = await createJob(customer.id, "2026-08-20", { scheduled_time: "11:00", duration: 90 });
+    const firstEventId = [...google.state.events.keys()][0];
+    const [[, firstEvent]] = [...google.state.events.entries()];
+    expect(firstEvent.start).toMatchObject({ timeZone: "America/Vancouver" });
+
+    await setBusinessTimezone("America/Toronto");
+    // The job's own wall-clock fields never change just because the global
+    // setting changed — only a subsequent sync/update/retry picks up the new
+    // zone (Section 14's documented change-time semantics).
+    const unchangedJob = await queryDb<{ scheduled_date: string; scheduled_time: string }>(
+      "SELECT scheduled_date, scheduled_time FROM jobs WHERE id = ?", [job.id]
+    );
+    expect(unchangedJob[0]).toMatchObject({ scheduled_date: "2026-08-20", scheduled_time: "11:00" });
+
+    await post(`/api/integrations/google-calendar/jobs/${job.id}/retry`, {}, auth);
+
+    expect(google.state.events.size).toBe(1);
+    expect([...google.state.events.keys()][0]).toBe(firstEventId); // same event, not a duplicate
+    const event = google.state.events.get(firstEventId)!;
+    expect(event.start).toMatchObject({ dateTime: "2026-08-20T11:00:00", timeZone: "America/Toronto" });
+  });
+
+  /** Publishes BUSINESS_TIMEZONE through the real admin API — the normal,
+   *  supported path an administrator uses (see the Global Settings UI /
+   *  test/business-timezone.test.ts for the setting's own dedicated
+   *  validation/RBAC/history coverage). */
   async function setBusinessTimezone(tz: string) {
-    await queryDb("UPDATE _meta SET value = ? WHERE key = 'timezone'", [tz]);
+    const auth = await authHeaders();
+    const res = await post("/api/settings", {
+      key: "BUSINESS_TIMEZONE", value: tz, data_type: "string", category: "business_operations",
+    }, auth);
+    expect(res.response.status).toBe(201);
   }
 
   it("summer (PDT): 11:00 local stays 11:00 in the Google payload, tagged with the IANA zone (never a fixed offset)", async () => {

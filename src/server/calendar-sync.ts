@@ -1,5 +1,6 @@
 import { get, query, run } from "./db.js";
 import { decryptSecret, encryptSecret } from "./crypto.js";
+import { getBusinessTimezone } from "./business-timezone.js";
 import {
   GoogleApiError, buildDeterministicEventId, deleteEvent, insertEvent, refreshAccessToken, updateEvent,
   type GoogleEventInput, type GoogleOAuthEnv,
@@ -45,11 +46,6 @@ function addMinutes(date: string, time: string, minutes: number): { date: string
     date: `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`,
     time: `${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}`,
   };
-}
-
-async function getTimezone(): Promise<string> {
-  const row = await get<{ value: string }>("SELECT value FROM _meta WHERE key = 'timezone'");
-  return row?.value || "UTC";
 }
 
 function buildEventInput(job: SyncJobRow, timeZone: string): GoogleEventInput {
@@ -242,7 +238,7 @@ async function syncJobForUserClaimed(
       return "deleted";
     }
 
-    const timeZone = await getTimezone();
+    const timeZone = await getBusinessTimezone();
     const eventInput = buildEventInput(job, timeZone);
 
     if (mapping?.external_event_id && mapping.sync_status !== "deleted") {

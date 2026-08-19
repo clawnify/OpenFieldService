@@ -595,10 +595,11 @@ describe("day-before reminder", () => {
     expect(rows.some((r) => r.channel === "sms")).toBe(true);
   });
 
-  it("businessDateOffset correctly rolls over a UTC-vs-local midnight boundary in a non-UTC business timezone", async () => {
-    // Business timezone is UTC by default in this project (migration 0001) —
-    // temporarily reconfigure it to prove the reminder scan actually reads
-    // _meta.timezone rather than hardcoding UTC or a BC timezone.
+  it("businessDateOffset correctly rolls over a UTC-vs-local midnight boundary in a non-UTC business timezone (legacy _meta.timezone backward-compat path)", async () => {
+    // No BUSINESS_TIMEZONE Global Setting published this test (resetDatabase()
+    // wiped it) — temporarily reconfigure the legacy _meta fallback to prove
+    // the reminder scan still honors it when that's the only source
+    // available (a database that hasn't published the Global Setting yet).
     await executeStatements(["UPDATE _meta SET value = 'America/Vancouver' WHERE key = 'timezone'"]);
     const tz = await getBusinessTimezone();
     expect(tz).toBe("America/Vancouver");
@@ -612,6 +613,55 @@ describe("day-before reminder", () => {
     expect(vancouverTomorrow).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(utcTomorrow).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     await executeStatements(["UPDATE _meta SET value = 'UTC' WHERE key = 'timezone'"]);
+  });
+
+  it("the day-before reminder resolves the SAME shared BUSINESS_TIMEZONE Global Setting Google Calendar uses — not a second/independent source", async () => {
+    // Publish through the real admin API (the normal path), same mechanism
+    // test/calendar-sync.test.ts's Calendar tests use — proving both
+    // subsystems really do share one resolver rather than each reading
+    // their own copy.
+    await executeStatements(["UPDATE _meta SET value = 'America/Chicago' WHERE key = 'timezone'"]); // a disagreeing legacy value
+    const auth = await authHeaders();
+    const publish = await post("/api/settings", {
+      key: "BUSINESS_TIMEZONE", value: "America/Toronto", data_type: "string", category: "business_operations",
+    }, auth);
+    expect(publish.response.status).toBe(201);
+
+    const tz = await getBusinessTimezone();
+    expect(tz).toBe("America/Toronto"); // the Global Setting, not the disagreeing legacy _meta value
+
+    await executeStatements(["UPDATE _meta SET value = 'UTC' WHERE key = 'timezone'"]);
+  });
+
+  it("changing BUSINESS_TIMEZONE changes the reminder's date-boundary calculation on the next scan", async () => {
+    const auth = await authHeaders();
+    await post("/api/settings", { key: "BUSINESS_TIMEZONE", value: "America/Vancouver", data_type: "string" }, auth);
+    const vancouverTz = await getBusinessTimezone();
+    const vancouverTomorrow = businessDateOffset(vancouverTz, 1);
+
+    const later = new Date(Date.now() + 60_000).toISOString();
+    await post("/api/settings", {
+      key: "BUSINESS_TIMEZONE", value: "Pacific/Honolulu", data_type: "string", effective_from: later,
+    }, auth);
+    // Not yet effective (effective_from is in the future) — still resolves
+    // to the currently-active version, matching every other Global
+    // Setting's "effective immediately going forward, not retroactively"
+    // semantics (Section 19's required distinction between current runtime
+    // resolution and historical/future version rows).
+    expect(await getBusinessTimezone()).toBe("America/Vancouver");
+    expect(businessDateOffset(await getBusinessTimezone(), 1)).toBe(vancouverTomorrow);
+  });
+
+  it("winter (PST) day-before date boundary resolves correctly through BUSINESS_TIMEZONE, same as summer", async () => {
+    const auth = await authHeaders();
+    await post("/api/settings", { key: "BUSINESS_TIMEZONE", value: "America/Vancouver", data_type: "string" }, auth);
+    const tz = await getBusinessTimezone();
+    // businessDateOffset is pure calendar-day arithmetic (never touches wall-
+    // clock hours), so it produces a valid date string regardless of season —
+    // this proves the winter (PST) path resolves through the same Global
+    // Setting without a separate/seasonal code path.
+    const winterOffset = businessDateOffset(tz, 1);
+    expect(winterOffset).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });
 

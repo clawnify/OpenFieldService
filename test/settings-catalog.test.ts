@@ -61,6 +61,17 @@ describe("formatSettingValue", () => {
     const entry = getSettingMeta("CLEANBC_MAX_HOUSE_SIZE")!;
     expect(formatSettingValue(entry, "not-a-number")).toBe("not-a-number");
   });
+
+  it("formats a select-kind value (BUSINESS_TIMEZONE) using its friendly label, never the raw stored IANA id", () => {
+    const entry = getSettingMeta("BUSINESS_TIMEZONE")!;
+    expect(formatSettingValue(entry, "America/Vancouver")).toBe("Pacific Time — Vancouver");
+    expect(formatSettingValue(entry, "America/Toronto")).toBe("Eastern Time — Toronto");
+  });
+
+  it("falls back to the raw IANA id for a select-kind value not in the curated option list (still a valid, admin-chosen value)", () => {
+    const entry = getSettingMeta("BUSINESS_TIMEZONE")!;
+    expect(formatSettingValue(entry, "America/Regina")).toBe("America/Regina");
+  });
 });
 
 describe("formatSettingDate", () => {
@@ -82,9 +93,10 @@ describe("catalog completeness — every entry is genuinely used by production c
     "BC_HYDRO_REBATE_AMOUNT_CENTS",
     "REFERRAL_SOURCE_OPTIONS",
     "HEATING_SOURCE_OPTIONS",
+    "BUSINESS_TIMEZONE",
   ];
 
-  it("contains exactly the keys read by src/server/rebate.ts, src/server/financial.ts, and reference-data — no more, no fewer", () => {
+  it("contains exactly the keys read by src/server/rebate.ts, src/server/financial.ts, reference-data, and src/server/business-timezone.ts — no more, no fewer", () => {
     expect(SETTINGS_CATALOG.map((e) => e.key).sort()).toEqual(EXPECTED_KEYS.sort());
   });
 

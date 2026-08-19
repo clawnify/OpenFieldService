@@ -16,7 +16,12 @@ import type { SettingDataType } from "./types";
  * no business label to invent for something this app doesn't recognize.
  */
 
-export type SettingKind = "number" | "money_cents" | "option_list";
+export type SettingKind = "number" | "money_cents" | "option_list" | "select";
+
+export interface SettingSelectOption {
+  value: string;
+  label: string;
+}
 
 export interface SettingCatalogEntry {
   key: string;
@@ -27,6 +32,36 @@ export interface SettingCatalogEntry {
   dataType: SettingDataType;
   category: string;
   group?: string;
+  /** Only for kind: "select" — the friendly-label choices shown in the
+   *  dropdown. The stored/API value is always `option.value` (a canonical
+   *  IANA timezone id for BUSINESS_TIMEZONE); labels are display-only. */
+  options?: SettingSelectOption[];
+}
+
+/** Common IANA timezones for a North American field-service business —
+ *  friendly labels for the picker, canonical IANA ids for storage. Not an
+ *  exhaustive list of the ~400 IANA zones (the server accepts any valid
+ *  IANA id, not just these — see src/server/business-timezone.ts); this is
+ *  a curated set of realistic choices for this app's actual user base. */
+export const TIMEZONE_OPTIONS: SettingSelectOption[] = [
+  { value: "Pacific/Honolulu", label: "Hawaii Time — Honolulu" },
+  { value: "America/Anchorage", label: "Alaska Time — Anchorage" },
+  { value: "America/Los_Angeles", label: "Pacific Time — Los Angeles" },
+  { value: "America/Vancouver", label: "Pacific Time — Vancouver" },
+  { value: "America/Phoenix", label: "Mountain Time (no DST) — Phoenix" },
+  { value: "America/Denver", label: "Mountain Time — Denver" },
+  { value: "America/Edmonton", label: "Mountain Time — Edmonton" },
+  { value: "America/Chicago", label: "Central Time — Chicago" },
+  { value: "America/Winnipeg", label: "Central Time — Winnipeg" },
+  { value: "America/New_York", label: "Eastern Time — New York" },
+  { value: "America/Toronto", label: "Eastern Time — Toronto" },
+  { value: "America/Halifax", label: "Atlantic Time — Halifax" },
+  { value: "America/St_Johns", label: "Newfoundland Time — St. John's" },
+  { value: "UTC", label: "UTC (no daylight saving)" },
+];
+
+export function timezoneLabel(ianaValue: string): string {
+  return TIMEZONE_OPTIONS.find((o) => o.value === ianaValue)?.label ?? ianaValue;
 }
 
 export const SETTINGS_CATALOG: SettingCatalogEntry[] = [
@@ -106,6 +141,15 @@ export const SETTINGS_CATALOG: SettingCatalogEntry[] = [
     dataType: "json",
     category: "Customer Information",
   },
+  {
+    key: "BUSINESS_TIMEZONE",
+    label: "Business Timezone",
+    description: "Used for job scheduling, Google Calendar sync, reminders, and other time-based operations.",
+    kind: "select",
+    dataType: "string",
+    category: "Business Operations",
+    options: TIMEZONE_OPTIONS,
+  },
 ];
 
 export function getSettingMeta(key: string): SettingCatalogEntry | undefined {
@@ -125,6 +169,9 @@ export function formatSettingValue(entry: SettingCatalogEntry, rawValue: string)
     if (!Number.isFinite(num)) return rawValue;
     const formatted = entry.unit === "$" ? `$${num.toLocaleString()}` : num.toLocaleString();
     return entry.unit && entry.unit !== "$" ? `${formatted} ${entry.unit}` : formatted;
+  }
+  if (entry.kind === "select") {
+    return entry.options?.find((o) => o.value === rawValue)?.label ?? rawValue;
   }
   return rawValue;
 }
