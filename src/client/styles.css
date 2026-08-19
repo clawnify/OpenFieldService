@@ -2096,6 +2096,16 @@ body {
 @media (max-width: 640px) {
   .notification-pref-row { flex-direction: column; }
   .notification-pref-row .btn { align-self: flex-start; }
+  /* Phase 9.5 browser verification: the SMS consent-source <select> in the
+   * enable-SMS modal (rendered as a child of .notification-preferences)
+   * inherits the app-wide .form-group select 13px font-size, which is
+   * below the 16px iOS Safari uses as its no-auto-zoom-on-focus threshold —
+   * confirmed in a real Chromium render at 430/390px. Scoped to this
+   * component only, matching the existing .lead-form/.schedule-edit-grid/
+   * .jobs-search-input precedent rather than changing .form-group select
+   * app-wide (out of scope — a pre-existing, app-wide gap noted in an
+   * earlier phase). */
+  .notification-preferences select { font-size: 16px; }
 }
 
 @media (max-width: 430px) {

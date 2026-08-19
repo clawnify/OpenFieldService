@@ -66,7 +66,16 @@ export function NotificationPreferences({
     }
   }, [basePath]);
 
-  useEffect(() => { load(); }, [load]);
+  // Phase 9.5 browser verification fix: this effect used to call load()
+  // unconditionally, even though the component always renders null for a
+  // technician a few lines below — every technician page load was firing a
+  // doomed GET that the server correctly 403s (RBAC was never actually
+  // bypassed — nothing leaked), but it was pure waste plus a spontaneous
+  // console error on every job/customer/lead detail page a technician
+  // opens. Confirmed live via a real Chromium session (403 fired from
+  // useEffect alone, with zero manual interaction). The role gate now
+  // guards the fetch itself, not just the render.
+  useEffect(() => { if (role !== "technician") load(); }, [load, role]);
 
   if (role === "technician") return null;
 

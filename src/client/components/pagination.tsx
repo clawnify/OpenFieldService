@@ -16,6 +16,7 @@ export function Pagination({ pag, setPage }: Props) {
         class="pagination-btn"
         disabled={pag.page <= 1}
         onClick={() => setPage(pag.page - 1)}
+        aria-label="Previous page"
       >
         <ChevronLeft size={14} />
       </button>
@@ -26,6 +27,7 @@ export function Pagination({ pag, setPage }: Props) {
         class="pagination-btn"
         disabled={pag.page >= totalPages}
         onClick={() => setPage(pag.page + 1)}
+        aria-label="Next page"
       >
         <ChevronRight size={14} />
       </button>

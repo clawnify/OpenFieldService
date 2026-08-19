@@ -2302,7 +2302,18 @@ app.openapi(updateCustomerNotificationPreferences, async (c) => {
     const preferences = await updatePreferences("customer", Number(id), {
       emailEnabled: data.email_enabled, smsEnabled: data.sms_enabled, smsConsentSource: data.sms_consent_source,
     });
-    return c.json({ preferences }, 200);
+    // Phase 9.5 browser verification fix: this response used to omit
+    // sms_consent_sources (unlike the GET route below), so the client's
+    // setData(res) after ANY mutation (even a plain email toggle) wiped out
+    // the consent-source list it had loaded from the initial GET — the next
+    // time the user opened the Enable SMS modal, `data.sms_consent_sources
+    // .map(...)` threw "Cannot read properties of undefined (reading
+    // 'map')", crashing the whole component. Reproduced live in a real
+    // Chromium browser (page crashed exactly on this call whenever any
+    // mutation preceded opening the modal — which is unavoidable in the
+    // required enable->disable->re-enable flow). Fixed by mirroring the GET
+    // response shape here, same as the Lead route below.
+    return c.json({ preferences, sms_consent_sources: CONSENT_SOURCES }, 200);
   } catch (err) {
     if (err instanceof PreferenceUpdateError) return c.json({ error: err.message }, 400);
     throw err;
@@ -2858,7 +2869,10 @@ app.openapi(updateLeadNotificationPreferences, async (c) => {
     const preferences = await updatePreferences("lead", Number(id), {
       emailEnabled: data.email_enabled, smsEnabled: data.sms_enabled, smsConsentSource: data.sms_consent_source,
     });
-    return c.json({ preferences }, 200);
+    // Phase 9.5 browser verification fix — see the identical Customer route
+    // above for the full explanation (missing sms_consent_sources here used
+    // to crash the Enable SMS modal after any prior preference mutation).
+    return c.json({ preferences, sms_consent_sources: CONSENT_SOURCES }, 200);
   } catch (err) {
     if (err instanceof PreferenceUpdateError) return c.json({ error: err.message }, 400);
     throw err;

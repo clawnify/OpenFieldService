@@ -65,7 +65,12 @@ export function NotificationHistory({
     }
   }, [path, entityId, viewingAll, page, limit]);
 
-  useEffect(() => { load(); }, [load]);
+  // Phase 9.5 browser verification fix — see the identical fix in
+  // notification-preferences.tsx for the full explanation: the fetch used
+  // to fire unconditionally even though a technician always renders null
+  // below, causing a spontaneous, doomed 403 (and console error) on every
+  // job/customer/lead/invoice detail page a technician opens.
+  useEffect(() => { if (role !== "technician") load(); }, [load, role]);
 
   if (role === "technician") return null;
 

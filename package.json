@@ -23,6 +23,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.21.3",
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.62.1",
     "@preact/preset-vite": "^2.9.0",
     "@types/node": "^26.2.0",
     "concurrently": "^9.0.0",
