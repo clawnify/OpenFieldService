@@ -550,10 +550,15 @@ describe("existing field service API", () => {
         expect(res.response.status).toBe(200);
       });
 
-      it("technician gets 403", async () => {
+      // Phase 10.3 — widened from 403 to 200: this config carries zero job
+      // data and zero secrets (only GOOGLE_MAPS_BROWSER_API_KEY, never the
+      // server geocoding secret), and the Technician Route View now
+      // legitimately needs it to render its own map. See
+      // mem:phase10/maps-routing-architecture-audit's Phase 10.3 section.
+      it("technician also gets a config response (needed for the Technician Route View's own map)", async () => {
         const auth = await technicianAuth();
-        const res = await request("/api/config/maps", auth);
-        expect(res.response.status).toBe(403);
+        const res = await request<{ enabled: boolean; browserApiKey: string | null }>("/api/config/maps", auth);
+        expect(res.response.status).toBe(200);
       });
 
       it("unauthenticated gets 401", async () => {
@@ -572,6 +577,91 @@ describe("existing field service API", () => {
           mapsEnvKey.GOOGLE_MAPS_BROWSER_API_KEY = prev;
         }
       });
+    });
+  });
+
+  // Phase 10.3 — Technician Route View (mem:phase10/maps-routing-architecture-audit).
+  // ZERO new API endpoints — the dataset is the existing GET /api/schedule
+  // (already technician-scoped, already carries lat/lng/geocode_status
+  // since Phase 10.2) narrowed to a single day. These tests confirm that
+  // exact combination (own-scoping + single-day range + geocode fields)
+  // together, since Phase 10.2's own tests only exercised each piece
+  // separately.
+  describe("Phase 10.3 — Technician Route data scoping (GET /api/schedule, single-day)", () => {
+    async function createLinkedTechnician(email: string, adminAuth: RequestInit) {
+      const user = await createUser({ email, password: "TechPass123", role: "technician" });
+      const tech = await post<{ id: number }>("/api/technicians", { name: email, user_id: user.id }, adminAuth);
+      expect(tech.response.status).toBe(201);
+      const { cookie } = await loginAs(email, "TechPass123");
+      return { technicianId: tech.body.id, auth: { headers: { cookie } } as RequestInit };
+    }
+
+    it("a technician's own route day includes only their own jobs, with correct lat/lng/geocode_status", async () => {
+      const auth = await authHeaders();
+      const techA = await createLinkedTechnician("route-tech-a@example.test", auth);
+      const techB = await createLinkedTechnician("route-tech-b@example.test", auth);
+      const customer = await createCustomer();
+      const routeDate = "2026-09-15";
+      const jobA1 = await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "09:00" });
+      const jobA2 = await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "13:00" });
+      const jobB1 = await createJob(customer.id, routeDate, { technician_id: techB.technicianId, scheduled_time: "10:00" });
+      await geocodeJob(jobA1.id, new MockGeocodingProvider({ status: "ok", latitude: 49.1, longitude: -123.1 }));
+
+      const res = await request<{ jobs: { id: number; latitude: number | null; geocode_status: string }[] }>(
+        `/api/schedule?start=${routeDate}&end=${routeDate}`, techA.auth
+      );
+      const ids = res.body.jobs.map((j) => j.id);
+      expect(ids).toContain(jobA1.id);
+      expect(ids).toContain(jobA2.id);
+      expect(ids).not.toContain(jobB1.id); // IDOR: technician B's job never appears for technician A
+      const found1 = res.body.jobs.find((j) => j.id === jobA1.id);
+      expect(found1).toMatchObject({ latitude: 49.1, geocode_status: "geocoded" });
+    });
+
+    it("a technician cannot retrieve another technician's route via ?technician_id= override (IDOR)", async () => {
+      const auth = await authHeaders();
+      const techA = await createLinkedTechnician("route-tech-c@example.test", auth);
+      const techB = await createLinkedTechnician("route-tech-d@example.test", auth);
+      const customer = await createCustomer();
+      const routeDate = "2026-09-16";
+      const jobB = await createJob(customer.id, routeDate, { technician_id: techB.technicianId, scheduled_time: "09:00" });
+
+      const res = await request<{ jobs: { id: number }[] }>(
+        `/api/schedule?start=${routeDate}&end=${routeDate}&technician_id=${techB.technicianId}`, techA.auth
+      );
+      expect(res.body.jobs.map((j) => j.id)).not.toContain(jobB.id);
+    });
+
+    it("non-geocoded jobs are still included in the route day, never dropped, never fabricated", async () => {
+      const auth = await authHeaders();
+      const techA = await createLinkedTechnician("route-tech-e@example.test", auth);
+      const customer = await createCustomer();
+      const routeDate = "2026-09-17";
+      const job = await createJob(customer.id, routeDate, { technician_id: techA.technicianId });
+
+      const res = await request<{ jobs: { id: number; latitude: number | null; geocode_status: string }[] }>(
+        `/api/schedule?start=${routeDate}&end=${routeDate}`, techA.auth
+      );
+      const found = res.body.jobs.find((j) => j.id === job.id);
+      expect(found).toMatchObject({ latitude: null, geocode_status: "pending" });
+    });
+
+    it("unauthenticated request gets 401", async () => {
+      const res = await request("/api/schedule?start=2026-09-15&end=2026-09-15");
+      expect(res.response.status).toBe(401);
+    });
+
+    it("loading a technician's own route never triggers a server geocoding call", async () => {
+      const auth = await authHeaders();
+      const techA = await createLinkedTechnician("route-tech-f@example.test", auth);
+      const customer = await createCustomer();
+      const routeDate = "2026-09-18";
+      await createJob(customer.id, routeDate, { technician_id: techA.technicianId });
+
+      const before = await queryDb<{ c: number }>("SELECT COUNT(*) as c FROM jobs WHERE geocode_status = 'geocoded'");
+      await request(`/api/schedule?start=${routeDate}&end=${routeDate}`, techA.auth);
+      const after = await queryDb<{ c: number }>("SELECT COUNT(*) as c FROM jobs WHERE geocode_status = 'geocoded'");
+      expect(after[0].c).toBe(before[0].c);
     });
   });
 

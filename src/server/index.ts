@@ -3343,13 +3343,17 @@ app.openapi(getSchedule, async (c) => {
 // Phase 10.2 — the ONLY way the Dispatcher Map's client code learns
 // whether/how to load the Google Maps JavaScript API. Returns config, not
 // job data (Section 8 explicitly forbids a company-wide job-data endpoint;
-// this isn't one — it's a tiny, cacheable, RBAC-gated config read). Same
-// RBAC as the Map feature itself (admin/dispatcher; technician never sees
-// the Map tab, so this route is never called for that role in practice,
-// but the server stays authoritative regardless — Section 18's explicit
-// "do not rely only on UI hiding"). The returned key is
-// GOOGLE_MAPS_BROWSER_API_KEY (see MapsBrowserBindings above) — NEVER the
-// server-side GOOGLE_MAPS_API_KEY geocoding secret (GoogleGeocodingBindings).
+// this isn't one — it's a tiny, cacheable, RBAC-gated config read). The
+// returned key is GOOGLE_MAPS_BROWSER_API_KEY (see MapsBrowserBindings
+// above) — NEVER the server-side GOOGLE_MAPS_API_KEY geocoding secret
+// (GoogleGeocodingBindings). Open to every authenticated role, including
+// technician (Phase 10.2 originally blocked technician here, since only
+// the Dispatcher Map existed then; Phase 10.3's Technician Route View
+// needs this exact same non-secret, non-job-data config to render its own
+// map, so the block was widened — it never carried job data or the
+// server geocoding secret in the first place, so widening it exposes
+// nothing new). The standard `/api/*` auth middleware still requires
+// authentication (401 unauthenticated).
 const mapsConfigResponseSchema = z.object({
   enabled: z.boolean(),
   browserApiKey: z.string().nullable(),
@@ -3360,13 +3364,10 @@ const getMapsConfig = createRoute({
   path: "/api/config/maps",
   responses: {
     200: { description: "Browser Maps config", content: { "application/json": { schema: mapsConfigResponseSchema } } },
-    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
 app.openapi(getMapsConfig, async (c) => {
-  const me = currentUser(c);
-  if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
   const key = c.env.GOOGLE_MAPS_BROWSER_API_KEY || null;
   return c.json({ enabled: !!key, browserApiKey: key }, 200);
 });

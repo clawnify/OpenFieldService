@@ -2197,3 +2197,28 @@ body {
   .schedule-map-pane-map, .schedule-map-canvas { min-height: 320px; }
   .schedule-map-list { max-height: none; }
 }
+
+/* Phase 10.3 — Technician Route View. Reuses .schedule-map-* split/pane/
+ * list/banner classes from Phase 10.2 verbatim (same responsive behavior,
+ * same mobile-first list-first default); only the day-nav header and stop
+ * numbering/actions are new, technician-scoped classes. */
+.tech-route-view { display: flex; flex-direction: column; gap: 12px; }
+
+.tech-route-day-nav {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.tech-route-day-label { font-weight: 700; min-width: 160px; text-align: center; }
+
+.tech-route-stop-number {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--primary); color: #fff; font-size: 0.75rem; font-weight: 700;
+  flex-shrink: 0;
+}
+
+.tech-route-stop-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+
+@media (max-width: 640px) {
+  .tech-route-day-nav { justify-content: center; }
+  .tech-route-stop-actions .btn { flex: 1 1 auto; min-height: 44px; font-size: 15px; }
+}
