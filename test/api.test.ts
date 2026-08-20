@@ -1,8 +1,9 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   applySchema, authHeaders, createCustomer, createJob,
-  post, put, del, request, resetDatabase,
+  post, put, del, request, resetDatabase, queryDb,
 } from "./helpers.js";
+import { MockGeocodingProvider, geocodeJob } from "../src/server/geocoding.js";
 
 beforeAll(async () => {
   await applySchema();
@@ -104,6 +105,82 @@ describe("existing field service API", () => {
       duration: 60,
       price: 150,
       scheduled_time: "10:30",
+    });
+  });
+
+  // Phase 10.0 — Location Data Model + Provider Interfaces
+  // (mem:phase10/maps-routing-architecture-audit). jobs.address is the
+  // authoritative, already-snapshotted service location this whole
+  // geocoding model is built on — these tests prove PUT /api/jobs/{id}
+  // correctly clears stale coordinates whenever that address actually
+  // changes, server-side, never relying on the UI to remember to do it.
+  describe("Phase 10.0 — address change clears geocoded coordinates", () => {
+    it("changing a job's address resets latitude/longitude/geocoded_at/geocode_status back to pending", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      await geocodeJob(job.id, new MockGeocodingProvider({ status: "ok", latitude: 49.28, longitude: -123.12 }));
+      const before = await queryDb<{ geocode_status: string }>("SELECT geocode_status FROM jobs WHERE id = ?", [job.id]);
+      expect(before[0].geocode_status).toBe("geocoded");
+
+      const update = await put<{ ok: boolean }>(`/api/jobs/${job.id}`, { address: "999 New Service Rd, Surrey, BC" }, auth);
+      expect(update.response.status).toBe(200);
+
+      const rows = await queryDb<{ latitude: number | null; longitude: number | null; geocoded_at: string | null; geocode_status: string; address: string }>(
+        "SELECT latitude, longitude, geocoded_at, geocode_status, address FROM jobs WHERE id = ?", [job.id]
+      );
+      expect(rows[0]).toMatchObject({
+        latitude: null, longitude: null, geocoded_at: null, geocode_status: "pending",
+        address: "999 New Service Rd, Surrey, BC",
+      });
+    });
+
+    it("resubmitting the SAME unchanged address does NOT discard an already-resolved geocode", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      await geocodeJob(job.id, new MockGeocodingProvider({ status: "ok", latitude: 49.28, longitude: -123.12 }));
+      const current = await queryDb<{ address: string }>("SELECT address FROM jobs WHERE id = ?", [job.id]);
+
+      await put<{ ok: boolean }>(`/api/jobs/${job.id}`, { address: current[0].address, notes: "unrelated edit" }, auth);
+
+      const rows = await queryDb<{ geocode_status: string }>("SELECT geocode_status FROM jobs WHERE id = ?", [job.id]);
+      expect(rows[0].geocode_status).toBe("geocoded");
+    });
+
+    it("editing an unrelated field (not address) does NOT clear an already-resolved geocode", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      await geocodeJob(job.id, new MockGeocodingProvider({ status: "ok", latitude: 49.28, longitude: -123.12 }));
+
+      await put<{ ok: boolean }>(`/api/jobs/${job.id}`, { notes: "just a note update" }, auth);
+
+      const rows = await queryDb<{ geocode_status: string; latitude: number | null }>(
+        "SELECT geocode_status, latitude FROM jobs WHERE id = ?", [job.id]
+      );
+      expect(rows[0]).toMatchObject({ geocode_status: "geocoded", latitude: 49.28 });
+    });
+
+    it("geocoding a job never touches Google Calendar sync state or creates a NEW notification (no cross-domain side effects)", async () => {
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      // createJob() itself already enqueues an appointment-confirmation
+      // notification (Phase 9.1) — capture that baseline count first so
+      // this test proves geocoding adds no ADDITIONAL row, rather than
+      // wrongly asserting zero notifications ever exist for the job.
+      const before = await queryDb(
+        "SELECT id FROM notification_outbox WHERE entity_type = 'job' AND entity_id = ?", [job.id]
+      );
+
+      await geocodeJob(job.id, new MockGeocodingProvider({ status: "ok", latitude: 49.28, longitude: -123.12 }));
+
+      const mappings = await queryDb("SELECT * FROM calendar_event_mappings WHERE job_id = ?", [job.id]);
+      expect(mappings).toHaveLength(0);
+      const after = await queryDb(
+        "SELECT id FROM notification_outbox WHERE entity_type = 'job' AND entity_id = ?", [job.id]
+      );
+      expect(after).toHaveLength(before.length);
     });
   });
 

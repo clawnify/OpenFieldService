@@ -1021,6 +1021,18 @@ app.openapi(updateJob, async (c) => {
       vals.push(v);
     }
   }
+  // Phase 10.0 — if the Job's own service address actually changes, any
+  // coordinates resolved for the OLD address must never be silently
+  // trusted as still describing the new one (see
+  // mem:phase10/maps-routing-architecture-audit's address-change
+  // semantics). Server-side, not left to the UI to remember. Compared
+  // against the existing row, not just "address is present in this
+  // request" — an edit that resubmits the same unchanged address must not
+  // discard a perfectly good, already-resolved geocode.
+  const addressChanged = data.address !== undefined && data.address !== existing.address;
+  if (addressChanged) {
+    fields.push("latitude = NULL", "longitude = NULL", "geocoded_at = NULL", "geocode_status = 'pending'");
+  }
   if (fields.length > 0) {
     fields.push("updated_at = datetime('now')");
     await run(`UPDATE jobs SET ${fields.join(", ")} WHERE id = ?`, [...vals, id]);
