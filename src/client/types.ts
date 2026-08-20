@@ -114,6 +114,12 @@ export interface Job {
   job_notes?: JobNote[];
   checklist?: ChecklistItem[];
   job_materials?: JobMaterial[];
+  // Phase 10.2 — additive; only present because JobSchema (server) now
+  // includes them. Only the Dispatcher Map view reads these; every other
+  // Job consumer in the app is unaffected by their presence.
+  latitude?: number | null;
+  longitude?: number | null;
+  geocode_status?: string;
   created_at: string;
   updated_at: string;
 }

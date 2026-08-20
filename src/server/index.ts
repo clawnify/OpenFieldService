@@ -134,7 +134,16 @@ type GoogleBindings = {
   TOKEN_ENCRYPTION_KEY?: string;
 };
 
-type Env = { Bindings: { DB: D1Database } & GoogleBindings & StorageEnv & NotificationProviderBindings & GoogleGeocodingBindings; Variables: { user: PublicUser } };
+// Phase 10.2 — deliberately a SEPARATE type/binding from
+// GoogleGeocodingBindings#GOOGLE_MAPS_API_KEY (the server-side geocoding
+// secret). This key is designed to reach the browser (Google's own model —
+// a Maps JavaScript API key is restricted via HTTP referrer, not secrecy)
+// and must never be the same value as the geocoding secret, which must
+// never leave the server. Non-secret tier, same as GOOGLE_CLIENT_ID above —
+// lives in wrangler.toml's [vars], not .dev.vars.
+type MapsBrowserBindings = { GOOGLE_MAPS_BROWSER_API_KEY?: string };
+
+type Env = { Bindings: { DB: D1Database } & GoogleBindings & StorageEnv & NotificationProviderBindings & GoogleGeocodingBindings & MapsBrowserBindings; Variables: { user: PublicUser } };
 
 function googleEnv(c: Context<Env>): GoogleOAuthEnv & CalendarSyncEnv {
   const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, TOKEN_ENCRYPTION_KEY } = c.env;
@@ -355,6 +364,19 @@ const JobSchema = z.object({
   service_type_name: z.string().nullable().optional(),
   service_type_color: z.string().nullable().optional(),
   job_notes: z.array(JobNoteSchema).optional(),
+  // Phase 10.2 — additive, nullable/optional: every existing consumer of
+  // JobSchema (job-list, job-detail, etc.) is unaffected; only the new
+  // Dispatcher Map view reads these. Sourced from the same `SELECT j.*`
+  // every JobSchema-returning route already runs — Phase 10.0's migration
+  // put these columns on `jobs` itself, so no query change was needed
+  // anywhere, only this schema addition. `geocode_status` stays a plain
+  // string (not a z.enum mirror of GeocodeStatus) matching this file's
+  // own established precedent of never DB-CHECKing/schema-locking a status
+  // vocabulary that's allowed to grow without a migration (see
+  // migrations/0013's own comment).
+  latitude: z.number().nullable().optional(),
+  longitude: z.number().nullable().optional(),
+  geocode_status: z.string().optional(),
   created_at: z.string(),
   updated_at: z.string(),
 }).openapi("Job");
@@ -3316,6 +3338,37 @@ app.openapi(getSchedule, async (c) => {
     params
   );
   return c.json({ jobs }, 200);
+});
+
+// Phase 10.2 — the ONLY way the Dispatcher Map's client code learns
+// whether/how to load the Google Maps JavaScript API. Returns config, not
+// job data (Section 8 explicitly forbids a company-wide job-data endpoint;
+// this isn't one — it's a tiny, cacheable, RBAC-gated config read). Same
+// RBAC as the Map feature itself (admin/dispatcher; technician never sees
+// the Map tab, so this route is never called for that role in practice,
+// but the server stays authoritative regardless — Section 18's explicit
+// "do not rely only on UI hiding"). The returned key is
+// GOOGLE_MAPS_BROWSER_API_KEY (see MapsBrowserBindings above) — NEVER the
+// server-side GOOGLE_MAPS_API_KEY geocoding secret (GoogleGeocodingBindings).
+const mapsConfigResponseSchema = z.object({
+  enabled: z.boolean(),
+  browserApiKey: z.string().nullable(),
+}).openapi("MapsConfig");
+
+const getMapsConfig = createRoute({
+  method: "get",
+  path: "/api/config/maps",
+  responses: {
+    200: { description: "Browser Maps config", content: { "application/json": { schema: mapsConfigResponseSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getMapsConfig, async (c) => {
+  const me = currentUser(c);
+  if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
+  const key = c.env.GOOGLE_MAPS_BROWSER_API_KEY || null;
+  return c.json({ enabled: !!key, browserApiKey: key }, 200);
 });
 
 // ── Job Checklist ──────────────────────────────────────────────────

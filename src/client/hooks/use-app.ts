@@ -444,6 +444,10 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void, ro
     setScheduleEnd(end);
   }, []);
 
+  const refreshSchedule = useCallback(async () => {
+    await fetchSchedule(scheduleStart, scheduleEnd);
+  }, [scheduleStart, scheduleEnd, fetchSchedule]);
+
   return {
     navigate, isAgent, stats,
     jobs, jobsPag, setJobsPage, jobsSearch, setJobsSearch, jobsStatusFilter, setJobsStatusFilter,
@@ -460,7 +464,7 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void, ro
     invoices, invoicesPag, setInvoicesPage, invoicesStatusFilter, setInvoicesStatusFilter,
     selectedInvoice, selectInvoice, addInvoice, updateInvoice, deleteInvoice,
     issueInvoice, voidInvoice, setInvoiceRebate, recordPayment, voidPayment,
-    scheduleJobs, scheduleStart, scheduleEnd, setScheduleRange,
+    scheduleJobs, scheduleStart, scheduleEnd, setScheduleRange, refreshSchedule,
     customerLookup, technicianLookup,
     loading, error, setError,
   };

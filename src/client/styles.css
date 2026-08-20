@@ -2123,3 +2123,77 @@ body {
 @media (max-width: 430px) {
   .notification-history-table th:nth-child(3), .notification-history-table td:nth-child(3) { display: none; }
 }
+
+/* Phase 10.2 — Dispatcher Map view. Desktop: side-by-side map + synced
+ * list. Tablet (<=900px): stacked, both still visible (no toggle needed,
+ * plenty of vertical room). Mobile (<=640px, covers 430/390): a single
+ * pane at a time via .mobile-hidden, switched by the toggle button —
+ * never a forced split-screen at phone widths (explicit requirement). */
+.schedule-map-view { display: flex; flex-direction: column; gap: 12px; }
+
+.schedule-map-banner {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; border-radius: var(--radius-sm);
+  background: #fef3c7; color: #92400e; font-size: 0.9rem;
+}
+.schedule-map-banner.success { background: var(--primary-light); color: var(--primary-hover); }
+.schedule-map-banner button.btn-icon { margin-left: auto; color: inherit; }
+
+.schedule-map-mobile-toggle { display: none; }
+
+.schedule-map-split {
+  display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px;
+  min-height: 480px;
+}
+
+.schedule-map-pane {
+  background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; display: flex; flex-direction: column;
+}
+
+.schedule-map-pane-map { position: relative; min-height: 420px; }
+
+.schedule-map-canvas { width: 100%; height: 100%; min-height: 420px; }
+
+.schedule-map-status, .schedule-map-empty-overlay {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 8px; padding: 24px; text-align: center;
+  color: var(--text-secondary); background: var(--card-bg);
+}
+.schedule-map-status { position: static; height: 100%; }
+
+.schedule-map-list { padding: 12px; overflow-y: auto; max-height: 640px; }
+
+.schedule-map-job-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+
+.schedule-map-job-row {
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px;
+  cursor: pointer; display: flex; flex-direction: column; gap: 4px;
+}
+.schedule-map-job-row:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.schedule-map-job-row.selected { border-color: var(--primary); background: var(--primary-light); }
+
+.schedule-map-nogeo-tag { font-size: 0.75rem; margin-left: auto; }
+
+.schedule-map-row-actions { display: flex; gap: 8px; margin-top: 4px; }
+
+/* Google's own InfoWindow chrome wraps this content — only inner spacing
+ * needed here. Built via DOM textContent, never innerHTML (see
+ * schedule-map.tsx#buildInfoWindowContent). */
+.schedule-map-infowindow { display: flex; flex-direction: column; gap: 4px; min-width: 180px; font-size: 0.875rem; }
+.schedule-map-infowindow-title { font-weight: 700; }
+.schedule-map-infowindow-address { color: var(--text-secondary); }
+
+@media (max-width: 900px) {
+  .schedule-map-split { grid-template-columns: 1fr; }
+  .schedule-map-pane-map { min-height: 360px; }
+  .schedule-map-canvas { min-height: 360px; }
+}
+
+@media (max-width: 640px) {
+  .schedule-map-mobile-toggle { display: block; }
+  .schedule-map-split { grid-template-columns: 1fr; }
+  .schedule-map-pane.mobile-hidden { display: none; }
+  .schedule-map-pane-map, .schedule-map-canvas { min-height: 320px; }
+  .schedule-map-list { max-height: none; }
+}

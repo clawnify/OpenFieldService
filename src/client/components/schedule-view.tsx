@@ -4,15 +4,21 @@ import { useAuth } from "../auth-context";
 import { CreateJob } from "./create-job";
 import { DayDetail } from "./day-detail";
 import { ScheduleEditModal } from "./schedule-edit-modal";
+import { ScheduleMap } from "./schedule-map";
 import { STATUS_COLORS, STATUS_LABELS, STATUS_ABBR } from "./status-badge";
 import { ChevronLeft, ChevronRight, Flag, CalendarClock, MapPin } from "lucide-preact";
 import type { Job } from "../types";
 
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const MAX_VISIBLE_JOBS = 3;
-const VIEW_MODES = ["month", "week", "day", "list"] as const;
+// Phase 10.2 — "map" is admin/dispatcher only (see canSchedule gate below,
+// same UX-only-hiding pattern as drag-and-drop; the underlying data route
+// GET /api/schedule already force-scopes a technician to their own job(s)
+// regardless of this tab's visibility — server remains authoritative, per
+// mem:phase10/maps-routing-architecture-audit Section 18).
+const VIEW_MODES = ["month", "week", "day", "list", "map"] as const;
 type ViewMode = typeof VIEW_MODES[number];
-const VIEW_LABELS: Record<ViewMode, string> = { month: "Month", week: "Week", day: "Day", list: "List" };
+const VIEW_LABELS: Record<ViewMode, string> = { month: "Month", week: "Week", day: "Day", list: "List", map: "Map" };
 
 function toISODate(d: Date): string {
   return d.toISOString().split("T")[0];
@@ -58,7 +64,7 @@ function getMonthGrid(anchor: Date): string[] {
 const PRIORITY_FLAG_COLOR: Record<string, string> = { high: "#f59e0b", urgent: "#dc2626" };
 
 export function ScheduleView() {
-  const { scheduleJobs, setScheduleRange, navigate, technicianLookup } = useApp();
+  const { scheduleJobs, setScheduleRange, refreshSchedule, navigate, technicianLookup } = useApp();
   const { user } = useAuth();
   // Drag-and-drop reschedule and inline "Reschedule" actions are dispatcher/
   // admin only — a technician is read-only in the scheduler (server-side
@@ -66,6 +72,11 @@ export function ScheduleView() {
   // technician on any scheduling field; hiding these affordances here is UX
   // only, not a second authorization layer). See mem:phase7/advanced-scheduler.
   const canSchedule = user?.role === "admin" || user?.role === "dispatcher";
+  // Phase 10.2 — the Dispatcher Map tab is hidden entirely for a
+  // technician (UX only; GET /api/schedule already force-scopes their data
+  // server-side regardless — see mem:phase10/maps-routing-architecture-audit
+  // Section 18, "do not rely only on UI hiding").
+  const visibleViewModes = canSchedule ? VIEW_MODES : VIEW_MODES.filter((v) => v !== "map");
 
   const [viewMode, setViewMode] = useState<ViewMode>("month");
 
@@ -101,13 +112,25 @@ export function ScheduleView() {
 
   // Every view mode drives the same GET /api/schedule?start=&end= range
   // fetch already used before Phase 7 — no new endpoint, just a wider or
-  // narrower range depending on which view is active.
+  // narrower range depending on which view is active. Phase 10.2's "map"
+  // mode falls into the same final `else` as "list" — it deliberately
+  // shares List's date range AND filters (technician/status/search)
+  // rather than inventing a second, duplicate set (Section 15's explicit
+  // "do not duplicate filter logic inside Map component").
   useEffect(() => {
     if (viewMode === "month") setScheduleRange(monthDays[0], monthDays[monthDays.length - 1]);
     else if (viewMode === "week") setScheduleRange(weekDays[0], weekDays[weekDays.length - 1]);
     else if (viewMode === "day") setScheduleRange(currentDay, currentDay);
     else setScheduleRange(listStart, listEnd);
   }, [viewMode, monthDays, weekDays, currentDay, listStart, listEnd]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Defense in depth: the "Map" tab button is never rendered for a
+  // technician, but if viewMode were ever "map" while canSchedule is
+  // false (e.g. a role change mid-session), fall back to Month rather
+  // than rendering a tab that isn't in visibleViewModes.
+  useEffect(() => {
+    if (viewMode === "map" && !canSchedule) setViewMode("month");
+  }, [viewMode, canSchedule]);
 
   const jobsByDay = useMemo(() => {
     const map = new Map<string, Job[]>();
@@ -189,7 +212,7 @@ export function ScheduleView() {
         <h1>Schedule</h1>
         <div class="page-header-right">
           <div class="view-toggle" role="tablist" aria-label="Scheduler view">
-            {VIEW_MODES.map((v) => (
+            {visibleViewModes.map((v) => (
               <button
                 key={v} role="tab" aria-selected={viewMode === v}
                 class={`view-toggle-btn ${viewMode === v ? "active" : ""}`}
@@ -199,7 +222,7 @@ export function ScheduleView() {
               </button>
             ))}
           </div>
-          {viewMode !== "list" && <button class="btn" onClick={goToday}>Today</button>}
+          {viewMode !== "list" && viewMode !== "map" && <button class="btn" onClick={goToday}>Today</button>}
           {viewMode === "month" && (
             <>
               <button class="btn btn-icon" onClick={() => setCurrentMonth((m) => new Date(m.getFullYear(), m.getMonth() - 1, 1))} aria-label="Previous month">
@@ -242,7 +265,7 @@ export function ScheduleView() {
         </div>
       </div>
 
-      {viewMode === "list" && (
+      {(viewMode === "list" || viewMode === "map") && (
         <div class="schedule-list-filters">
           <div class="form-group">
             <label htmlFor="list-start">From</label>
@@ -436,6 +459,10 @@ export function ScheduleView() {
           </table>
           </div>
         </div>
+      )}
+
+      {viewMode === "map" && canSchedule && (
+        <ScheduleMap jobs={listJobs} canSchedule={canSchedule} navigate={navigate} onGeocoded={refreshSchedule} />
       )}
 
       {detailDate && (

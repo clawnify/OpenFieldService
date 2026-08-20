@@ -106,6 +106,13 @@ export interface AppContextValue {
   scheduleStart: string;
   scheduleEnd: string;
   setScheduleRange: (start: string, end: string) => void;
+  // Phase 10.2 — re-fetches the CURRENT range without changing it. Needed
+  // because setScheduleRange(start, end) with the same start/end it
+  // already has is a no-op (identical primitive values never re-trigger
+  // the effect that calls fetchSchedule) — the Dispatcher Map's optional
+  // "Geocode Location" action needs a way to pull the just-updated
+  // coordinates back in after POST /api/jobs/{id}/geocode succeeds.
+  refreshSchedule: () => Promise<void>;
 
   // Lookups
   customerLookup: CustomerLookup[];

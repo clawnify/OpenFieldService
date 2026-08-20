@@ -44,6 +44,23 @@ RESEND_FROM_ADDRESS = ""
 # `wrangler secret put` in production — never here.
 GEOCODING_PROVIDER = "none"
 
+# Phase 10.2 — the Google Maps JavaScript API key the browser uses to
+# render the Dispatcher Map (src/client/google-maps-loader.ts, served to
+# the client via GET /api/config/maps). Deliberately NOT a secret and
+# DELIBERATELY A DIFFERENT VALUE from GEOCODING_PROVIDER's server-side
+# GOOGLE_MAPS_API_KEY above — Google's own security model for a browser
+# Maps key is HTTP-referrer restriction (Google Cloud Console →
+# Credentials → this key → "Set an application restriction" →
+# "Websites"), not secrecy; it is expected to appear in page/network
+# source. Never reuse the server geocoding secret here — that key is NOT
+# referrer-restricted and must never be embedded in client code. Blank
+# (default) means the Dispatcher Map shows its "not configured" state;
+# nothing else in the app is affected. Restrict this key to only the Maps
+# JavaScript API. For local dev with a real key, set it in .dev.vars
+# instead of editing this tracked default (same override mechanism as
+# every other var here).
+GOOGLE_MAPS_BROWSER_API_KEY = ""
+
 # Phase 9.2 — drains the notification outbox and scans for day-before
 # reminders. Every minute so the documented 1-minute first-retry backoff
 # (see src/server/notification-dispatcher.ts) is actually honored promptly;

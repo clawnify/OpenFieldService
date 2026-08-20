@@ -473,6 +473,108 @@ describe("existing field service API", () => {
     });
   });
 
+  // Phase 10.2 — Dispatcher Map UI (mem:phase10/maps-routing-architecture-audit).
+  // No new job-data endpoint (Section 8's explicit "do not create
+  // /api/map/all-jobs") — the existing GET /api/schedule response now
+  // additionally carries latitude/longitude/geocode_status via JobSchema's
+  // additive fields, and GET /api/config/maps is the one tiny new
+  // (non-job-data) config-only route.
+  describe("Phase 10.2 — Dispatcher Map data and config", () => {
+    async function dispatcherAuth(email = "dispatch-map@example.test"): Promise<RequestInit> {
+      await createUser({ email, password: "DispatchPass1", role: "dispatcher" });
+      const { cookie } = await loginAs(email, "DispatchPass1");
+      return { headers: { cookie } };
+    }
+
+    async function technicianAuth(email = "tech-map@example.test"): Promise<RequestInit> {
+      await createUser({ email, password: "TechPass123", role: "technician" });
+      const { cookie } = await loginAs(email, "TechPass123");
+      return { headers: { cookie } };
+    }
+
+    it("GET /api/schedule includes latitude/longitude/geocode_status for a geocoded job", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-09-05");
+      await geocodeJob(job.id, new MockGeocodingProvider({ status: "ok", latitude: 49.28, longitude: -123.12 }));
+
+      const res = await request<{ jobs: { id: number; latitude: number | null; longitude: number | null; geocode_status: string }[] }>(
+        "/api/schedule?start=2026-09-01&end=2026-09-30", auth
+      );
+      const found = res.body.jobs.find((j) => j.id === job.id);
+      expect(found).toMatchObject({ latitude: 49.28, longitude: -123.12, geocode_status: "geocoded" });
+    });
+
+    it("GET /api/schedule still includes a never-geocoded (pending) job, with null coordinates — never dropped, never fabricated", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-09-06");
+
+      const res = await request<{ jobs: { id: number; latitude: number | null; longitude: number | null; geocode_status: string }[] }>(
+        "/api/schedule?start=2026-09-01&end=2026-09-30", auth
+      );
+      const found = res.body.jobs.find((j) => j.id === job.id);
+      expect(found).toMatchObject({ latitude: null, longitude: null, geocode_status: "pending" });
+    });
+
+    it("a malformed date range does not 500 — returns 200 with a safely-empty or unaffected result", async () => {
+      const auth = await authHeaders();
+      const res = await request("/api/schedule?start=not-a-date&end=also-not-a-date", auth);
+      expect(res.response.status).toBe(200);
+    });
+
+    describe("GET /api/config/maps", () => {
+      // Every test in this block explicitly sets/clears GOOGLE_MAPS_BROWSER_API_KEY
+      // itself, rather than assuming it's ambiently unset — a developer's
+      // real local .dev.vars may legitimately have a real browser key
+      // configured for their own manual testing (vitest-pool-workers reads
+      // .dev.vars too), so the test must not depend on that being absent.
+      const mapsEnvKey = env as unknown as { GOOGLE_MAPS_BROWSER_API_KEY?: string };
+
+      it("admin gets a config response, never the server geocoding secret", async () => {
+        const auth = await authHeaders();
+        const prev = mapsEnvKey.GOOGLE_MAPS_BROWSER_API_KEY;
+        try {
+          mapsEnvKey.GOOGLE_MAPS_BROWSER_API_KEY = undefined;
+          const res = await request<{ enabled: boolean; browserApiKey: string | null }>("/api/config/maps", auth);
+          expect(res.response.status).toBe(200);
+          expect(res.body).toEqual({ enabled: false, browserApiKey: null });
+        } finally {
+          mapsEnvKey.GOOGLE_MAPS_BROWSER_API_KEY = prev;
+        }
+      });
+
+      it("dispatcher gets the same config response", async () => {
+        const auth = await dispatcherAuth();
+        const res = await request<{ enabled: boolean }>("/api/config/maps", auth);
+        expect(res.response.status).toBe(200);
+      });
+
+      it("technician gets 403", async () => {
+        const auth = await technicianAuth();
+        const res = await request("/api/config/maps", auth);
+        expect(res.response.status).toBe(403);
+      });
+
+      it("unauthenticated gets 401", async () => {
+        const res = await request("/api/config/maps");
+        expect(res.response.status).toBe(401);
+      });
+
+      it("reflects a configured browser key distinctly from the server geocoding secret", async () => {
+        const auth = await authHeaders();
+        const prev = mapsEnvKey.GOOGLE_MAPS_BROWSER_API_KEY;
+        try {
+          mapsEnvKey.GOOGLE_MAPS_BROWSER_API_KEY = "test-only-mock-browser-key";
+          const res = await request<{ enabled: boolean; browserApiKey: string | null }>("/api/config/maps", auth);
+          expect(res.body).toEqual({ enabled: true, browserApiKey: "test-only-mock-browser-key" });
+        } finally {
+          mapsEnvKey.GOOGLE_MAPS_BROWSER_API_KEY = prev;
+        }
+      });
+    });
+  });
+
   it("finds jobs by customer name, job number, address, or phone (see the job-list.tsx search bar's placeholder promise)", async () => {
     const auth = await authHeaders();
     const customer = await createCustomer(); // "Ada Heating", phone "555-0100", address "100 Main St"
