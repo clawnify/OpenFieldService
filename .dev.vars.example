@@ -18,3 +18,11 @@ RESEND_API_KEY=
 TWILIO_ACCOUNT_SID=
 TWILIO_AUTH_TOKEN=
 TWILIO_FROM_NUMBER=
+
+# Phase 10.1 — Google Maps Platform Geocoding API. Only used when
+# wrangler.toml's GEOCODING_PROVIDER var is set to "google" (default
+# "none" — leave that alone unless you actually want real geocoding).
+# Leaving this blank while GEOCODING_PROVIDER=google is a safe, disclosed
+# configuration failure (geocode attempts persist as "pending", never a
+# crash) — see src/server/google-geocoding.ts.
+GOOGLE_MAPS_API_KEY=

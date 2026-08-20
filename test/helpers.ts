@@ -433,6 +433,98 @@ export function mockNotificationProviders(overrides: Partial<NotificationProvide
   };
 }
 
+// ── Google Geocoding API mock (Phase 10.1) ──────────────────────────────
+//
+// Same same-isolate monkey-patch trick as mockGoogleApi()/
+// mockNotificationProviders() above — no test ever reaches the real Google
+// Maps Platform (Section 20's explicit "ZERO real Google network calls"
+// requirement for the automated suite).
+
+export interface GoogleGeocodingMockState {
+  status: "OK" | "ZERO_RESULTS" | "OVER_QUERY_LIMIT" | "REQUEST_DENIED" | "INVALID_REQUEST" | "UNKNOWN_ERROR";
+  lat: number;
+  lng: number;
+  formattedAddress: string;
+  placeId: string;
+  /** Non-200 HTTP status to return BEFORE any Google `status` field is
+   *  considered — set to test the transport-level (not application-level)
+   *  error path. */
+  httpStatus: number;
+  /** Returns literally-invalid JSON instead of a real body. */
+  malformed: boolean;
+  /** Returns an "OK" status but with a missing/invalid coordinate — proves
+   *  the adapter's own defense-in-depth validation, not just Google's. */
+  invalidCoordinate: boolean;
+  /** Artificial delay (ms) before responding — races against the caller's
+   *  AbortSignal.timeout() the same way mockGoogleApi's insertDelayMs races
+   *  a real concurrent request; used by the TIMEOUT test. */
+  delayMs: number;
+  calls: { url: string }[];
+}
+
+export interface GoogleGeocodingMock {
+  state: GoogleGeocodingMockState;
+  restore: () => void;
+}
+
+export function mockGoogleGeocodingApi(overrides: Partial<GoogleGeocodingMockState> = {}): GoogleGeocodingMock {
+  const state: GoogleGeocodingMockState = {
+    status: "OK",
+    lat: 49.2827,
+    lng: -123.1207,
+    formattedAddress: "123 Mock St, Vancouver, BC, Canada",
+    placeId: "mock_place_id",
+    httpStatus: 200,
+    malformed: false,
+    invalidCoordinate: false,
+    delayMs: 0,
+    calls: [],
+    ...overrides,
+  };
+
+  const original = globalThis.fetch;
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    if (!url.includes("maps.googleapis.com/maps/api/geocode")) return original(input as RequestInfo, init);
+    state.calls.push({ url });
+
+    if (state.delayMs > 0) {
+      const signal = init?.signal;
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, state.delayMs);
+        if (signal) {
+          if (signal.aborted) { clearTimeout(timer); reject(new DOMException("The operation was aborted.", "TimeoutError")); return; }
+          signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(new DOMException("The operation was aborted.", "TimeoutError"));
+          }, { once: true });
+        }
+      });
+    }
+
+    if (state.malformed) return new Response("not valid json {{{", { status: 200 });
+    if (state.httpStatus !== 200) return new Response(JSON.stringify({ error_message: "mocked http failure" }), { status: state.httpStatus });
+
+    if (state.status !== "OK") {
+      return new Response(JSON.stringify({ status: state.status, results: [] }), { status: 200 });
+    }
+
+    const location = state.invalidCoordinate ? { lat: 999, lng: state.lng } : { lat: state.lat, lng: state.lng };
+    return new Response(JSON.stringify({
+      status: "OK",
+      results: [{ formatted_address: state.formattedAddress, place_id: state.placeId, geometry: { location } }],
+    }), { status: 200 });
+  }) as typeof fetch;
+
+  return {
+    state,
+    restore() {
+      globalThis.fetch = original;
+    },
+  };
+}
+
 /** Calls the exported Cloudflare `scheduled()` handler directly — same
  *  in-isolate direct-call pattern `request()` above uses for `fetch()`, just
  *  for the Cron entry point instead (there is no HTTP route to trigger a

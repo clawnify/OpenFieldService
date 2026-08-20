@@ -1,6 +1,7 @@
+import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
-  applySchema, authHeaders, createCustomer, createJob,
+  applySchema, authHeaders, createCustomer, createJob, createUser, loginAs, mockGoogleGeocodingApi,
   post, put, del, request, resetDatabase, queryDb,
 } from "./helpers.js";
 import { MockGeocodingProvider, geocodeJob } from "../src/server/geocoding.js";
@@ -181,6 +182,294 @@ describe("existing field service API", () => {
         "SELECT id FROM notification_outbox WHERE entity_type = 'job' AND entity_id = ?", [job.id]
       );
       expect(after).toHaveLength(before.length);
+    });
+  });
+
+  // Phase 10.1 — POST /api/jobs/{id}/geocode, the one narrow operational
+  // trigger for real geocoding (mem:phase10/maps-routing-architecture-audit).
+  // GEOCODING_PROVIDER is unset in the test environment (see wrangler.toml's
+  // "none" default), so buildGeocodingProvider() selects NoopGeocodingProvider
+  // for every test in this block UNLESS a test explicitly overrides `env` —
+  // exercising the route/RBAC/persistence wiring here; the Google adapter's
+  // own request/response/error behavior is covered by test/google-geocoding.test.ts.
+  describe("Phase 10.1 — POST /api/jobs/{id}/geocode", () => {
+    // worker-configuration.d.ts (wrangler-generated) is already stale
+    // relative to wrangler.toml — it doesn't even know about the
+    // pre-existing RESEND_FROM_ADDRESS var, let alone this phase's new
+    // GEOCODING_PROVIDER/GOOGLE_MAPS_API_KEY. Same cast-through-unknown
+    // pattern test/notification-dispatcher.test.ts already uses for the
+    // identical situation (buildProviders(env as unknown as ...)).
+    const geocodeEnv = env as unknown as { GEOCODING_PROVIDER?: string; GOOGLE_MAPS_API_KEY?: string };
+
+    async function dispatcherAuth(email = "dispatch-geocode@example.test"): Promise<RequestInit> {
+      await createUser({ email, password: "DispatchPass1", role: "dispatcher" });
+      const { cookie } = await loginAs(email, "DispatchPass1");
+      return { headers: { cookie } };
+    }
+
+    async function technicianAuth(email = "tech-geocode@example.test"): Promise<RequestInit> {
+      await createUser({ email, password: "TechPass123", role: "technician" });
+      const { cookie } = await loginAs(email, "TechPass123");
+      return { headers: { cookie } };
+    }
+
+    it("admin can trigger a geocode", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      const res = await post<{ ok: boolean; geocode_status: string }>(`/api/jobs/${job.id}/geocode`, {}, auth);
+      expect(res.response.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+    });
+
+    it("dispatcher can trigger a geocode", async () => {
+      const auth = await dispatcherAuth();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      const res = await post<{ ok: boolean }>(`/api/jobs/${job.id}/geocode`, {}, auth);
+      expect(res.response.status).toBe(200);
+    });
+
+    it("technician gets 403 BEFORE any job lookup or provider call — nonexistent job id still 403s, not 404", async () => {
+      const auth = await technicianAuth();
+      const res = await post(`/api/jobs/999999/geocode`, {}, auth);
+      expect(res.response.status).toBe(403);
+    });
+
+    it("unauthenticated request gets 401", async () => {
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      const res = await post(`/api/jobs/${job.id}/geocode`, {});
+      expect(res.response.status).toBe(401);
+    });
+
+    it("admin/dispatcher on a nonexistent job gets 404", async () => {
+      const auth = await authHeaders();
+      const res = await post(`/api/jobs/999999/geocode`, {}, auth);
+      expect(res.response.status).toBe(404);
+    });
+
+    it("rejects a non-empty body (strict schema) — address/latitude/longitude/provider/api_key/actor_user_id/force injection all rejected", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      for (const injected of [
+        { address: "999 Attacker Rd" },
+        { latitude: 1, longitude: 1 },
+        { provider: "google" },
+        { api_key: "leaked" },
+        { actor_user_id: 1 },
+        { force: true },
+      ]) {
+        const res = await post(`/api/jobs/${job.id}/geocode`, injected, auth);
+        expect(res.response.status).toBe(400);
+      }
+      // None of the rejected requests should have mutated the job at all.
+      const rows = await queryDb<{ geocode_status: string; address: string }>(
+        "SELECT geocode_status, address FROM jobs WHERE id = ?", [job.id]
+      );
+      expect(rows[0].geocode_status).toBe("pending");
+      expect(rows[0].address).not.toBe("999 Attacker Rd");
+    });
+
+    it("a successful geocode persists coordinates and geocode_status via the real endpoint (mocked Google adapter selected via env)", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      const mock = mockGoogleGeocodingApi({ lat: 49.28, lng: -123.12 });
+      const prevProvider = geocodeEnv.GEOCODING_PROVIDER;
+      const prevKey = geocodeEnv.GOOGLE_MAPS_API_KEY;
+      try {
+        geocodeEnv.GEOCODING_PROVIDER = "google";
+        geocodeEnv.GOOGLE_MAPS_API_KEY = "test-only-mock-key";
+        const res = await post<{ ok: boolean; geocode_status: string; latitude: number; longitude: number }>(
+          `/api/jobs/${job.id}/geocode`, {}, auth
+        );
+        expect(res.response.status).toBe(200);
+        expect(res.body).toMatchObject({ ok: true, geocode_status: "geocoded", latitude: 49.28, longitude: -123.12 });
+        expect(mock.state.calls).toHaveLength(1);
+      } finally {
+        geocodeEnv.GEOCODING_PROVIDER = prevProvider;
+        geocodeEnv.GOOGLE_MAPS_API_KEY = prevKey;
+        mock.restore();
+      }
+    });
+
+    it("not_found (Noop's default) behavior persists geocode_status='failed'", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      // GEOCODING_PROVIDER is unset in this test env -> NoopGeocodingProvider
+      // -> always not_found -> failed. This IS the real production-safe
+      // default behavior when no real provider is configured.
+      const res = await post<{ ok: boolean; geocode_status: string }>(`/api/jobs/${job.id}/geocode`, {}, auth);
+      expect(res.response.status).toBe(200);
+      expect(res.body.geocode_status).toBe("failed");
+    });
+
+    it("a transient provider failure (missing key while provider=google) leaves geocode_status='pending', not 'failed'", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      const prevProvider = geocodeEnv.GEOCODING_PROVIDER;
+      const prevKey = geocodeEnv.GOOGLE_MAPS_API_KEY;
+      try {
+        geocodeEnv.GEOCODING_PROVIDER = "google";
+        geocodeEnv.GOOGLE_MAPS_API_KEY = undefined;
+        const res = await post<{ ok: boolean; geocode_status: string }>(`/api/jobs/${job.id}/geocode`, {}, auth);
+        expect(res.response.status).toBe(200);
+        expect(res.body.geocode_status).toBe("pending");
+      } finally {
+        geocodeEnv.GEOCODING_PROVIDER = prevProvider;
+        geocodeEnv.GOOGLE_MAPS_API_KEY = prevKey;
+      }
+    });
+
+    it("already-geocoded job (unchanged address) triggers ZERO provider calls — idempotency short-circuit", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      await geocodeJob(job.id, new MockGeocodingProvider({ status: "ok", latitude: 49.28, longitude: -123.12 }));
+
+      const mock = mockGoogleGeocodingApi();
+      const prevProvider = geocodeEnv.GEOCODING_PROVIDER;
+      const prevKey = geocodeEnv.GOOGLE_MAPS_API_KEY;
+      try {
+        geocodeEnv.GEOCODING_PROVIDER = "google";
+        geocodeEnv.GOOGLE_MAPS_API_KEY = "test-only-mock-key";
+        const res = await post<{ ok: boolean; geocode_status: string; latitude: number; longitude: number }>(
+          `/api/jobs/${job.id}/geocode`, {}, auth
+        );
+        expect(res.response.status).toBe(200);
+        expect(res.body).toMatchObject({ geocode_status: "geocoded", latitude: 49.28, longitude: -123.12 });
+        expect(mock.state.calls).toHaveLength(0);
+      } finally {
+        geocodeEnv.GEOCODING_PROVIDER = prevProvider;
+        geocodeEnv.GOOGLE_MAPS_API_KEY = prevKey;
+        mock.restore();
+      }
+    });
+
+    it("changing the job's address afterward clears coordinates back to pending, and a subsequent geocode trigger DOES call the provider again", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      await geocodeJob(job.id, new MockGeocodingProvider({ status: "ok", latitude: 49.28, longitude: -123.12 }));
+
+      const addressChange = await put(`/api/jobs/${job.id}`, { address: "500 New Rd, Surrey, BC" }, auth);
+      expect(addressChange.response.status).toBe(200);
+      const cleared = await queryDb<{ geocode_status: string }>("SELECT geocode_status FROM jobs WHERE id = ?", [job.id]);
+      expect(cleared[0].geocode_status).toBe("pending");
+
+      const mock = mockGoogleGeocodingApi({ lat: 49.1, lng: -122.8 });
+      const prevProvider = geocodeEnv.GEOCODING_PROVIDER;
+      const prevKey = geocodeEnv.GOOGLE_MAPS_API_KEY;
+      try {
+        geocodeEnv.GEOCODING_PROVIDER = "google";
+        geocodeEnv.GOOGLE_MAPS_API_KEY = "test-only-mock-key";
+        const res = await post<{ geocode_status: string }>(`/api/jobs/${job.id}/geocode`, {}, auth);
+        expect(res.response.status).toBe(200);
+        expect(res.body.geocode_status).toBe("geocoded");
+        expect(mock.state.calls).toHaveLength(1);
+      } finally {
+        geocodeEnv.GEOCODING_PROVIDER = prevProvider;
+        geocodeEnv.GOOGLE_MAPS_API_KEY = prevKey;
+        mock.restore();
+      }
+    });
+
+    it("has zero Calendar side effect (no calendar_event_mappings row created)", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      await post(`/api/jobs/${job.id}/geocode`, {}, auth);
+      const mappings = await queryDb("SELECT * FROM calendar_event_mappings WHERE job_id = ?", [job.id]);
+      expect(mappings).toHaveLength(0);
+    });
+
+    it("has zero Notification side effect (no additional notification_outbox row beyond the job-creation baseline)", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      const before = await queryDb("SELECT id FROM notification_outbox WHERE entity_type = 'job' AND entity_id = ?", [job.id]);
+      await post(`/api/jobs/${job.id}/geocode`, {}, auth);
+      const after = await queryDb("SELECT id FROM notification_outbox WHERE entity_type = 'job' AND entity_id = ?", [job.id]);
+      expect(after).toHaveLength(before.length);
+    });
+
+    it("has zero Scheduler mutation (scheduled_date/time/duration/technician_id unchanged)", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25", { scheduled_time: "10:00", duration: 60 });
+      const before = await queryDb<{ scheduled_date: string; scheduled_time: string; duration: number; technician_id: number | null }>(
+        "SELECT scheduled_date, scheduled_time, duration, technician_id FROM jobs WHERE id = ?", [job.id]
+      );
+      await post(`/api/jobs/${job.id}/geocode`, {}, auth);
+      const after = await queryDb<{ scheduled_date: string; scheduled_time: string; duration: number; technician_id: number | null }>(
+        "SELECT scheduled_date, scheduled_time, duration, technician_id FROM jobs WHERE id = ?", [job.id]
+      );
+      expect(after[0]).toEqual(before[0]);
+    });
+
+    it("has zero financial/compliance mutation (no invoice, no compliance_audit row)", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      await post(`/api/jobs/${job.id}/geocode`, {}, auth);
+      const invoices = await queryDb("SELECT * FROM invoices WHERE job_id = ?", [job.id]);
+      const audit = await queryDb("SELECT * FROM job_compliance_audit WHERE job_id = ?", [job.id]);
+      expect(invoices).toHaveLength(0);
+      expect(audit).toHaveLength(0);
+    });
+
+    it("job status is never mutated by a geocode trigger", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      const before = await queryDb<{ status: string }>("SELECT status FROM jobs WHERE id = ?", [job.id]);
+      await post(`/api/jobs/${job.id}/geocode`, {}, auth);
+      const after = await queryDb<{ status: string }>("SELECT status FROM jobs WHERE id = ?", [job.id]);
+      expect(after[0].status).toBe(before[0].status);
+    });
+
+    // Concurrency (Section 22) — two simultaneous first-time geocode calls
+    // for the same pending job. No atomic claim exists (see the route
+    // handler's own disclosed-residual-race comment) — this test proves the
+    // ACTUAL behavior rather than assuming an exact-once guarantee: the job
+    // always ends up in one valid, consistent final state (never partially
+    // corrupted), and both concurrent requests get a 200 with matching
+    // coordinates. It does NOT assert exactly one provider call, since that
+    // is not guaranteed by this phase's architecture.
+    it("two concurrent geocode requests for the same pending job both succeed and leave the job in one consistent final state", async () => {
+      const auth = await authHeaders();
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      const mock = mockGoogleGeocodingApi({ lat: 49.5, lng: -123.5, delayMs: 20 });
+      const prevProvider = geocodeEnv.GEOCODING_PROVIDER;
+      const prevKey = geocodeEnv.GOOGLE_MAPS_API_KEY;
+      try {
+        geocodeEnv.GEOCODING_PROVIDER = "google";
+        geocodeEnv.GOOGLE_MAPS_API_KEY = "test-only-mock-key";
+        const [a, b] = await Promise.all([
+          post<{ geocode_status: string }>(`/api/jobs/${job.id}/geocode`, {}, auth),
+          post<{ geocode_status: string }>(`/api/jobs/${job.id}/geocode`, {}, auth),
+        ]);
+        expect(a.response.status).toBe(200);
+        expect(b.response.status).toBe(200);
+        expect(a.body.geocode_status).toBe("geocoded");
+        expect(b.body.geocode_status).toBe("geocoded");
+        const rows = await queryDb<{ latitude: number; longitude: number; geocode_status: string }>(
+          "SELECT latitude, longitude, geocode_status FROM jobs WHERE id = ?", [job.id]
+        );
+        expect(rows[0]).toMatchObject({ latitude: 49.5, longitude: -123.5, geocode_status: "geocoded" });
+        // Disclosed residual behavior: this may be 1 or 2, never more.
+        expect(mock.state.calls.length).toBeGreaterThanOrEqual(1);
+        expect(mock.state.calls.length).toBeLessThanOrEqual(2);
+      } finally {
+        geocodeEnv.GEOCODING_PROVIDER = prevProvider;
+        geocodeEnv.GOOGLE_MAPS_API_KEY = prevKey;
+        mock.restore();
+      }
     });
   });
 

@@ -136,6 +136,24 @@ export class GeocodingError extends Error {
 
 export type GeocodeStatus = "pending" | "geocoded" | "failed";
 
+/** Provider-reported failures that reflect a transient problem with the
+ *  PROVIDER ITSELF (network, quota, auth/config, malformed response,
+ *  timeout) rather than a verified fact about the address — these leave a
+ *  job's `geocode_status` at `pending` (worth retrying later, e.g. once a
+ *  quota resets or a misconfigured key is fixed) instead of `failed` (a
+ *  real address that genuinely didn't resolve). Only `NOT_FOUND` (zero
+ *  results) and an `ok` result whose coordinates fail validation are
+ *  genuine `failed` verdicts ABOUT THE ADDRESS. A plain thrown `Error` that
+ *  isn't a `GeocodingError`, or a `GeocodeResult.error` whose `code` isn't
+ *  in this set, is still treated as `failed` — this set only ADDS a
+ *  `pending` outcome for the specific codes a real provider adapter (Phase
+ *  10.1's `GoogleGeocodingProvider`) can report; it changes nothing about
+ *  what `NoopGeocodingProvider`/`MockGeocodingProvider`/an unrecognized
+ *  error already did in Phase 10.0. */
+export const TRANSIENT_GEOCODE_CODES: ReadonlySet<string> = new Set([
+  "PROVIDER_UNAVAILABLE", "PROVIDER_AUTH_ERROR", "RATE_LIMITED", "INVALID_RESPONSE", "TIMEOUT",
+]);
+
 interface JobAddressRow {
   id: number;
   address: string;
@@ -170,11 +188,19 @@ export async function geocodeJob(jobId: number, provider: GeocodingProvider): Pr
   let result: GeocodeResult;
   try {
     result = await provider.geocode({ address });
-  } catch {
-    // A throwing provider adapter is treated exactly like a `not_found`/
-    // `error` result — never re-thrown, never logged with its original
-    // message here (that's an adapter-level concern for Phase 10.1, not
-    // this domain layer).
+  } catch (err) {
+    // A throwing provider adapter is caught here — never re-thrown, never
+    // logged with its original message (adapters sanitize their own errors
+    // at the boundary; see GoogleGeocodingProvider). A GeocodingError whose
+    // code is TRANSIENT leaves the job pending/retryable; anything else
+    // (including a plain, unrecognized Error) is a terminal failed verdict,
+    // matching Phase 10.0's original behavior exactly.
+    const code = err instanceof GeocodingError ? err.code : null;
+    if (code && TRANSIENT_GEOCODE_CODES.has(code)) {
+      console.error(`[geocoding] job_id=${jobId} outcome=pending code=${code}`);
+      await persistGeocodeResult(jobId, "pending");
+      return "pending";
+    }
     await persistGeocodeResult(jobId, "failed");
     return "failed";
   }
@@ -183,8 +209,13 @@ export async function geocodeJob(jobId: number, provider: GeocodingProvider): Pr
     await persistGeocodeResult(jobId, "geocoded", result.latitude, result.longitude);
     return "geocoded";
   }
-  // Covers both "not_found" and "error" results, and — defense in depth —
-  // an "ok" result whose coordinates somehow fail validation (a
+  if (result.status === "error" && TRANSIENT_GEOCODE_CODES.has(result.code)) {
+    console.error(`[geocoding] job_id=${jobId} outcome=pending code=${result.code}`);
+    await persistGeocodeResult(jobId, "pending");
+    return "pending";
+  }
+  // Covers "not_found", a non-transient "error" result, and — defense in
+  // depth — an "ok" result whose coordinates somehow fail validation (a
   // misbehaving provider must never get to write bad data to this table).
   await persistGeocodeResult(jobId, "failed");
   return "failed";

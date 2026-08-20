@@ -2,7 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, createCustomer, createJob, queryDb, resetDatabase } from "./helpers.js";
 import {
   GeocodingError, MockGeocodingProvider, NoopGeocodingProvider, NoopRoutingProvider,
-  clearJobGeocode, geocodeJob, isValidCoordinatePair, isValidLatitude, isValidLongitude,
+  TRANSIENT_GEOCODE_CODES, clearJobGeocode, geocodeJob, isValidCoordinatePair, isValidLatitude, isValidLongitude,
   type GeocodeResult,
 } from "../src/server/geocoding.js";
 
@@ -215,6 +215,63 @@ describe("geocodeJob() — domain service (mock provider, real local D1, never a
 
     expect(providerCalled).toBe(false);
     expect(status).toBe("failed");
+  });
+});
+
+describe("geocodeJob() — Phase 10.1 transient-failure semantics (TRANSIENT_GEOCODE_CODES)", () => {
+  it("a GeocodingError with a TRANSIENT code leaves the job pending, not failed", async () => {
+    const customer = await createCustomer();
+    const job = await createJob(customer.id, "2026-08-25");
+    const flakyProvider = { geocode: async () => { throw new GeocodingError("PROVIDER_UNAVAILABLE", "upstream unreachable"); } };
+
+    const status = await geocodeJob(job.id, flakyProvider);
+
+    expect(status).toBe("pending");
+    const rows = await queryDb<{ latitude: number | null; longitude: number | null; geocode_status: string }>(
+      "SELECT latitude, longitude, geocode_status FROM jobs WHERE id = ?", [job.id]
+    );
+    expect(rows[0]).toMatchObject({ latitude: null, longitude: null, geocode_status: "pending" });
+  });
+
+  it("every code in TRANSIENT_GEOCODE_CODES results in a pending (not failed) status", async () => {
+    for (const code of TRANSIENT_GEOCODE_CODES) {
+      const customer = await createCustomer();
+      const job = await createJob(customer.id, "2026-08-25");
+      const provider = { geocode: async () => { throw new GeocodingError(code, "transient"); } };
+      expect(await geocodeJob(job.id, provider)).toBe("pending");
+    }
+  });
+
+  it("a GeocodingError with a NON-transient code (e.g. NOT_FOUND) still results in failed", async () => {
+    const customer = await createCustomer();
+    const job = await createJob(customer.id, "2026-08-25");
+    const provider = { geocode: async () => { throw new GeocodingError("SOME_OTHER_CODE", "not a transient code"); } };
+
+    expect(await geocodeJob(job.id, provider)).toBe("failed");
+  });
+
+  it("a plain (non-GeocodingError) thrown Error still results in failed — Phase 10.0 behavior unchanged", async () => {
+    const customer = await createCustomer();
+    const job = await createJob(customer.id, "2026-08-25");
+    const provider = { geocode: async () => { throw new Error("some unrecognized failure"); } };
+
+    expect(await geocodeJob(job.id, provider)).toBe("failed");
+  });
+
+  it("a returned GeocodeResult with status='error' and a TRANSIENT code also results in pending", async () => {
+    const customer = await createCustomer();
+    const job = await createJob(customer.id, "2026-08-25");
+    const provider = new MockGeocodingProvider({ status: "error", code: "RATE_LIMITED", message: "quota exceeded" });
+
+    expect(await geocodeJob(job.id, provider)).toBe("pending");
+  });
+
+  it("a returned GeocodeResult with status='error' and a non-transient code still results in failed (existing Phase 10.0 test's own PROVIDER_TIMEOUT case remains failed, unaffected)", async () => {
+    const customer = await createCustomer();
+    const job = await createJob(customer.id, "2026-08-25");
+    const provider = new MockGeocodingProvider({ status: "error", code: "PROVIDER_TIMEOUT", message: "upstream timed out" });
+
+    expect(await geocodeJob(job.id, provider)).toBe("failed");
   });
 });
 

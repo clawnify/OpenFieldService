@@ -88,6 +88,8 @@ import {
   type CalendarSyncEnv,
 } from "./calendar-sync.js";
 import { assertUploadAllowed, buildMediaKey, getObject, putObject, StorageError, type StorageEnv } from "./storage.js";
+import { geocodeJob } from "./geocoding.js";
+import { buildGeocodingProvider, type GoogleGeocodingBindings } from "./google-geocoding.js";
 import {
   ComplianceError,
   MEDIA_KINDS,
@@ -132,7 +134,7 @@ type GoogleBindings = {
   TOKEN_ENCRYPTION_KEY?: string;
 };
 
-type Env = { Bindings: { DB: D1Database } & GoogleBindings & StorageEnv & NotificationProviderBindings; Variables: { user: PublicUser } };
+type Env = { Bindings: { DB: D1Database } & GoogleBindings & StorageEnv & NotificationProviderBindings & GoogleGeocodingBindings; Variables: { user: PublicUser } };
 
 function googleEnv(c: Context<Env>): GoogleOAuthEnv & CalendarSyncEnv {
   const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, TOKEN_ENCRYPTION_KEY } = c.env;
@@ -1371,6 +1373,96 @@ app.openapi(onTheWayRoute, async (c) => {
   });
 
   return c.json({ ok: true }, 200);
+});
+
+// Phase 10.1 — the one narrow operational trigger for real geocoding
+// (mem:phase10/maps-routing-architecture-audit's approved 10.1 boundary: no
+// arbitrary-address proxy, no lat/lng/provider mass assignment). RBAC is a
+// plain role check, admin/dispatcher only — deliberately NOT
+// canActorAccessJobCompliance()'s ownership rule: geocoding is an
+// operational/dispatch concern, not a technician-facing action, and a
+// technician has no legitimate reason to trigger a paid external API call.
+// Runs BEFORE the job existence lookup (same discipline as updateJob's
+// P0/P1 fix) so a denied technician produces zero DB queries and zero
+// provider calls, not just zero provider calls. Body is a genuinely empty
+// `.strict()` object — same "no arbitrary messaging" shape as
+// POST /api/jobs/{id}/on-the-way and POST /api/leads/{id}/convert. The
+// server loads the Job's own `address` itself (via geocodeJob() ->
+// provider); a client can never supply address/latitude/longitude/
+// provider/api_key/actor_user_id/force — there is no field on this route
+// for any of them to bind to.
+const geocodeJobResponseSchema = z.object({
+  ok: z.boolean(),
+  geocode_status: z.enum(["pending", "geocoded", "failed"]),
+  latitude: z.number().nullable(),
+  longitude: z.number().nullable(),
+}).openapi("GeocodeJobResult");
+
+const geocodeJobRoute = createRoute({
+  method: "post",
+  path: "/api/jobs/{id}/geocode",
+  request: {
+    params: IdParam,
+    body: { content: { "application/json": { schema: z.object({}).strict() } } },
+  },
+  responses: {
+    200: { description: "Geocode result (existing coordinates if already geocoded and unchanged)", content: { "application/json": { schema: geocodeJobResponseSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(geocodeJobRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const job = await get<{ id: number; latitude: number | null; longitude: number | null; geocode_status: string }>(
+    "SELECT id, latitude, longitude, geocode_status FROM jobs WHERE id = ?", [id]
+  );
+  if (!job) return c.json({ error: "Job not found" }, 404);
+
+  // Idempotency / cost control (Section 13): a Job that is already
+  // successfully geocoded is returned as-is, with ZERO provider calls.
+  // Safe to rely on unconditionally — Phase 10.0's updateJob address-change
+  // handler already clears latitude/longitude/geocode_status back to
+  // pending the instant the Job's own address actually changes, so
+  // "currently geocoded" here always means "geocoded for the CURRENT
+  // address", never a stale result for an address that's since changed.
+  let geocodeStatus: "pending" | "geocoded" | "failed";
+  let latitude: number | null;
+  let longitude: number | null;
+
+  if (job.geocode_status === "geocoded" && job.latitude !== null && job.longitude !== null) {
+    geocodeStatus = "geocoded";
+    latitude = job.latitude;
+    longitude = job.longitude;
+  } else {
+    // Disclosed residual race (Section 14): this idempotency check is NOT
+    // an atomic claim. Two genuinely simultaneous first-time geocode
+    // requests for the same pending Job can both pass this check and both
+    // call the real provider (one extra paid call), since there is no
+    // migration-free way to add a real mutual-exclusion claim without
+    // either a new table (Calendar sync's calendar_sync_claims pattern) or
+    // a persisted in-flight status value with no stale-reclaim timestamp to
+    // recover a crashed claim — both would need a migration, out of this
+    // phase's explicit scope. Both calls are independently safe
+    // (deterministic persistGeocodeResult() writes, no partial/corrupt
+    // state possible, last write wins with an equivalent result) — this is
+    // a cost-duplication risk, not a data-integrity one. Classified P3:
+    // rare (requires a genuine double-submit within the same short
+    // window), self-limiting, no customer-facing impact. See
+    // mem:phase10/maps-routing-architecture-audit.
+    const provider = buildGeocodingProvider(c.env);
+    geocodeStatus = await geocodeJob(Number(id), provider);
+    const after = await get<{ latitude: number | null; longitude: number | null }>(
+      "SELECT latitude, longitude FROM jobs WHERE id = ?", [id]
+    );
+    latitude = after?.latitude ?? null;
+    longitude = after?.longitude ?? null;
+  }
+
+  return c.json({ ok: true, geocode_status: geocodeStatus, latitude, longitude }, 200);
 });
 
 const JobMediaSchema = z.object({

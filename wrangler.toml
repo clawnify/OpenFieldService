@@ -35,6 +35,15 @@ GOOGLE_CLIENT_ID = ""
 GOOGLE_REDIRECT_URI = "http://localhost:8787/api/integrations/google-calendar/callback"
 RESEND_FROM_ADDRESS = ""
 
+# Phase 10.1 — selects which GeocodingProvider POST /api/jobs/{id}/geocode
+# uses (src/server/google-geocoding.ts#buildGeocodingProvider). Not a
+# credential — same non-secret tier as RESEND_FROM_ADDRESS above. "none"
+# (the default/safe value) uses NoopGeocodingProvider, same as Phase 10.0 —
+# nothing changes unless this is explicitly set to "google". GOOGLE_MAPS_API_KEY
+# IS a secret: set it in .dev.vars locally (see .dev.vars.example) and with
+# `wrangler secret put` in production — never here.
+GEOCODING_PROVIDER = "none"
+
 # Phase 9.2 — drains the notification outbox and scans for day-before
 # reminders. Every minute so the documented 1-minute first-retry backoff
 # (see src/server/notification-dispatcher.ts) is actually honored promptly;
