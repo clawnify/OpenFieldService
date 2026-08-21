@@ -41,7 +41,11 @@ RESEND_FROM_ADDRESS = ""
 # (the default/safe value) uses NoopGeocodingProvider, same as Phase 10.0 —
 # nothing changes unless this is explicitly set to "google". GOOGLE_MAPS_API_KEY
 # IS a secret: set it in .dev.vars locally (see .dev.vars.example) and with
-# `wrangler secret put` in production — never here.
+# `wrangler secret put` in production — never here. Recommended Google Cloud
+# Console restriction (Credentials → this key → "API restrictions"):
+# Geocoding API only — this key is never referrer-restricted (it's used
+# server-side only), so its API restriction is the sole thing limiting what
+# it can do if it ever leaked.
 GEOCODING_PROVIDER = "none"
 
 # Phase 10.2 — the Google Maps JavaScript API key the browser uses to
@@ -70,6 +74,9 @@ GOOGLE_MAPS_BROWSER_API_KEY = ""
 # .dev.vars.example) and with `wrangler secret put` in production — never
 # here. Deliberately a SEPARATE key from GOOGLE_MAPS_API_KEY (Phase 10.1's
 # geocoding secret) — see google-routing.ts's own doc comment for why.
+# Recommended Google Cloud Console restriction (Credentials → this key →
+# "API restrictions"): Routes API only — same rationale as
+# GEOCODING_PROVIDER's key above.
 ROUTING_PROVIDER = "none"
 
 # Phase 9.2 — drains the notification outbox and scans for day-before
