@@ -1,10 +1,11 @@
+import { Fragment } from "preact";
 import { useState, useEffect, useRef } from "preact/hooks";
 import { api } from "../api";
 import { ConfirmDialog } from "./confirm-dialog";
 import { STATUS_COLORS, STATUS_LABELS, STATUS_ABBR } from "./status-badge";
 import { loadGoogleMaps } from "../google-maps-loader";
-import { partitionMapJobs, computeMapView, nonGeocodedSummary } from "../schedule-map-helpers";
-import { MapPin, AlertTriangle, LocateFixed } from "lucide-preact";
+import { partitionMapJobs, computeMapView, nonGeocodedSummary, legBetween, formatTravelLeg, formatTravelTotal, type RouteLegView } from "../schedule-map-helpers";
+import { MapPin, AlertTriangle, LocateFixed, Route as RouteIcon } from "lucide-preact";
 import type { Job } from "../types";
 
 /**
@@ -24,6 +25,12 @@ interface ScheduleMapProps {
   canSchedule: boolean;
   navigate: (to: string) => void;
   onGeocoded: () => Promise<void>;
+  /** Phase 10.4 — non-null only when the List filter has been narrowed to
+   *  exactly one technician and a single-day range (see schedule-view.tsx's
+   *  `mapRouteContext`). Null hides the "Show Travel Times" action
+   *  entirely — routing a mixed multi-technician/multi-day job set has no
+   *  single well-defined route to compute. */
+  routeContext: { technicianId: number; date: string } | null;
 }
 
 function buildInfoWindowContent(job: Job, onNavigate: (to: string) => void): HTMLElement {
@@ -69,7 +76,7 @@ function buildInfoWindowContent(job: Job, onNavigate: (to: string) => void): HTM
   return container;
 }
 
-export function ScheduleMap({ jobs, canSchedule, navigate, onGeocoded }: ScheduleMapProps) {
+export function ScheduleMap({ jobs, canSchedule, navigate, onGeocoded, routeContext }: ScheduleMapProps) {
   const [configState, setConfigState] = useState<ConfigState>("loading");
   const [browserApiKey, setBrowserApiKey] = useState<string | null>(null);
   const [mapsReady, setMapsReady] = useState(false);
@@ -80,6 +87,38 @@ export function ScheduleMap({ jobs, canSchedule, navigate, onGeocoded }: Schedul
   const [geocodeTarget, setGeocodeTarget] = useState<Job | null>(null);
   const [geocodeSubmitting, setGeocodeSubmitting] = useState(false);
   const [geocodeResult, setGeocodeResult] = useState<{ jobId: number; ok: boolean; text: string } | null>(null);
+
+  // Phase 10.4 — never fetched automatically (cost control): only the
+  // explicit "Show Travel Times" button below calls GET
+  // /api/technician/route. Resets whenever the routed technician/day
+  // changes, since a fetched route always belongs to exactly one of them.
+  const [routeLegs, setRouteLegs] = useState<RouteLegView[] | null>(null);
+  const [routeTotals, setRouteTotals] = useState<{ distance: number | null; duration: number | null } | null>(null);
+  const [legsLoading, setLegsLoading] = useState(false);
+  const [legsError, setLegsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRouteLegs(null);
+    setRouteTotals(null);
+    setLegsError(null);
+  }, [routeContext?.technicianId, routeContext?.date]);
+
+  const loadTravelTimes = async () => {
+    if (!routeContext) return;
+    setLegsLoading(true);
+    setLegsError(null);
+    try {
+      const res = await api<{ legs: RouteLegView[]; total_distance_meters: number | null; total_duration_seconds: number | null }>(
+        "GET", `/api/technician/route?date=${routeContext.date}&technician_id=${routeContext.technicianId}`
+      );
+      setRouteLegs(res.legs);
+      setRouteTotals({ distance: res.total_distance_meters, duration: res.total_duration_seconds });
+    } catch {
+      setLegsError("Couldn't load travel times right now.");
+    } finally {
+      setLegsLoading(false);
+    }
+  };
 
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
@@ -227,6 +266,23 @@ export function ScheduleMap({ jobs, canSchedule, navigate, onGeocoded }: Schedul
         </div>
       )}
 
+      {routeContext ? (
+        <div class="tech-route-travel-control">
+          <button type="button" class="btn btn-sm" onClick={loadTravelTimes} disabled={legsLoading || jobs.length < 2}>
+            <RouteIcon size={13} aria-hidden="true" /> {legsLoading ? "Loading travel times…" : routeLegs ? "Refresh Travel Times" : "Show Travel Times"}
+          </button>
+          {legsError && <span class="text-muted">{legsError}</span>}
+          {routeTotals && (() => {
+            const totalText = formatTravelTotal(routeTotals.distance, routeTotals.duration);
+            return <span class="text-muted">{totalText ?? "Travel time unavailable for this route."}</span>;
+          })()}
+        </div>
+      ) : (
+        <div class="tech-route-travel-control">
+          <span class="text-muted"><RouteIcon size={13} aria-hidden="true" /> Select a single technician and a single-day range in the filters above to see travel times.</span>
+        </div>
+      )}
+
       <div class="schedule-map-mobile-toggle">
         <button type="button" class="btn" onClick={() => setMobileShowMap((v) => !v)}>
           {mobileShowMap ? "Show List" : "Show Map"}
@@ -272,11 +328,24 @@ export function ScheduleMap({ jobs, canSchedule, navigate, onGeocoded }: Schedul
             <div class="tech-empty-state"><p>No jobs in this range.</p></div>
           ) : (
             <ul class="schedule-map-job-list">
-              {jobs.map((job) => {
+              {jobs.map((job, idx) => {
                 const isGeocoded = job.geocode_status === "geocoded" && job.latitude != null && job.longitude != null;
+                // Adjacent-pair only (matches routing.ts's own scheduled-
+                // order adjacency) — a cancelled job on either side of a
+                // pair means no leg is shown for that pair, since the
+                // server never computed one for a cancelled stop either
+                // (disclosed P3: if a cancelled job sits directly BETWEEN
+                // two routed stops in this rendered list, the real leg
+                // connecting those two stops isn't shown here; filter
+                // Status to exclude Cancelled to see it).
+                const nextJob = idx < jobs.length - 1 ? jobs[idx + 1] : null;
+                const showLeg = Boolean(
+                  routeContext && routeLegs !== null && nextJob && job.status !== "cancelled" && nextJob.status !== "cancelled"
+                );
+                const leg = showLeg && nextJob ? legBetween(routeLegs ?? [], job.id, nextJob.id) : undefined;
                 return (
+                  <Fragment key={job.id}>
                   <li
-                    key={job.id}
                     id={`schedule-map-row-${job.id}`}
                     class={`schedule-map-job-row ${selectedJobId === job.id ? "selected" : ""}`}
                     role="button"
@@ -313,6 +382,12 @@ export function ScheduleMap({ jobs, canSchedule, navigate, onGeocoded }: Schedul
                       )}
                     </div>
                   </li>
+                  {showLeg && (
+                    <li class="tech-route-leg" aria-hidden="true">
+                      <RouteIcon size={12} /> {formatTravelLeg(leg)}
+                    </li>
+                  )}
+                  </Fragment>
                 );
               })}
             </ul>

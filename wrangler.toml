@@ -61,6 +61,17 @@ GEOCODING_PROVIDER = "none"
 # every other var here).
 GOOGLE_MAPS_BROWSER_API_KEY = ""
 
+# Phase 10.4 — selects which RoutingProvider GET /api/technician/route uses
+# (src/server/google-routing.ts#buildRoutingProvider). Not a credential —
+# same non-secret tier as GEOCODING_PROVIDER above. "none" (the default/
+# safe value) uses NoopRoutingProvider — every leg reports travel time
+# unavailable, nothing changes unless this is explicitly set to "google".
+# GOOGLE_ROUTES_API_KEY IS a secret: set it in .dev.vars locally (see
+# .dev.vars.example) and with `wrangler secret put` in production — never
+# here. Deliberately a SEPARATE key from GOOGLE_MAPS_API_KEY (Phase 10.1's
+# geocoding secret) — see google-routing.ts's own doc comment for why.
+ROUTING_PROVIDER = "none"
+
 # Phase 9.2 — drains the notification outbox and scans for day-before
 # reminders. Every minute so the documented 1-minute first-retry backoff
 # (see src/server/notification-dispatcher.ts) is actually honored promptly;

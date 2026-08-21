@@ -2222,3 +2222,19 @@ body {
   .tech-route-day-nav { justify-content: center; }
   .tech-route-stop-actions .btn { flex: 1 1 auto; min-height: 44px; font-size: 15px; }
 }
+
+/* Phase 10.4 — Routing/Travel-Time. Shared between the Technician Route
+ * View and the Dispatcher Map's own routed-technician-day list — a small
+ * control row above the split (button + status text) and an inline
+ * "leg" list item rendered between two consecutive stop cards. */
+.tech-route-travel-control {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 0.875rem;
+}
+.tech-route-travel-control .btn svg { margin-right: 4px; }
+
+.tech-route-leg {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 12px; margin: -2px 0;
+  color: var(--text-secondary); font-size: 0.8rem;
+  border: none; cursor: default;
+}

@@ -90,6 +90,8 @@ import {
 import { assertUploadAllowed, buildMediaKey, getObject, putObject, StorageError, type StorageEnv } from "./storage.js";
 import { geocodeJob } from "./geocoding.js";
 import { buildGeocodingProvider, type GoogleGeocodingBindings } from "./google-geocoding.js";
+import { buildRoutingProvider, type RoutingBindings } from "./google-routing.js";
+import { computeTechnicianRouteLegs, type RouteStopInput } from "./routing.js";
 import {
   ComplianceError,
   MEDIA_KINDS,
@@ -143,7 +145,7 @@ type GoogleBindings = {
 // lives in wrangler.toml's [vars], not .dev.vars.
 type MapsBrowserBindings = { GOOGLE_MAPS_BROWSER_API_KEY?: string };
 
-type Env = { Bindings: { DB: D1Database } & GoogleBindings & StorageEnv & NotificationProviderBindings & GoogleGeocodingBindings & MapsBrowserBindings; Variables: { user: PublicUser } };
+type Env = { Bindings: { DB: D1Database } & GoogleBindings & StorageEnv & NotificationProviderBindings & GoogleGeocodingBindings & MapsBrowserBindings & RoutingBindings; Variables: { user: PublicUser } };
 
 function googleEnv(c: Context<Env>): GoogleOAuthEnv & CalendarSyncEnv {
   const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, TOKEN_ENCRYPTION_KEY } = c.env;
@@ -3370,6 +3372,104 @@ const getMapsConfig = createRoute({
 app.openapi(getMapsConfig, async (c) => {
   const key = c.env.GOOGLE_MAPS_BROWSER_API_KEY || null;
   return c.json({ enabled: !!key, browserApiKey: key }, 200);
+});
+
+// Phase 10.4 — Routing/Travel-Time. The ONE paid-request trigger in this
+// codebase (see mem:phase10/maps-routing-architecture-audit) — deliberately
+// separate from GET /api/schedule (which stays free/local, no Routes call)
+// so an ordinary Scheduler/Dispatcher-Map/Technician-Route page load NEVER
+// costs money; only an explicit client-side action calls this route.
+// RBAC mirrors GET /api/schedule exactly: a technician is always forced to
+// their own resolved technician id (never a client-supplied technician_id,
+// checked BEFORE any query — same IDOR discipline as every other
+// technician-scoped route in this file); admin/dispatcher must supply
+// technician_id explicitly (this endpoint routes ONE technician's ONE day
+// already visible under existing Scheduler permissions — never a
+// company-wide/multi-technician sweep, never an arbitrary
+// coordinate/address proxy — Section 13's explicit boundary). Stop order is
+// derived purely from `scheduled_time`/id (routing.ts#orderRouteStops,
+// the same deterministic tie-break as the Technician Route View's client
+// helper) — never a persisted route_order/visit_sequence/stop_index, and
+// never reordered/optimized by the provider (RoutingProvider#route is
+// always called with optimizeWaypointOrder hard-coded false in the
+// adapter). A non-geocoded stop breaks leg continuity rather than being
+// silently skipped (Section 10) — every leg is always present in the
+// response, `status: "unavailable"` (with a normalized `error_code`, never
+// a raw provider message) when it can't be computed, so the UI never has
+// to guess whether data is missing or simply absent.
+const routeLegSchema = z.object({
+  from_job_id: z.number().int(),
+  to_job_id: z.number().int(),
+  status: z.enum(["ok", "unavailable"]),
+  distance_meters: z.number().optional(),
+  duration_seconds: z.number().optional(),
+  error_code: z.string().optional(),
+}).openapi("RouteLeg");
+
+const technicianRouteResponseSchema = z.object({
+  date: z.string(),
+  technician_id: z.number().int(),
+  legs: z.array(routeLegSchema),
+  total_distance_meters: z.number().nullable(),
+  total_duration_seconds: z.number().nullable(),
+}).openapi("TechnicianRouteResult");
+
+const getTechnicianRoute = createRoute({
+  method: "get",
+  path: "/api/technician/route",
+  request: {
+    query: z.object({
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "date must be YYYY-MM-DD"),
+      technician_id: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Travel legs between the technician's scheduled stops for one day", content: { "application/json": { schema: technicianRouteResponseSchema } } },
+    400: { description: "Bad request", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getTechnicianRoute, async (c) => {
+  const me = currentUser(c);
+  const q = c.req.valid("query");
+  const { date } = q;
+
+  let technicianId: number;
+  if (me.role === "technician") {
+    const techId = await actorTechnicianId({ id: me.id, role: me.role });
+    if (techId === null) {
+      return c.json({ date, technician_id: 0, legs: [], total_distance_meters: null, total_duration_seconds: null }, 200);
+    }
+    technicianId = techId;
+  } else {
+    if (!q.technician_id) return c.json({ error: "technician_id is required" }, 400);
+    const parsed = Number(q.technician_id);
+    if (!Number.isInteger(parsed)) return c.json({ error: "technician_id must be an integer" }, 400);
+    technicianId = parsed;
+  }
+
+  const rows = await query<{ id: number; scheduled_time: string; status: string; latitude: number | null; longitude: number | null; geocode_status: string | null }>(
+    "SELECT id, scheduled_time, status, latitude, longitude, geocode_status FROM jobs WHERE scheduled_date = ? AND technician_id = ?",
+    [date, technicianId]
+  );
+  const stops: RouteStopInput[] = rows.map((r) => ({
+    jobId: r.id, scheduledTime: r.scheduled_time, status: r.status,
+    latitude: r.latitude, longitude: r.longitude, geocodeStatus: r.geocode_status,
+  }));
+
+  const provider = buildRoutingProvider(c.env);
+  const result = await computeTechnicianRouteLegs(stops, provider);
+
+  return c.json({
+    date,
+    technician_id: technicianId,
+    legs: result.legs.map((l) => ({
+      from_job_id: l.fromJobId, to_job_id: l.toJobId, status: l.status,
+      distance_meters: l.distanceMeters, duration_seconds: l.durationSeconds, error_code: l.errorCode,
+    })),
+    total_distance_meters: result.totalDistanceMeters,
+    total_duration_seconds: result.totalDurationSeconds,
+  }, 200);
 });
 
 // ── Job Checklist ──────────────────────────────────────────────────

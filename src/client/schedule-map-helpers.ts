@@ -61,3 +61,52 @@ export function nonGeocodedSummary(count: number): string | null {
   if (count === 0) return null;
   return count === 1 ? "1 job has no mapped location" : `${count} jobs have no mapped location`;
 }
+
+/**
+ * Phase 10.4 — travel-leg presentation helpers, shared by the Dispatcher
+ * Map and Technician Route views. Mirrors the server's
+ * routing.ts#RouteLegOutcome shape field-for-field (snake_case, matching
+ * the wire response from GET /api/technician/route) — no client-side
+ * fabrication of distance/duration ever happens here; an `unavailable` leg
+ * always renders as exactly that, never a guess.
+ */
+export interface RouteLegView {
+  from_job_id: number;
+  to_job_id: number;
+  status: "ok" | "unavailable";
+  distance_meters?: number;
+  duration_seconds?: number;
+  error_code?: string;
+}
+
+/** Finds the leg connecting two consecutive stops, if the route response
+ *  included one. Returns undefined (not a fabricated "unavailable" leg)
+ *  when no route data has been fetched at all — callers distinguish "no
+ *  data fetched yet" from "fetched, but this leg is unavailable" via the
+ *  caller's own loaded-state, not via this helper's return type. */
+export function legBetween(legs: RouteLegView[], fromJobId: number, toJobId: number): RouteLegView | undefined {
+  return legs.find((l) => l.from_job_id === fromJobId && l.to_job_id === toJobId);
+}
+
+/** Business-friendly one-line travel summary — "18 min · 12.4 km" for a
+ *  computed leg, "Travel time unavailable" for a missing/unavailable one.
+ *  Never shows a raw error_code or seconds/meters figure to the user. */
+export function formatTravelLeg(leg: RouteLegView | undefined): string {
+  if (!leg || leg.status !== "ok" || leg.distance_meters == null || leg.duration_seconds == null) {
+    return "Travel time unavailable";
+  }
+  const minutes = Math.round(leg.duration_seconds / 60);
+  const km = (leg.distance_meters / 1000).toFixed(1);
+  return `${minutes} min · ${km} km`;
+}
+
+/** Business-friendly total for a full computed route — null (not "0")
+ *  propagates straight through to "not available" text, matching
+ *  totalDistanceMeters/totalDurationSeconds's own null-means-no-data
+ *  contract from routing.ts. */
+export function formatTravelTotal(totalDistanceMeters: number | null, totalDurationSeconds: number | null): string | null {
+  if (totalDistanceMeters == null || totalDurationSeconds == null) return null;
+  const minutes = Math.round(totalDurationSeconds / 60);
+  const km = (totalDistanceMeters / 1000).toFixed(1);
+  return `${minutes} min · ${km} km total driving`;
+}

@@ -1,3 +1,4 @@
+import { Fragment } from "preact";
 import { useState, useEffect, useRef, useMemo } from "preact/hooks";
 import { useApp } from "../context";
 import { api } from "../api";
@@ -7,7 +8,8 @@ import { loadGoogleMaps } from "../google-maps-loader";
 import { partitionMapJobs, computeMapView, nonGeocodedSummary } from "../schedule-map-helpers";
 import { orderStops, numberStops, todayInBusinessTimezone, addDaysToIsoDate } from "../technician-route-helpers";
 import { buildNavigationUrl } from "../navigation";
-import { ChevronLeft, ChevronRight, MapPin, Navigation2, Truck } from "lucide-preact";
+import { legBetween, formatTravelLeg, formatTravelTotal, type RouteLegView } from "../schedule-map-helpers";
+import { ChevronLeft, ChevronRight, MapPin, Navigation2, Truck, Route as RouteIcon } from "lucide-preact";
 import type { Job } from "../types";
 
 /**
@@ -39,6 +41,40 @@ export function TechnicianRoute() {
   const [onTheWayTarget, setOnTheWayTarget] = useState<Job | null>(null);
   const [onTheWaySubmitting, setOnTheWaySubmitting] = useState(false);
   const [onTheWayResult, setOnTheWayResult] = useState<{ jobId: number; text: string } | null>(null);
+
+  // Phase 10.4 — travel legs are NEVER fetched automatically (date
+  // navigation/mount/pan/zoom must never cost a paid Routes call, see
+  // mem:phase10/maps-routing-architecture-audit's cost-control table) —
+  // only the explicit "Show Travel Times" button below triggers
+  // GET /api/technician/route. Resets whenever the selected day changes,
+  // since a fetched route always belongs to exactly one day.
+  const [routeLegs, setRouteLegs] = useState<RouteLegView[] | null>(null);
+  const [routeTotals, setRouteTotals] = useState<{ distance: number | null; duration: number | null } | null>(null);
+  const [legsLoading, setLegsLoading] = useState(false);
+  const [legsError, setLegsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRouteLegs(null);
+    setRouteTotals(null);
+    setLegsError(null);
+  }, [routeDate]);
+
+  const loadTravelTimes = async () => {
+    if (!routeDate) return;
+    setLegsLoading(true);
+    setLegsError(null);
+    try {
+      const res = await api<{ legs: RouteLegView[]; total_distance_meters: number | null; total_duration_seconds: number | null }>(
+        "GET", `/api/technician/route?date=${routeDate}`
+      );
+      setRouteLegs(res.legs);
+      setRouteTotals({ distance: res.total_distance_meters, duration: res.total_duration_seconds });
+    } catch {
+      setLegsError("Couldn't load travel times right now.");
+    } finally {
+      setLegsLoading(false);
+    }
+  };
 
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
@@ -185,6 +221,17 @@ export function TechnicianRoute() {
         <button type="button" class="btn btn-sm" onClick={() => setRouteDate(todayInBusinessTimezone(businessTimezone))}>Today</button>
       </div>
 
+      <div class="tech-route-travel-control">
+        <button type="button" class="btn btn-sm" onClick={loadTravelTimes} disabled={legsLoading || orderedStops.length < 2}>
+          <RouteIcon size={13} aria-hidden="true" /> {legsLoading ? "Loading travel times…" : routeLegs ? "Refresh Travel Times" : "Show Travel Times"}
+        </button>
+        {legsError && <span class="text-muted">{legsError}</span>}
+        {routeTotals && (() => {
+          const totalText = formatTravelTotal(routeTotals.distance, routeTotals.duration);
+          return totalText ? <span class="text-muted">{totalText}</span> : <span class="text-muted">Travel time unavailable for this route.</span>;
+        })()}
+      </div>
+
       {summary && <div class="schedule-map-banner"><MapPin size={14} aria-hidden="true" /><span>{summary}</span></div>}
       {onTheWayResult && (
         <div class="schedule-map-banner success">
@@ -220,12 +267,15 @@ export function TechnicianRoute() {
             <div class="tech-empty-state"><p>No jobs scheduled for this day.</p></div>
           ) : (
             <ul class="schedule-map-job-list tech-route-stop-list">
-              {orderedStops.map(({ job, stopNumber }) => {
+              {orderedStops.map(({ job, stopNumber }, idx) => {
                 const isGeocoded = job.geocode_status === "geocoded" && job.latitude != null && job.longitude != null;
                 const navUrl = buildNavigationUrl(job.address);
+                const nextJob = idx < orderedStops.length - 1 ? orderedStops[idx + 1].job : null;
+                const leg = nextJob && routeLegs ? legBetween(routeLegs, job.id, nextJob.id) : undefined;
                 return (
+                  <Fragment key={job.id}>
                   <li
-                    key={job.id} id={`tech-route-stop-${job.id}`}
+                    id={`tech-route-stop-${job.id}`}
                     class={`schedule-map-job-row tech-route-stop ${selectedJobId === job.id ? "selected" : ""}`}
                     role="button" tabIndex={0} aria-current={selectedJobId === job.id}
                     onClick={() => isGeocoded && setSelectedJobId(job.id)}
@@ -254,6 +304,12 @@ export function TechnicianRoute() {
                       </button>
                     </div>
                   </li>
+                  {nextJob && routeLegs !== null && (
+                    <li class="tech-route-leg" aria-hidden="true">
+                      <RouteIcon size={12} /> {formatTravelLeg(leg)}
+                    </li>
+                  )}
+                  </Fragment>
                 );
               })}
             </ul>

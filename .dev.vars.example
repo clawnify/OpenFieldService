@@ -26,3 +26,13 @@ TWILIO_FROM_NUMBER=
 # configuration failure (geocode attempts persist as "pending", never a
 # crash) — see src/server/google-geocoding.ts.
 GOOGLE_MAPS_API_KEY=
+
+# Phase 10.4 — Google Routes API (Compute Routes). Only used when
+# wrangler.toml's ROUTING_PROVIDER var is set to "google" (default "none"
+# — leave that alone unless you actually want real travel-time data).
+# Leaving this blank while ROUTING_PROVIDER=google is a safe, disclosed
+# configuration failure (every leg reports travel time unavailable, never
+# a crash) — see src/server/google-routing.ts. Deliberately a SEPARATE key
+# from GOOGLE_MAPS_API_KEY above — restrict this one to the Routes API
+# only, never reuse the geocoding key here.
+GOOGLE_ROUTES_API_KEY=

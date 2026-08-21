@@ -157,6 +157,21 @@ export function ScheduleView() {
       .sort((a, b) => `${a.scheduled_date} ${a.scheduled_time}`.localeCompare(`${b.scheduled_date} ${b.scheduled_time}`));
   }, [scheduleJobs, listTechnician, listStatus, listSearch]);
 
+  // Phase 10.4 — the Dispatcher Map's "Show Travel Times" action only makes
+  // sense for ONE technician's ONE day (GET /api/technician/route routes a
+  // single technician/day, matching the existing Scheduler-permission
+  // boundary — see mem:phase10/maps-routing-architecture-audit's Section
+  // 13). Reuses the List filter's own technician/date state verbatim
+  // rather than a second range-tracking mechanism — null (button hidden)
+  // unless the dispatcher has narrowed List mode to exactly one technician
+  // and a single-day range.
+  const mapRouteContext = useMemo(() => {
+    if (!listTechnician || listStart !== listEnd) return null;
+    const technicianId = Number(listTechnician);
+    if (!Number.isInteger(technicianId)) return null;
+    return { technicianId, date: listStart };
+  }, [listTechnician, listStart, listEnd]);
+
   const goToday = () => {
     const now = new Date();
     setCurrentMonth(new Date(now.getFullYear(), now.getMonth(), 1));
@@ -462,7 +477,7 @@ export function ScheduleView() {
       )}
 
       {viewMode === "map" && canSchedule && (
-        <ScheduleMap jobs={listJobs} canSchedule={canSchedule} navigate={navigate} onGeocoded={refreshSchedule} />
+        <ScheduleMap jobs={listJobs} canSchedule={canSchedule} navigate={navigate} onGeocoded={refreshSchedule} routeContext={mapRouteContext} />
       )}
 
       {detailDate && (

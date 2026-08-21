@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
-  applySchema, authHeaders, createCustomer, createJob, createUser, loginAs, mockGoogleGeocodingApi,
+  applySchema, authHeaders, createCustomer, createJob, createUser, loginAs, mockGoogleGeocodingApi, mockGoogleRoutesApi,
   post, put, del, request, resetDatabase, queryDb,
 } from "./helpers.js";
 import { MockGeocodingProvider, geocodeJob } from "../src/server/geocoding.js";
@@ -662,6 +662,259 @@ describe("existing field service API", () => {
       await request(`/api/schedule?start=${routeDate}&end=${routeDate}`, techA.auth);
       const after = await queryDb<{ c: number }>("SELECT COUNT(*) as c FROM jobs WHERE geocode_status = 'geocoded'");
       expect(after[0].c).toBe(before[0].c);
+    });
+  });
+
+  // Phase 10.4 — GET /api/technician/route, the ONE paid-request trigger in
+  // this codebase (mem:phase10/maps-routing-architecture-audit). ROUTING_PROVIDER
+  // is unset in the test environment (wrangler.toml's "none" default), so
+  // buildRoutingProvider() selects NoopRoutingProvider for every test here
+  // UNLESS a test explicitly overrides `env` (same routingEnv cast pattern
+  // test/api.test.ts's own Phase 10.1 block already uses for geocodeEnv) —
+  // exercising the route/RBAC/cost-isolation wiring here; the Google
+  // adapter's own request/response/error behavior is covered by
+  // test/google-routing.test.ts, and routing.ts's own batching/ordering/
+  // missing-coordinate logic by test/routing.test.ts.
+  describe("Phase 10.4 — GET /api/technician/route", () => {
+    const routingEnv = env as unknown as { ROUTING_PROVIDER?: string; GOOGLE_ROUTES_API_KEY?: string };
+
+    async function createLinkedTechnician(email: string, adminAuth: RequestInit) {
+      const user = await createUser({ email, password: "TechPass123", role: "technician" });
+      const tech = await post<{ id: number }>("/api/technicians", { name: email, user_id: user.id }, adminAuth);
+      expect(tech.response.status).toBe(201);
+      const { cookie } = await loginAs(email, "TechPass123");
+      return { technicianId: tech.body.id, auth: { headers: { cookie } } as RequestInit };
+    }
+
+    async function dispatcherAuth(email = "dispatch-route@example.test"): Promise<RequestInit> {
+      await createUser({ email, password: "DispatchPass1", role: "dispatcher" });
+      const { cookie } = await loginAs(email, "DispatchPass1");
+      return { headers: { cookie } };
+    }
+
+    it("a technician's own route returns legs for their own scheduled stops only", async () => {
+      const auth = await authHeaders();
+      const techA = await createLinkedTechnician("route4-tech-a@example.test", auth);
+      const techB = await createLinkedTechnician("route4-tech-b@example.test", auth);
+      const customer = await createCustomer();
+      const routeDate = "2026-10-05";
+      const jobA1 = await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "09:00" });
+      const jobA2 = await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "13:00" });
+      await createJob(customer.id, routeDate, { technician_id: techB.technicianId, scheduled_time: "10:00" });
+      await geocodeJob(jobA1.id, new MockGeocodingProvider({ status: "ok", latitude: 49.1, longitude: -123.1 }));
+      await geocodeJob(jobA2.id, new MockGeocodingProvider({ status: "ok", latitude: 49.2, longitude: -123.2 }));
+
+      // Force the provider OFF for this test's duration — never assume
+      // ROUTING_PROVIDER is ambiently unset (a developer's real .dev.vars
+      // may legitimately carry ROUTING_PROVIDER=google + a real key for
+      // their own manual verification — vitest-pool-workers reads
+      // .dev.vars too; see the identical Phase 10.2 fix precedent for
+      // GOOGLE_MAPS_BROWSER_API_KEY). This test only cares about leg/order
+      // shape, not the disabled-provider error code — see the dedicated
+      // "provider disabled (default)" test below for that.
+      const prevProvider = routingEnv.ROUTING_PROVIDER;
+      const prevKey = routingEnv.GOOGLE_ROUTES_API_KEY;
+      try {
+        routingEnv.ROUTING_PROVIDER = undefined;
+        routingEnv.GOOGLE_ROUTES_API_KEY = undefined;
+        const res = await request<{ technician_id: number; legs: { from_job_id: number; to_job_id: number; status: string }[] }>(
+          `/api/technician/route?date=${routeDate}`, techA.auth
+        );
+        expect(res.response.status).toBe(200);
+        expect(res.body.technician_id).toBe(techA.technicianId);
+        expect(res.body.legs).toEqual([{ from_job_id: jobA1.id, to_job_id: jobA2.id, status: "unavailable", error_code: "PROVIDER_UNAVAILABLE" }]);
+      } finally {
+        routingEnv.ROUTING_PROVIDER = prevProvider;
+        routingEnv.GOOGLE_ROUTES_API_KEY = prevKey;
+      }
+    });
+
+    it("a technician cannot route another technician's day via ?technician_id= override (IDOR)", async () => {
+      const auth = await authHeaders();
+      const techA = await createLinkedTechnician("route4-tech-c@example.test", auth);
+      const techB = await createLinkedTechnician("route4-tech-d@example.test", auth);
+      const customer = await createCustomer();
+      const routeDate = "2026-10-06";
+      const jobA = await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "09:00" });
+      const jobB = await createJob(customer.id, routeDate, { technician_id: techB.technicianId, scheduled_time: "09:00" });
+
+      const res = await request<{ technician_id: number; legs: unknown[] }>(
+        `/api/technician/route?date=${routeDate}&technician_id=${techB.technicianId}`, techA.auth
+      );
+      expect(res.response.status).toBe(200);
+      expect(res.body.technician_id).toBe(techA.technicianId); // forced to the caller's OWN id, never techB's
+      expect(res.body.legs).toEqual([]); // techA has only 1 own job that day — techB's job never appears
+      void jobA; void jobB;
+    });
+
+    it("query-string injection (extra params like origin_lat/origin_lng) never influences the computed route — only date/technician_id are read", async () => {
+      const auth = await authHeaders();
+      const techA = await createLinkedTechnician("route4-tech-inj@example.test", auth);
+      const customer = await createCustomer();
+      const routeDate = "2026-10-07";
+      await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "09:00" });
+
+      const clean = await request(`/api/technician/route?date=${routeDate}`, techA.auth);
+      const injected = await request(
+        `/api/technician/route?date=${routeDate}&origin_lat=1&origin_lng=2&address=999+Attacker+Rd&provider=fake`, techA.auth
+      );
+      expect(injected.response.status).toBe(200);
+      expect(injected.body).toEqual(clean.body);
+    });
+
+    it("admin can route a specific technician/day", async () => {
+      const auth = await authHeaders();
+      const techA = await createLinkedTechnician("route4-tech-admin@example.test", auth);
+      const customer = await createCustomer();
+      const routeDate = "2026-10-08";
+      await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "09:00" });
+
+      const res = await request<{ technician_id: number }>(`/api/technician/route?date=${routeDate}&technician_id=${techA.technicianId}`, auth);
+      expect(res.response.status).toBe(200);
+      expect(res.body.technician_id).toBe(techA.technicianId);
+    });
+
+    it("dispatcher can route a specific technician/day", async () => {
+      const auth = await authHeaders();
+      const dAuth = await dispatcherAuth();
+      const techA = await createLinkedTechnician("route4-tech-dispatch@example.test", auth);
+      const customer = await createCustomer();
+      const routeDate = "2026-10-09";
+      await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "09:00" });
+
+      const res = await request<{ technician_id: number }>(`/api/technician/route?date=${routeDate}&technician_id=${techA.technicianId}`, dAuth);
+      expect(res.response.status).toBe(200);
+    });
+
+    it("admin/dispatcher without technician_id gets 400 — this endpoint never sweeps a company-wide/multi-technician route", async () => {
+      const auth = await authHeaders();
+      const res = await request(`/api/technician/route?date=2026-10-10`, auth);
+      expect(res.response.status).toBe(400);
+    });
+
+    it("unauthenticated request gets 401", async () => {
+      const res = await request(`/api/technician/route?date=2026-10-11&technician_id=1`);
+      expect(res.response.status).toBe(401);
+    });
+
+    it("an invalid date format gets 400, never a raw 500", async () => {
+      const auth = await authHeaders();
+      const res = await request(`/api/technician/route?date=not-a-date&technician_id=1`, auth);
+      expect(res.response.status).toBe(400);
+    });
+
+    it("provider disabled (default) — every leg reports unavailable/PROVIDER_UNAVAILABLE, the route stays fully renderable", async () => {
+      const auth = await authHeaders();
+      const techA = await createLinkedTechnician("route4-tech-disabled@example.test", auth);
+      const customer = await createCustomer();
+      const routeDate = "2026-10-12";
+      const j1 = await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "09:00" });
+      const j2 = await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "10:00" });
+      await geocodeJob(j1.id, new MockGeocodingProvider({ status: "ok", latitude: 49.1, longitude: -123.1 }));
+      await geocodeJob(j2.id, new MockGeocodingProvider({ status: "ok", latitude: 49.2, longitude: -123.2 }));
+
+      // Force ROUTING_PROVIDER OFF regardless of what a developer's real
+      // .dev.vars carries (see the identical override in the first test in
+      // this describe block) — this is the one test whose entire point is
+      // asserting the disabled-provider behavior, so it must not silently
+      // pass-through to (or worse, actually invoke) a real configured
+      // provider just because the ambient environment happens to have one.
+      const prevProvider = routingEnv.ROUTING_PROVIDER;
+      const prevKey = routingEnv.GOOGLE_ROUTES_API_KEY;
+      try {
+        routingEnv.ROUTING_PROVIDER = undefined;
+        routingEnv.GOOGLE_ROUTES_API_KEY = undefined;
+        const res = await request<{ legs: { status: string; error_code?: string }[]; total_distance_meters: number | null }>(
+          `/api/technician/route?date=${routeDate}`, techA.auth
+        );
+        expect(res.body.legs).toEqual([{ from_job_id: j1.id, to_job_id: j2.id, status: "unavailable", error_code: "PROVIDER_UNAVAILABLE" }]);
+        expect(res.body.total_distance_meters).toBeNull();
+      } finally {
+        routingEnv.ROUTING_PROVIDER = prevProvider;
+        routingEnv.GOOGLE_ROUTES_API_KEY = prevKey;
+      }
+    });
+
+    it("provider configured but key missing — fails safely as PROVIDER_AUTH_ERROR, no crash, no secret-shaped error", async () => {
+      const auth = await authHeaders();
+      const techA = await createLinkedTechnician("route4-tech-nokey@example.test", auth);
+      const customer = await createCustomer();
+      const routeDate = "2026-10-13";
+      const j1 = await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "09:00" });
+      const j2 = await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "10:00" });
+      await geocodeJob(j1.id, new MockGeocodingProvider({ status: "ok", latitude: 49.1, longitude: -123.1 }));
+      await geocodeJob(j2.id, new MockGeocodingProvider({ status: "ok", latitude: 49.2, longitude: -123.2 }));
+
+      const prevProvider = routingEnv.ROUTING_PROVIDER;
+      const prevKey = routingEnv.GOOGLE_ROUTES_API_KEY;
+      try {
+        routingEnv.ROUTING_PROVIDER = "google";
+        routingEnv.GOOGLE_ROUTES_API_KEY = undefined;
+        const res = await request<{ legs: { status: string; error_code?: string }[] }>(`/api/technician/route?date=${routeDate}`, techA.auth);
+        expect(res.response.status).toBe(200);
+        expect(res.body.legs[0].status).toBe("unavailable");
+        expect(res.body.legs[0].error_code).toBe("PROVIDER_AUTH_ERROR");
+        expect(JSON.stringify(res.body)).not.toMatch(/AIza|api[_-]?key/i);
+      } finally {
+        routingEnv.ROUTING_PROVIDER = prevProvider;
+        routingEnv.GOOGLE_ROUTES_API_KEY = prevKey;
+      }
+    });
+
+    it("a real computed route (mocked Google adapter selected via env) returns ok legs with distance/duration and a real total", async () => {
+      const auth = await authHeaders();
+      const techA = await createLinkedTechnician("route4-tech-real@example.test", auth);
+      const customer = await createCustomer();
+      const routeDate = "2026-10-14";
+      const j1 = await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "09:00" });
+      const j2 = await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "10:00" });
+      await geocodeJob(j1.id, new MockGeocodingProvider({ status: "ok", latitude: 49.1, longitude: -123.1 }));
+      await geocodeJob(j2.id, new MockGeocodingProvider({ status: "ok", latitude: 49.2, longitude: -123.2 }));
+
+      const mock = mockGoogleRoutesApi({ legDistances: [12400], legDurations: [1080] });
+      const prevProvider = routingEnv.ROUTING_PROVIDER;
+      const prevKey = routingEnv.GOOGLE_ROUTES_API_KEY;
+      try {
+        routingEnv.ROUTING_PROVIDER = "google";
+        routingEnv.GOOGLE_ROUTES_API_KEY = "test-only-mock-key";
+        const res = await request<{ legs: { status: string; distance_meters?: number; duration_seconds?: number }[]; total_distance_meters: number | null }>(
+          `/api/technician/route?date=${routeDate}`, techA.auth
+        );
+        expect(res.body.legs).toEqual([{ from_job_id: j1.id, to_job_id: j2.id, status: "ok", distance_meters: 12400, duration_seconds: 1080 }]);
+        expect(res.body.total_distance_meters).toBe(12400);
+        expect(mock.state.calls).toHaveLength(1);
+      } finally {
+        routingEnv.ROUTING_PROVIDER = prevProvider;
+        routingEnv.GOOGLE_ROUTES_API_KEY = prevKey;
+        mock.restore();
+      }
+    });
+
+    it("never triggers a server geocoding call, never mutates jobs/schedule, never touches Calendar or Notifications", async () => {
+      const auth = await authHeaders();
+      const techA = await createLinkedTechnician("route4-tech-isolation@example.test", auth);
+      const customer = await createCustomer();
+      const routeDate = "2026-10-15";
+      const j1 = await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "09:00" });
+      const j2 = await createJob(customer.id, routeDate, { technician_id: techA.technicianId, scheduled_time: "10:00" });
+
+      const before = await queryDb<{ id: number; scheduled_date: string; scheduled_time: string; technician_id: number; status: string; geocode_status: string }>(
+        "SELECT id, scheduled_date, scheduled_time, technician_id, status, geocode_status FROM jobs WHERE id IN (?, ?) ORDER BY id", [j1.id, j2.id]
+      );
+      const outboxBefore = await queryDb<{ c: number }>("SELECT COUNT(*) as c FROM notification_outbox");
+      const calendarBefore = await queryDb<{ c: number }>("SELECT COUNT(*) as c FROM calendar_event_mappings");
+
+      await request(`/api/technician/route?date=${routeDate}`, techA.auth);
+
+      const after = await queryDb<{ id: number; scheduled_date: string; scheduled_time: string; technician_id: number; status: string; geocode_status: string }>(
+        "SELECT id, scheduled_date, scheduled_time, technician_id, status, geocode_status FROM jobs WHERE id IN (?, ?) ORDER BY id", [j1.id, j2.id]
+      );
+      const outboxAfter = await queryDb<{ c: number }>("SELECT COUNT(*) as c FROM notification_outbox");
+      const calendarAfter = await queryDb<{ c: number }>("SELECT COUNT(*) as c FROM calendar_event_mappings");
+
+      expect(after).toEqual(before);
+      expect(outboxAfter[0].c).toBe(outboxBefore[0].c);
+      expect(calendarAfter[0].c).toBe(calendarBefore[0].c);
     });
   });
 

@@ -525,6 +525,112 @@ export function mockGoogleGeocodingApi(overrides: Partial<GoogleGeocodingMockSta
   };
 }
 
+// ── Google Routes API mock (Phase 10.4) ─────────────────────────────────
+//
+// Same same-isolate monkey-patch trick as mockGoogleGeocodingApi() above —
+// no test ever reaches the real Google Routes API.
+
+export interface GoogleRoutesMockState {
+  /** Distance/duration per leg the mock returns for a normal "OK" call —
+   *  cycled if there are more legs than entries. */
+  legDistances: number[];
+  legDurations: number[];
+  polyline: string | null;
+  /** Returns a `routes: []` response — the ZERO_RESULTS/NOT_FOUND analog. */
+  noRoute: boolean;
+  /** Non-200 HTTP status, with a standard Google API error body shape
+   *  (`{error: {status: ...}}`). */
+  httpStatus: number;
+  googleErrorStatus: string | null;
+  malformed: boolean;
+  /** Omits the `legs` array entirely from the response (leg-count mismatch path). */
+  omitLegs: boolean;
+  delayMs: number;
+  calls: { url: string; headers: Record<string, string>; body: unknown }[];
+}
+
+export interface GoogleRoutesMock {
+  state: GoogleRoutesMockState;
+  restore: () => void;
+}
+
+export function mockGoogleRoutesApi(overrides: Partial<GoogleRoutesMockState> = {}): GoogleRoutesMock {
+  const state: GoogleRoutesMockState = {
+    legDistances: [5000],
+    legDurations: [600],
+    polyline: "mockPolyline123",
+    noRoute: false,
+    httpStatus: 200,
+    googleErrorStatus: null,
+    malformed: false,
+    omitLegs: false,
+    delayMs: 0,
+    calls: [],
+    ...overrides,
+  };
+
+  const original = globalThis.fetch;
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    if (!url.includes("routes.googleapis.com/directions/v2:computeRoutes")) return original(input as RequestInfo, init);
+
+    const headers: Record<string, string> = {};
+    if (init?.headers) {
+      const h = init.headers as Record<string, string>;
+      for (const k of Object.keys(h)) headers[k] = h[k];
+    }
+    let body: unknown = null;
+    try { body = init?.body ? JSON.parse(init.body as string) : null; } catch { /* leave body null on parse failure */ }
+    state.calls.push({ url, headers, body });
+
+    if (state.delayMs > 0) {
+      const signal = init?.signal;
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, state.delayMs);
+        if (signal) {
+          if (signal.aborted) { clearTimeout(timer); reject(new DOMException("The operation was aborted.", "TimeoutError")); return; }
+          signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(new DOMException("The operation was aborted.", "TimeoutError"));
+          }, { once: true });
+        }
+      });
+    }
+
+    if (state.malformed) return new Response("not valid json {{{", { status: 200 });
+    if (state.httpStatus !== 200) {
+      return new Response(JSON.stringify({ error: { code: state.httpStatus, message: "mocked failure", status: state.googleErrorStatus ?? undefined } }), { status: state.httpStatus });
+    }
+    if (state.noRoute) return new Response(JSON.stringify({ routes: [] }), { status: 200 });
+
+    const requestBody = body as { intermediates?: unknown[] } | null;
+    const legCount = (requestBody?.intermediates?.length ?? 0) + 1;
+    const legs = state.omitLegs ? undefined : Array.from({ length: legCount }, (_, i) => ({
+      distanceMeters: state.legDistances[i % state.legDistances.length],
+      duration: `${state.legDurations[i % state.legDurations.length]}s`,
+    }));
+    const totalDistance = (legs ?? []).reduce((sum, l) => sum + l.distanceMeters, 0) || state.legDistances[0];
+    const totalDuration = (legs ?? []).reduce((sum, l) => sum + Number(l.duration.slice(0, -1)), 0) || state.legDurations[0];
+
+    return new Response(JSON.stringify({
+      routes: [{
+        distanceMeters: totalDistance,
+        duration: `${totalDuration}s`,
+        legs,
+        polyline: state.polyline ? { encodedPolyline: state.polyline } : undefined,
+      }],
+    }), { status: 200 });
+  }) as typeof fetch;
+
+  return {
+    state,
+    restore() {
+      globalThis.fetch = original;
+    },
+  };
+}
+
 /** Calls the exported Cloudflare `scheduled()` handler directly — same
  *  in-isolate direct-call pattern `request()` above uses for `fetch()`, just
  *  for the Cron entry point instead (there is no HTTP route to trigger a

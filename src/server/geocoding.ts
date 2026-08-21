@@ -54,24 +54,42 @@ export interface GeocodingProvider {
   geocode(input: GeocodeInput): Promise<GeocodeResult>;
 }
 
-// ── Routing provider contract (interface only — no adapter, no call site
-//    yet; Phase 10.4's job, defined now so the shape is settled early and
-//    doesn't get invented ad hoc later) ─────────────────────────────────
+// ── Routing provider contract (Phase 10.0 defined the shape; Phase 10.4
+//    adds the first real adapter/call site — see google-routing.ts and
+//    routing.ts) ───────────────────────────────────────────────────────
 
 export interface RoutePoint {
   latitude: number;
   longitude: number;
 }
 
+/** `waypoints`, if present, are INTERMEDIATE stops between origin and
+ *  destination, in the exact order given — a provider must route them in
+ *  that order (Section 6's scheduled-order invariant), never reorder them
+ *  for efficiency. No caller may ever set a waypoint-optimization option. */
 export interface RouteInput {
   origin: RoutePoint;
   destination: RoutePoint;
   waypoints?: RoutePoint[];
 }
 
-export interface RouteResult {
+/** One leg of a multi-stop route — the segment between two consecutive
+ *  stops (origin→first waypoint, waypoint→waypoint, or last waypoint→
+ *  destination), in the same order as the input. */
+export interface RouteLeg {
   distanceMeters: number;
   durationSeconds: number;
+}
+
+export interface RouteResult {
+  /** Total across every leg. */
+  distanceMeters: number;
+  /** Total across every leg. */
+  durationSeconds: number;
+  /** Per-leg breakdown, same order as the input (origin→waypoint[0],
+   *  waypoint[0]→waypoint[1], ..., waypoint[n]→destination). Length is
+   *  always `(waypoints?.length ?? 0) + 1`. */
+  legs: RouteLeg[];
   /** Provider-specific path representation (e.g. an encoded polyline) —
    *  deliberately untyped here; only the eventual map-rendering component
    *  needs to understand it, domain code never inspects it. */
@@ -117,6 +135,25 @@ export class NoopRoutingProvider implements RoutingProvider {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- kept named to match RoutingProvider's signature exactly
   async route(_input: RouteInput): Promise<RouteResult> {
     throw new GeocodingError("PROVIDER_UNAVAILABLE", "No routing provider is configured.");
+  }
+}
+
+/** Deterministic, network-free — for automated tests only (same role as
+ *  MockGeocodingProvider above). Synthesizes one leg per origin/waypoint/
+ *  destination pair with a fixed per-leg distance/duration unless a
+ *  `result` override is supplied — never imported by production code. */
+export class MockRoutingProvider implements RoutingProvider {
+  constructor(private readonly result?: RouteResult | (() => RouteResult)) {}
+
+  async route(input: RouteInput): Promise<RouteResult> {
+    if (this.result) return typeof this.result === "function" ? this.result() : this.result;
+    const legCount = (input.waypoints?.length ?? 0) + 1;
+    const legs: RouteLeg[] = Array.from({ length: legCount }, () => ({ distanceMeters: 1000, durationSeconds: 120 }));
+    return {
+      distanceMeters: legs.reduce((sum, l) => sum + l.distanceMeters, 0),
+      durationSeconds: legs.reduce((sum, l) => sum + l.durationSeconds, 0),
+      legs,
+    };
   }
 }
 
