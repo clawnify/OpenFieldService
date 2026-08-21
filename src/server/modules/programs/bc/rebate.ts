@@ -1,25 +1,21 @@
-import { get, query, run } from "../../../db.js";
+import { query, run } from "../../../db.js";
 import { getSettingValue } from "../../../settings.js";
 import type { JobType } from "../../../workflow.js";
+import type { CustomerRebateProfile } from "./customer-profile.js";
 
 /**
  * Rebate eligibility calculator and audit trail. Layered entirely on top of
  * Phase 1's Global Settings (thresholds) and Phase 2's workflow engine (the
  * eligibility_code/eligibility_code_expiry gate on the "eligibility_approved"
  * transition, unchanged) — this module does not touch transition validation.
+ * Customer rebate-profile storage itself lives in ./customer-profile.ts
+ * (Phase 11.3) — this file only computes eligibility from a profile handed
+ * to it, it never queries `customers`/`bc_rebate_customer_profiles` directly.
  *
  * No threshold value is ever hardcoded here. Every comparison reads its limit
  * via getSettingValue(); an unconfigured key means "cannot evaluate this
  * criterion," reported as such, never silently skipped or defaulted.
  */
-
-export interface CustomerRebateProfile {
-  house_size: number | null;
-  primary_heating_source: string;
-  number_of_adults: number | null;
-  number_of_children: number | null;
-  household_income: number | null;
-}
 
 export interface RebateCriterion {
   key: string;
@@ -75,6 +71,32 @@ async function incomeCriterion(
   };
 }
 
+/** Phase 11.3 — registry-based program dispatch, owned entirely by this BC
+ *  module: each entry's `buildCriteria` is the ONLY place a program's own
+ *  criteria are assembled, replacing the previous inline
+ *  `if (jobType === "CLEANBC") ... else if (jobType === "BC_HYDRO")` chain.
+ *  A job type with no entry here (STANDARD, or any future non-rebate job
+ *  type) safely yields zero criteria — never a crash, and never a silent
+ *  fallback onto another program's rules. Frozen: this module is the only
+ *  place a program may ever be registered. */
+const REBATE_PROGRAM_REGISTRY: Readonly<Partial<Record<JobType, {
+  buildCriteria(profile: CustomerRebateProfile, asOf: string | undefined, used: Record<string, number | null>): Promise<RebateCriterion[]>;
+}>>> = Object.freeze({
+  CLEANBC: {
+    async buildCriteria(profile, asOf, used) {
+      return Promise.all([
+        houseSizeCriterion(profile, asOf, "CLEANBC_MAX_HOUSE_SIZE", used),
+        incomeCriterion(profile, asOf, "CLEANBC_MAX_HOUSEHOLD_INCOME", used),
+      ]);
+    },
+  },
+  BC_HYDRO: {
+    async buildCriteria(profile, asOf, used) {
+      return Promise.all([incomeCriterion(profile, asOf, "BC_HYDRO_MAX_HOUSEHOLD_INCOME", used)]);
+    },
+  },
+});
+
 /** Computes (does not persist) whether a customer's rebate profile currently
  *  appears eligible for `jobType`'s program, per whatever thresholds are
  *  configured as of `asOf` (default now). Pass a past ISO timestamp to
@@ -84,19 +106,8 @@ export async function evaluateRebateEligibility(
   jobType: JobType, profile: CustomerRebateProfile, asOf?: string
 ): Promise<RebateEligibilityResult> {
   const thresholdsUsed: Record<string, number | null> = {};
-  let criteria: RebateCriterion[];
-  if (jobType === "CLEANBC") {
-    criteria = await Promise.all([
-      houseSizeCriterion(profile, asOf, "CLEANBC_MAX_HOUSE_SIZE", thresholdsUsed),
-      incomeCriterion(profile, asOf, "CLEANBC_MAX_HOUSEHOLD_INCOME", thresholdsUsed),
-    ]);
-  } else if (jobType === "BC_HYDRO") {
-    criteria = await Promise.all([
-      incomeCriterion(profile, asOf, "BC_HYDRO_MAX_HOUSEHOLD_INCOME", thresholdsUsed),
-    ]);
-  } else {
-    criteria = [];
-  }
+  const program = REBATE_PROGRAM_REGISTRY[jobType];
+  const criteria = program ? await program.buildCriteria(profile, asOf, thresholdsUsed) : [];
   const allowed = criteria.length === 0 || criteria.some((c) => c.satisfied === null)
     ? null
     : criteria.every((c) => c.satisfied);
@@ -196,10 +207,3 @@ export async function listEligibilityCodes(): Promise<{ rows: EligibilityCodeRow
   return { rows, warningDaysConfigured: warningDays !== null };
 }
 
-export async function getCustomerRebateProfile(customerId: number): Promise<CustomerRebateProfile | null> {
-  const row = await get<CustomerRebateProfile>(
-    "SELECT house_size, primary_heating_source, number_of_adults, number_of_children, household_income FROM customers WHERE id = ?",
-    [customerId]
-  );
-  return row ?? null;
-}

@@ -169,6 +169,12 @@ export async function resetDatabase() {
     "DELETE FROM notification_outbox",
     "DELETE FROM service_types",
     "DELETE FROM technicians",
+    // bc_rebate_customer_profiles (Phase 11.3) cascades from customers
+    // (ON DELETE CASCADE) but is deleted explicitly anyway per this file's
+    // own established convention — every new table gets its own entry
+    // here, checked explicitly rather than assumed (see the calendar_sync_
+    // claims/global_settings history above this list).
+    "DELETE FROM bc_rebate_customer_profiles",
     "DELETE FROM customers",
     "DELETE FROM users",
     "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter')",

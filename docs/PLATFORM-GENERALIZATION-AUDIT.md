@@ -517,4 +517,42 @@ Untouched by this phase, exactly as instructed: `workflow.ts`'s one status-name 
 
 ### Status
 
-Phase 11.2 IMPLEMENTED / VERIFIED / **NOT COMMITTED** this session (a separate Phase 11.2 Safe-Commit checkpoint follows). Zero intentional behavior change anywhere. §17's P1 "hardcoded JobType/WORKFLOWS" risk is **PARTIALLY CLOSED** (single authoritative server-side registry; client mirror now automatically verified in sync; Core's workflow *shape* knowledge of CLEANBC/BC_HYDRO relocated to the BC module) — not CLOSED outright, since Core's registry composition still names the BC program's job-type IDs by design (see honesty note above). Phase 11.3 (rebate/regional-program business-logic extraction) is NOT STARTED.
+Phase 11.2 IMPLEMENTED / VERIFIED / COMMITTED (`db335bd`, on top of `5b20035`). Zero intentional behavior change anywhere. §17's P1 "hardcoded JobType/WORKFLOWS" risk is **PARTIALLY CLOSED** (single authoritative server-side registry; client mirror now automatically verified in sync; Core's workflow *shape* knowledge of CLEANBC/BC_HYDRO relocated to the BC module) — not CLOSED outright, since Core's registry composition still names the BC program's job-type IDs by design (see honesty note above).
+
+---
+
+## §22 Addendum — Phase 11.3: Rebate / Regional Program Extraction (2026-08-21)
+
+**Status: IMPLEMENTED / VERIFIED / NOT COMMITTED, NOT PUSHED, NOT DEPLOYED.** Targets §16's finding #3 (rebate dispatch if/else) and #2 (5 HVAC-rebate columns on `customers`).
+
+### What moved
+
+**Customer rebate profile** — the 5 columns (`house_size`, `primary_heating_source`, `number_of_adults`, `number_of_children`, `household_income`) are extracted into a new table, `bc_rebate_customer_profiles` (migration `0014_bc_rebate_customer_profile.sql`), owned by `src/server/modules/programs/bc/customer-profile.ts`. `customer_id` is the table's own PRIMARY KEY (natural 1:1, `ON DELETE CASCADE` from `customers`) — the simplest structural guarantee of "at most one profile row per customer." The table is **optional per customer**, matching the original Phase 3 design intent ("do not assume these fields apply to every customer") rather than the "eager row for every customer" alternative that was considered and rejected as unfaithful to that intent.
+
+**Rebate program dispatch** — `rebate.ts`'s `evaluateRebateEligibility()` no longer branches with `if (jobType === "CLEANBC") ... else if (jobType === "BC_HYDRO")`. A frozen `REBATE_PROGRAM_REGISTRY` object (keyed by `JobType`, each entry owning its own `buildCriteria()`) replaces the chain. A job type absent from the registry (STANDARD, or any future non-rebate type) safely yields zero criteria — never a crash, never a borrowed program's rules. This registry lives inside `rebate.ts` itself (not a separate file) — a 2-entry frozen object didn't justify its own module.
+
+**Workflow rebate hook** — `workflow.ts`'s `transitionJob()` previously hardcoded the literal string `"eligibility_approved"` to decide when to require an eligibility code. `JobTypeDefinition` gained an optional `eligibilityCodeGateStatus?: string` capability field; only CLEANBC's definition (`workflow-definitions.ts`) sets it. Core now asks the job type's own definition rather than naming the BC-specific status literal — behaviorally identical (verified: `input.toStatus` is already constrained to `resolveAllowedTransitions(job)` before this check runs, and `"eligibility_approved"` only appears in CLEANBC's own `statusSequence`).
+
+### Legacy columns — RETAINED, not authoritative
+
+The 5 legacy `customers` columns are **not dropped**. Application code no longer writes to them (no dual-write) — they are a frozen, inert rollback/compatibility safety net only. `bc_rebate_customer_profiles` is the sole authoritative store. Reads that need the full `Customer` API shape (`listCustomers`, `getCustomer`, the post-Lead-conversion customer fetch) `LEFT JOIN` the new table and select its columns *after* `c.*`, so the profile table's values win when the row object is built from duplicate column names — verified correct against `@clawnify/db`'s real D1 driver (not the Drizzle/Facet path), and directly exercised by tests that would fail if this assumption were wrong (a customer's rebate data is created, then updated, and the API response is asserted against the *new* table's values while the legacy column is independently confirmed frozen at `NULL`).
+
+A customer that predates this phase, or that was created through a path that never touches rebate fields (e.g. Lead conversion, which has never written these columns), correctly shows blank/null rebate data through the same compatibility read path — proven live via a real Lead→Customer conversion in both the automated suite and a real browser session.
+
+### API contract — unchanged
+
+Zero request/response shape changes on any customer or job-eligibility route. A client cannot observe that storage moved.
+
+### Remaining BC/rebate coupling — explicitly out of scope, unchanged by this phase
+
+`financial.ts`'s `computeRebateAmountCents()` (`jobType === "CLEANBC" ? ... : ...`, a single-line job-type→Global-Settings-key mapping) was judged out of this phase's tightly-scoped mission (customer profile + rebate.ts dispatch + the one workflow hook) — moving it would touch Financial architecture edges this phase was explicitly told not to redesign. `index.ts`'s 6 inline rebate/eligibility routes and `settings-catalog.ts`'s mixed BC/Core catalog remain as they were — structurally fine (each route is its own dedicated, non-generic endpoint per §16's own finding), not required by this phase's charter. Core's `JOB_TYPE_REGISTRY` composition still names `"CLEANBC"`/`"BC_HYDRO"` as registry keys, unchanged from Phase 11.2 — no dynamic/database-driven job-type system exists or was added.
+
+### Verification
+
+Full suite: **950/950** (936 baseline + 14 new, `test/bc-rebate-customer-profile.test.ts`). `tsc`/`eslint`/`check:architecture`/`vite build` all clean; production bundle unchanged (1770 modules, zero client files touched). Live-verified against a real running `wrangler dev` + real local D1 via Chrome browser automation: created a rebate-profile customer, confirmed round-trip through the new table, created a CleanBC job, ran a real eligibility check (correctly resolved both CleanBC criteria via the registry), viewed the Eligibility Tracker, zero console errors, zero non-200 API responses. Independent code review and a focused security review (IDOR, mass assignment, data over-exposure, SQL injection, migration data-loss, transaction integrity, secrets) both completed with no blocking findings — see `mem:phase11/platform-generalization-audit` for the full record. Fixtures cleaned up; real local D1 confirmed back to baseline (0 orphaned profile rows).
+
+### §16 findings #2 and #3 reassessed
+
+#2 (HVAC columns on `customers`): **CLOSED** — extracted to a dedicated, module-owned table; legacy columns retained only as an inert compatibility fallback. #3 (rebate dispatch if/else): **CLOSED** — replaced by a registry; Core's one remaining rebate-adjacent literal (the `eligibility_approved` gate) is also closed. `financial.ts`'s job-type→settings-key mapping remains **OPEN**, unchanged, explicitly deferred (P3, narrow, single line, not required by this phase).
+
+Phase 11.4 (Assets/Equipment) remains DEFERRED, not started. Phase 11.5 (Tenant/SaaS boundary) remains NOT STARTED.

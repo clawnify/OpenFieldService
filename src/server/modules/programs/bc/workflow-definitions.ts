@@ -16,6 +16,11 @@ export const BC_PROGRAM_JOB_TYPES = {
       "free_estimate", "application_pending", "eligibility_approved",
       "install_scheduled", "in_progress", "completed", "gov_portal_submitted",
     ],
+    // Phase 11.3 — moved out of Core's transitionJob(), which previously
+    // hardcoded the literal status name "eligibility_approved". Only
+    // CLEANBC requires an eligibility code/expiry to reach this status;
+    // BC_HYDRO has no such status in its own sequence at all.
+    eligibilityCodeGateStatus: "eligibility_approved",
   },
   BC_HYDRO: {
     statusSequence: ["free_estimate", "install_scheduled", "in_progress", "completed", "gov_portal_submitted"],

@@ -34,6 +34,14 @@ export interface JobTypeDefinition {
    *  "cancelled" is deliberately not listed: it's a universal transition
    *  available from any non-terminal status (see forwardTransitions). */
   statusSequence: readonly string[];
+  /** Phase 11.3 — optional capability hook: when set, transitioning INTO
+   *  this exact status requires eligibility_code/eligibility_code_expiry
+   *  data (see transitionJob). Replaces a previous hardcoded
+   *  `input.toStatus === "eligibility_approved"` literal in Core — only
+   *  CLEANBC's definition sets this, so behavior is unchanged; a job type
+   *  that doesn't set it (STANDARD, BC_HYDRO) never triggers this gate,
+   *  exactly as before. */
+  eligibilityCodeGateStatus?: string;
 }
 
 const JOB_TYPE_REGISTRY = Object.freeze({
@@ -348,7 +356,8 @@ export async function transitionJob(
 
   let eligibilityCode = job.eligibility_code;
   let eligibilityCodeExpiry = job.eligibility_code_expiry;
-  if (input.toStatus === "eligibility_approved") {
+  const jobTypeDefinition = isJobType(job.job_type) ? getJobTypeDefinition(job.job_type) : undefined;
+  if (jobTypeDefinition?.eligibilityCodeGateStatus === input.toStatus) {
     eligibilityCode = input.eligibilityCode ?? job.eligibility_code;
     eligibilityCodeExpiry = input.eligibilityCodeExpiry ?? job.eligibility_code_expiry;
     if (!eligibilityCode.trim() || !eligibilityCodeExpiry.trim()) {

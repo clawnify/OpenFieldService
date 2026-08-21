@@ -41,12 +41,18 @@ import {
 } from "./workflow.js";
 import {
   evaluateRebateEligibility,
-  getCustomerRebateProfile,
   getJobRebateAudit,
   listEligibilityCodes,
   recordEligibilityCheck,
   recordEligibilityFieldChange,
 } from "./modules/programs/bc/rebate.js";
+import {
+  CUSTOMER_REBATE_PROFILE_JOIN,
+  CUSTOMER_REBATE_PROFILE_OVERRIDE_COLUMNS,
+  getCustomerRebateProfile,
+  upsertCustomerRebateProfile,
+  type CustomerRebateProfile,
+} from "./modules/programs/bc/customer-profile.js";
 import { CustomerValidationError, resolveReferralAttribution } from "./customers.js";
 import { LeadWorkflowError, transitionLead } from "./lead-workflow.js";
 import { LeadConversionError, convertLead } from "./lead-conversion.js";
@@ -257,6 +263,16 @@ const CustomerSchema = z.object({
 // detail — same RBAC boundary, not a separate decision.
 const REBATE_PROFILE_FIELDS = new Set([
   "referral_source", "referral_name", "referred_by_customer_id",
+  "house_size", "primary_heating_source", "number_of_adults", "number_of_children", "household_income",
+]);
+
+// Phase 11.3 — the subset of REBATE_PROFILE_FIELDS that now lives in
+// bc_rebate_customer_profiles rather than directly on `customers` (referral
+// fields are NOT part of this set — they remain generic Core columns, never
+// HVAC/BC-specific, and are unaffected by this phase). Used to route these
+// 5 fields to the profile-table write path instead of the generic
+// customers UPDATE, and to exclude them from it.
+const REBATE_COLUMN_FIELDS = new Set([
   "house_size", "primary_heating_source", "number_of_adults", "number_of_children", "household_income",
 ]);
 
@@ -2117,9 +2133,10 @@ app.openapi(listCustomers, async (c) => {
 
   const countRow = await get<{ count: number }>(`SELECT COUNT(*) as count FROM customers c ${where}`, params);
   const customers = await query<Customer>(
-    `SELECT c.*, COALESCE(jc.cnt, 0) as job_count
+    `SELECT c.*, COALESCE(jc.cnt, 0) as job_count, ${CUSTOMER_REBATE_PROFILE_OVERRIDE_COLUMNS}
      FROM customers c
      LEFT JOIN (SELECT customer_id, COUNT(*) as cnt FROM jobs GROUP BY customer_id) jc ON jc.customer_id = c.id
+     ${CUSTOMER_REBATE_PROFILE_JOIN}
      ${where}
      ORDER BY c.name ASC
      LIMIT ? OFFSET ?`,
@@ -2174,9 +2191,10 @@ app.openapi(getCustomer, async (c) => {
   // "Existing Customer" (see src/server/customers.ts, which guarantees
   // referred_by_customer_id is null for every other source).
   const customer = await get<Customer>(
-    `SELECT c.*, rb.name as referred_by_customer_name
+    `SELECT c.*, rb.name as referred_by_customer_name, ${CUSTOMER_REBATE_PROFILE_OVERRIDE_COLUMNS}
      FROM customers c
      LEFT JOIN customers rb ON c.referred_by_customer_id = rb.id
+     ${CUSTOMER_REBATE_PROFILE_JOIN}
      WHERE c.id = ?`, [id]
   );
   if (!customer) return c.json({ error: "Customer not found" }, 404);
@@ -2256,20 +2274,37 @@ app.openapi(createCustomer, async (c) => {
     if (err instanceof CustomerValidationError) return c.json({ error: err.message }, 400);
     throw err;
   }
-  await run(
+  // Phase 11.3: the 5 rebate-profile fields are no longer written to
+  // `customers` — they live in bc_rebate_customer_profiles (see
+  // customer-profile.ts). Only create a profile row when the request
+  // actually supplied at least one, matching the original "do not assume
+  // these fields apply to every customer" design.
+  const insertResult = await run(
     `INSERT INTO customers (name, email, phone, address, city, state, zip, notes,
-       referral_source, referral_name, referred_by_customer_id,
-       house_size, primary_heating_source, number_of_adults, number_of_children, household_income)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       referral_source, referral_name, referred_by_customer_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       data.name, data.email || "", data.phone || "", data.address || "",
       data.city || "", data.state || "", data.zip || "", data.notes || "",
       referral.referral_source, referral.referral_name, referral.referred_by_customer_id,
-      data.house_size ?? null, data.primary_heating_source || "",
-      data.number_of_adults ?? null, data.number_of_children ?? null, data.household_income ?? null,
     ]
   );
-  const customer = await get<Customer>("SELECT * FROM customers ORDER BY id DESC LIMIT 1");
+  const customerId = insertResult.lastInsertRowid;
+  if (Object.keys(data).some((k) => REBATE_COLUMN_FIELDS.has(k))) {
+    await upsertCustomerRebateProfile(customerId, {
+      house_size: data.house_size ?? null,
+      primary_heating_source: data.primary_heating_source || "",
+      number_of_adults: data.number_of_adults ?? null,
+      number_of_children: data.number_of_children ?? null,
+      household_income: data.household_income ?? null,
+    });
+  }
+  const customer = await get<Customer>(
+    `SELECT c.*, ${CUSTOMER_REBATE_PROFILE_OVERRIDE_COLUMNS}
+     FROM customers c ${CUSTOMER_REBATE_PROFILE_JOIN}
+     WHERE c.id = ?`,
+    [customerId]
+  );
   return c.json(customer!, 201);
 });
 
@@ -2320,9 +2355,41 @@ app.openapi(updateCustomer, async (c) => {
   const fields: string[] = [];
   const vals: unknown[] = [];
   for (const [k, v] of Object.entries(data)) {
-    if (v !== undefined && !REFERRAL_FIELDS.has(k)) {
+    // Phase 11.3: rebate-profile fields are excluded here too — they're
+    // resolved and written to bc_rebate_customer_profiles below, the same
+    // way referral fields are excluded and resolved separately above.
+    if (v !== undefined && !REFERRAL_FIELDS.has(k) && !REBATE_COLUMN_FIELDS.has(k)) {
       fields.push(`${k} = ?`);
       vals.push(v);
+    }
+  }
+
+  // Phase 11.3: same partial-PUT-aware "effective state" pattern as the
+  // referral-attribution resolution above — only touched when the request
+  // includes at least one of the 5 rebate fields, so an unrelated edit
+  // (e.g. just the phone number) never creates a profile row for a
+  // customer that never had rebate data. Untouched fields fall back to the
+  // existing profile row's value (or the same blank defaults a brand-new
+  // profile would have), never silently zeroed.
+  let touchedRebateProfile = false;
+  if (Object.keys(data).some((k) => REBATE_COLUMN_FIELDS.has(k))) {
+    // getCustomerRebateProfile returns null only when the customer itself
+    // doesn't exist — matches this route's pre-existing behavior of never
+    // erroring on a nonexistent id unless the touched fields require an
+    // existence check (see the referral-fields branch below); silently
+    // skipping here (rather than 404ing) preserves that exact no-op-on-
+    // unknown-id precedent instead of introducing a new failure mode.
+    const existingProfile = await getCustomerRebateProfile(Number(id));
+    if (existingProfile) {
+      const effective: CustomerRebateProfile = {
+        house_size: data.house_size !== undefined ? data.house_size : existingProfile.house_size,
+        primary_heating_source: data.primary_heating_source !== undefined ? data.primary_heating_source : existingProfile.primary_heating_source,
+        number_of_adults: data.number_of_adults !== undefined ? data.number_of_adults : existingProfile.number_of_adults,
+        number_of_children: data.number_of_children !== undefined ? data.number_of_children : existingProfile.number_of_children,
+        household_income: data.household_income !== undefined ? data.household_income : existingProfile.household_income,
+      };
+      await upsertCustomerRebateProfile(Number(id), effective);
+      touchedRebateProfile = true;
     }
   }
 
@@ -2351,6 +2418,12 @@ app.openapi(updateCustomer, async (c) => {
   if (fields.length > 0) {
     fields.push("updated_at = datetime('now')");
     await run(`UPDATE customers SET ${fields.join(", ")} WHERE id = ?`, [...vals, id]);
+  } else if (touchedRebateProfile) {
+    // Only rebate-profile fields changed (now stored in a different table)
+    // — still bump customers.updated_at, matching the pre-Phase-11.3
+    // contract where any successful field change (rebate fields included)
+    // touched this timestamp.
+    await run("UPDATE customers SET updated_at = datetime('now') WHERE id = ?", [id]);
   }
   return c.json({ ok: true }, 200);
 });
@@ -2941,8 +3014,9 @@ app.openapi(convertLeadRoute, async (c) => {
 
   const lead = await get<Lead>(`${LEAD_SELECT} WHERE l.id = ?`, [id]);
   const customer = await get<Customer>(
-    `SELECT c.*, rb.name as referred_by_customer_name
+    `SELECT c.*, rb.name as referred_by_customer_name, ${CUSTOMER_REBATE_PROFILE_OVERRIDE_COLUMNS}
      FROM customers c LEFT JOIN customers rb ON c.referred_by_customer_id = rb.id
+     ${CUSTOMER_REBATE_PROFILE_JOIN}
      WHERE c.id = ?`,
     [outcome.customerId]
   );
