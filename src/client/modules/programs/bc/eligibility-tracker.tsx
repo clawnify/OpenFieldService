@@ -1,10 +1,10 @@
 import { useEffect, useState } from "preact/hooks";
-import { useApp } from "../context";
-import { useAuth } from "../auth-context";
-import { api } from "../api";
-import { STATUS_LABELS } from "./status-badge";
+import { useApp } from "../../../context";
+import { useAuth } from "../../../auth-context";
+import { api } from "../../../api";
+import { STATUS_LABELS } from "../../../components/status-badge";
 import { BadgeCheck, Info, Settings as SettingsIcon } from "lucide-preact";
-import type { EligibilityCodeRow, EligibilityCodeStatus } from "../types";
+import type { EligibilityCodeRow, EligibilityCodeStatus } from "../../../types";
 
 const SECTIONS: { status: EligibilityCodeStatus; title: string; empty: string }[] = [
   { status: "expiring_soon", title: "Expiring Soon", empty: "No codes are expiring soon." },

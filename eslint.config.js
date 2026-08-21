@@ -25,4 +25,15 @@ export default tseslint.config(
       "react-hooks/exhaustive-deps": "warn",
     },
   },
+  {
+    // Phase 11.1 — plain Node dev-tooling scripts (never bundled into the
+    // Worker or the browser build), same tier as vitest.config.ts's own
+    // node:fs usage but needing ambient `console`/`process` globals too.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
 );

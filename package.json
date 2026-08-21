@@ -9,7 +9,8 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "check:architecture": "node scripts/check-architecture-boundaries.mjs"
   },
   "dependencies": {
     "@clawnify/app": "^0.1.0",

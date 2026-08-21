@@ -395,3 +395,63 @@ Phases 11.2, 11.3, and 11.5 are the only ones with real schema/logic risk; each 
 ---
 
 *This audit found the platform in materially better generalization shape than a from-scratch inspection might expect, precisely because prior phases were consistently disciplined about keeping HVAC/BC specifics out of generic tables and generic endpoints. The remaining work is narrow, well-understood, and additive.*
+
+---
+
+## 21. Phase 11.1 addendum — Core / Module file-organization boundary (2026-08-21)
+
+Implemented the first real structural step: introduced `src/{server,client}/modules/{hvac,programs/bc}/` and moved the two files that were safely separable **as pure moves, with zero logic change**.
+
+### Architectural adaptation from the task's suggested layout
+
+The task's example target (`src/core/`, `src/modules/hvac/`) assumes one unified `src/`. This codebase has a hard, pre-existing, security-relevant boundary between `src/server/` (Cloudflare Worker, has access to secrets/DB/R2) and `src/client/` (Preact SPA, ships to the browser) — collapsing them into one `src/core/` would blur exactly the boundary Phase 10's own audit repeatedly verified stays clean (no server secret ever reaches the client bundle). Adapted structure, applied **within each** of `src/server/` and `src/client/` separately:
+
+```
+src/server/
+  modules/
+    hvac/               (reserved, empty — see below)
+    programs/bc/
+      rebate.ts          ← moved from src/server/rebate.ts, zero logic change
+  index.ts               (composition root — imports every module; the only Core-tier file allowed to)
+  workflow.ts, scheduling.ts, financial.ts, compliance.ts, lead-*.ts,
+  notification-*.ts, calendar-sync.ts, google-calendar.ts, geocoding.ts,
+  google-geocoding.ts, routing.ts, google-routing.ts, settings.ts,
+  business-timezone.ts, auth.ts, customers.ts, storage.ts, db.ts, ...
+                          (Core — everything else, unchanged)
+
+src/client/
+  modules/
+    hvac/               (reserved, empty — see below)
+    programs/bc/
+      eligibility-tracker.tsx  ← moved from src/client/components/eligibility-tracker.tsx, zero logic change
+  app.tsx                (composition root — imports every module)
+  components/*.tsx, context.tsx, auth-context.tsx, api.tsx, types.ts, ...
+                          (Core — everything else, unchanged, including job-type-labels.ts, see below)
+```
+
+### Why only 2 files moved, not more
+
+Every other HVAC/BC candidate identified in §4/§9/§10/§11 was deliberately **not** moved, per the explicit "do not force dependency cleanup when it requires behavior changes" instruction:
+
+- **`workflow.ts`'s `JobType` union + `WORKFLOWS` record** — the engine (generic mechanism) and the data (3 hardcoded sequences, including the 2 BC-specific ones) are one exported `const` in one file; splitting them is real logic work (Phase 11.2's own charter), not a file move.
+- **`src/client/job-type-labels.ts`** — a direct 1:1 label mirror of that same union, including the generic `STANDARD` entry. Moving only the label file while the union it labels stays in Core would split a tightly-coupled pair across the boundary in a confusing half-migrated state — it moves together with the union in 11.2 (see the new `src/client/modules/hvac/README.md` placeholder).
+- **`src/client/settings-catalog.ts`** — genuinely mixed content (`BUSINESS_TIMEZONE` is Core, 6 of 9 catalog entries are BC-program-specific) in one file with one shared mechanism (`SettingKind`, `formatSettingValue`, etc.) — not safely splittable without touching the shared type/formatting logic. Deferred to 11.3.
+- **`index.ts`'s 6 inline HVAC/BC routes** (`GET /api/customers/{id}/rebate-eligibility`, `POST /api/jobs/{id}/eligibility-check`, `PUT /api/jobs/{id}/eligibility`, `GET /api/jobs/{id}/rebate-audit`, `GET /api/jobs/eligibility-codes`, `GET /api/invoices/{id}/rebate`) — extracting route registrations into a separate file is real structural work with a genuine behavior risk: Hono/`@hono/zod-openapi` matches routes in **registration order** (a documented gotcha in `mem:architecture/data-model` — a static route registered after a same-depth `{id}`-parameterized route gets swallowed by it). Moving these safely requires verifying the extracted registration call lands at the exact same relative position, which is a real (if small) risk best done as its own careful, tested step — not bundled into a "pure file move" phase. Deferred to 11.2/11.3.
+- **`customers.house_size`/`primary_heating_source`/`number_of_adults`/`number_of_children`/`household_income`** — DB columns, not files; no migration is permitted this phase.
+- **Google Calendar, Cloudflare R2 Storage** — explicitly out of scope per this phase's own instruction.
+
+`src/server/modules/hvac/` and `src/client/modules/hvac/` were still created (each with a `README.md`, since git doesn't track empty directories) — this is honest scaffolding for Phase 11.2's landing spot, not a fabricated move.
+
+### Architecture guard
+
+`scripts/check-architecture-boundaries.mjs` (new, zero new dependencies — plain `node:fs`/`node:path`) statically verifies: no Core file imports a `modules/**` path except the two composition roots (`src/server/index.ts`, `src/client/app.tsx`); no `modules/hvac/**` file imports a `modules/programs/**` path (wrong dependency direction). Run via `pnpm run check:architecture`.
+
+**Not implemented as a vitest test**, despite the task's "architecture-boundary tests" phrasing — empirically verified this session that `@cloudflare/vitest-pool-workers` runs test files inside a bundled sandbox with no access to the real project filesystem (a probe `readdir("./src/server")` from inside a test file resolved against a virtual `/bundle/` root and failed with `ENOENT`, not because the check was wrong but because the Workers runtime environment genuinely has no disk). `vitest.config.ts`'s own `buildSchemaStatements()` only gets away with real `node:fs` because it runs at Vite **config-build time**, in plain Node, before the Workers pool environment exists — the same trick isn't available inside a `*.test.ts` file. The script was verified to actually catch violations (not just trivially pass) by temporarily injecting a fake Core→module import into `scheduling.ts`, confirming the script both detects it and exits non-zero, then reverting.
+
+### Verification
+
+Both moves confirmed pure renames via `git diff --find-renames` (net diff: 5 files, 12 insertions/11 deletions — the two files' own import-path corrections plus the two composition roots' import lines plus `package.json`'s new script entry). Production build output is **byte-identical** before/after (`dist/assets/index-B2RyNlRb.css`, `dist/assets/index-C406QDpN.js` — same hashes both times), the strongest available proof of zero client behavior change. Full suite 923/923 unchanged; targeted subsets (rebate/eligibility, workflow, scheduling, technician-route, Maps/Routing, Google Calendar, Notifications, Leads, Financial/Compliance, Global Settings) all re-run in isolation with unchanged counts.
+
+### Status
+
+Phase 11.1 IMPLEMENTED / VERIFIED / **NOT COMMITTED** this session (a separate Phase 11.1 Safe-Commit checkpoint follows, matching the established Phase 10/11.0 pattern). Zero intentional behavior change anywhere. Phase 11.2 (data-driven `JobType`/`WORKFLOWS` registry) is the natural next step and is NOT STARTED.

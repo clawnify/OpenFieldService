@@ -21,7 +21,7 @@ import { InvoiceDetail } from "./components/invoice-detail";
 import { UserManagement } from "./components/user-list";
 import { Integrations } from "./components/integrations";
 import { GlobalSettings } from "./components/global-settings";
-import { EligibilityTracker } from "./components/eligibility-tracker";
+import { EligibilityTracker } from "./modules/programs/bc/eligibility-tracker";
 import { ErrorBanner } from "./components/error-banner";
 
 export function App() {

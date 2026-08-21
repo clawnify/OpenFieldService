@@ -46,7 +46,7 @@ import {
   listEligibilityCodes,
   recordEligibilityCheck,
   recordEligibilityFieldChange,
-} from "./rebate.js";
+} from "./modules/programs/bc/rebate.js";
 import { CustomerValidationError, resolveReferralAttribution } from "./customers.js";
 import { LeadWorkflowError, transitionLead } from "./lead-workflow.js";
 import { LeadConversionError, convertLead } from "./lead-conversion.js";
