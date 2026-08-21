@@ -249,15 +249,16 @@ This is **already trade-neutral by omission** — nothing assumes an HVAC techni
 
 | Integration | Classification | Evidence |
 |---|---|---|
-| Google Calendar (`google-calendar.ts`, `calendar-sync.ts`) | **PROVIDER_ADAPTER** | Thin REST client behind a sync layer; the *capability* ("sync a job to the user's calendar") is generic, the adapter is Google-specific and swappable in principle (no second provider exists to prove it, but nothing in `calendar-sync.ts`'s call sites assumes Google specifically beyond the adapter boundary) |
+| Google Calendar (`google-calendar.ts`, `calendar-sync.ts`) | **DOMAIN_COUPLED** | Corrected on re-verification: unlike Geocoding/Routing/Email/SMS below, **no generic `CalendarProvider` interface exists**. `google-calendar.ts` exports only Google-named types (`GoogleOAuthEnv`, `GoogleTokenResponse`, `GoogleCalendarListEntry`, `GoogleEventInput`) and Google-shaped functions (`insertEvent`/`updateEvent`/`deleteEvent`); `calendar-sync.ts` (the business-logic layer) imports these Google-specific types directly rather than a provider-agnostic contract. It IS cleanly isolated to 2 files (a real positive), but "isolated" and "abstracted behind a swappable interface" are different properties — this one only has the former today. |
 | Google Geocoding (`geocoding.ts` contract + `google-geocoding.ts` adapter) | **GENERIC_CAPABILITY + PROVIDER_ADAPTER** | `GeocodingProvider` interface is provider-agnostic by design (Phase 10.0); `NoopGeocodingProvider`/`MockGeocodingProvider` already prove the contract doesn't leak Google specifics |
 | Google Routes (`routing.ts` contract + `google-routing.ts` adapter) | **GENERIC_CAPABILITY + PROVIDER_ADAPTER** | Same pattern, `RoutingProvider`/`RouteResult` — confirmed clean in Phase 10.4/10.5's own audits |
 | Google Maps JS (browser loader) | **PROVIDER_ADAPTER** | `google-maps-loader.ts` is Google-specific by necessity (no generic "map renderer" interface exists client-side — not needed until a second map provider is actually required) |
-| Resend (email) | **PROVIDER_ADAPTER** | Behind `notification-providers.ts`'s adapter interface (per Phase 9 architecture) |
-| Twilio (SMS) | **PROVIDER_ADAPTER** | Same |
-| Cloudflare (D1, R2, Workers) | **INFRASTRUCTURE** | Platform-level, not a swappable "provider" in the same sense — out of scope for this classification |
+| Resend (email) | **GENERIC_CAPABILITY + PROVIDER_ADAPTER** | `notification-providers.ts` defines a zero-dependency `EmailProvider { send(input): Promise<ProviderSendResult> }` interface; `notification-dispatcher.ts` imports only that interface + the adapter factory, never Resend-specific types directly — same clean shape as Geocoding/Routing |
+| Twilio (SMS) | **GENERIC_CAPABILITY + PROVIDER_ADAPTER** | Same file/pattern as Resend — a generic `SmsProvider` interface in `notification-providers.ts`, Twilio specifics isolated to `notification-twilio.ts` |
+| Cloudflare R2 (`storage.ts`) | **DOMAIN_COUPLED** | `StorageEnv.MEDIA` is typed directly as the Workers-native `R2Bucket`, and `getObject()`/`putObject()` take/return R2-native types (`R2ObjectBody`) directly — no generic `ObjectStorage` interface exists. The business logic around it (key-building, content-type allowlist, size limits) is itself generic and well-isolated; only the binding/return types are R2-coupled. A future S3-compatible swap would mean changing this file's public signatures, not just adding a new adapter file. |
+| Cloudflare D1 (`db.ts`) | **GENERIC_CAPABILITY** (access layer), informational SQLite coupling elsewhere | `db.ts` is a 1-line re-export of `@clawnify/db`'s generic `query`/`get`/`run`/`initDB` — no D1-specific API leaks through it. Business logic throughout `src/server/*.ts` does write raw SQL inline (no query builder/ORM) with some SQLite-specific syntax (`INSERT OR IGNORE`, `db.batch()` atomicity) — informational only, not a blocker at current scale, and explicitly out of this audit's scope to fix. |
 
-**No generic capability is unnecessarily branded around one provider.** The Geocoding/Routing split (Phase 10) is the strongest existing precedent for how a future provider-abstraction should look — it should be the template for any future "Calendar provider #2" or "SMS provider #2" work, not reinvented.
+**No generic capability is unnecessarily branded around one provider.** The Geocoding/Routing (Phase 10) and Email/SMS (Phase 9.2) integrations already demonstrate the correct shape — a zero-dependency interface + isolated adapter file(s) + a `buildXProvider(env)` factory — and should be the template for any future work on Calendar or Storage, which do not yet have this shape (real but moderate, P2, architectural couplings — see §17 G13/G14 — not blockers, since both integrations already degrade gracefully when unconfigured).
 
 ---
 
@@ -308,8 +309,12 @@ Direct evidence:
 | G10 | `jobs.price` still `REAL`, not integer cents (pre-existing, unrelated to Phase 11) | **P3** — carried over from Phase 5's own disclosed deferral, noted here only because it touches the future Accounting module |
 | G11 | No white-label/branding config layer (product name is a hardcoded literal) | **INFO** — no current requirement demonstrates need |
 | G12 | `HEATING_SOURCE_OPTIONS` sits in the generic "Customer Information" settings category rather than an HVAC-specific one | **P3** — presentation-only miscategorization |
+| G13 | Google Calendar has no generic `CalendarProvider` interface — Google-specific types flow directly into `calendar-sync.ts`'s business logic (§14) | **P2** — meaningful future constraint if a second calendar provider is ever needed; not urgent, integration already degrades gracefully when unconfigured |
+| G14 | Cloudflare R2 storage has no generic `ObjectStorage` interface — `storage.ts` types directly against `R2Bucket`/`R2ObjectBody` (§14) | **P2** — same reasoning as G13, for a future non-Cloudflare deployment or S3-compatible swap |
 
 No P0 was found. Nothing here blocks safe continued operation of the current HVAC/BC product.
+
+*Correction note (same-day follow-up pass): §14's original classification of Google Calendar as "PROVIDER_ADAPTER" was too generous — re-verified against the actual interface exports and corrected to DOMAIN_COUPLED, and Cloudflare R2 Storage (omitted from the original integration table despite being named in this audit's own scope) was added as G14. No other section required correction. See the Serena memory's revision note for the full record.*
 
 ---
 
