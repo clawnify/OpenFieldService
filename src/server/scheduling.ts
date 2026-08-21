@@ -67,8 +67,10 @@ export function validateScheduleFields(input: ScheduleFieldsInput): void {
  *  to a job whose already-assigned technician later went inactive (that
  *  existing assignment must remain readable/history-safe, never silently
  *  reassigned — see mem:phase7/advanced-scheduler). */
-export async function assertTechnicianAssignable(technicianId: number): Promise<void> {
-  const tech = await get<{ id: number; active: number }>("SELECT id, active FROM technicians WHERE id = ?", [technicianId]);
+export async function assertTechnicianAssignable(organizationId: number, technicianId: number): Promise<void> {
+  const tech = await get<{ id: number; active: number }>(
+    "SELECT id, active FROM technicians WHERE id = ? AND organization_id = ?", [technicianId, organizationId]
+  );
   if (!tech) throw new ScheduleValidationError("The selected technician does not exist");
   if (!tech.active) throw new ScheduleValidationError("Cannot assign an inactive technician");
 }

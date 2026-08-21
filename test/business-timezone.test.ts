@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
-  applySchema, authHeaders, createUser, del, loginAs, post, queryDb, request, requestRaw, resetDatabase,
+  DEFAULT_ORGANIZATION_ID, applySchema, authHeaders, createUser, del, loginAs, post, queryDb, request, requestRaw, resetDatabase,
 } from "./helpers.js";
 import {
   DEFAULT_BUSINESS_TIMEZONE, getBusinessTimezone, isValidIanaTimezone,
@@ -141,23 +141,23 @@ describe("Global Settings: BUSINESS_TIMEZONE", () => {
   });
 });
 
-describe("getBusinessTimezone() resolver — the one shared source Calendar and Notifications both call", () => {
+describe("getBusinessTimezone(DEFAULT_ORGANIZATION_ID) resolver — the one shared source Calendar and Notifications both call", () => {
   it("resolves the published BUSINESS_TIMEZONE Global Setting when one exists", async () => {
     const auth = await authHeaders();
     await post("/api/settings", { key: "BUSINESS_TIMEZONE", value: "America/Toronto", data_type: "string" }, auth);
-    expect(await getBusinessTimezone()).toBe("America/Toronto");
+    expect(await getBusinessTimezone(DEFAULT_ORGANIZATION_ID)).toBe("America/Toronto");
   });
 
   it("does NOT consult _meta.timezone when BUSINESS_TIMEZONE is published, even if _meta disagrees (no dual-source ambiguity)", async () => {
     await queryDb("UPDATE _meta SET value = 'America/Chicago' WHERE key = 'timezone'");
     const auth = await authHeaders();
     await post("/api/settings", { key: "BUSINESS_TIMEZONE", value: "America/Toronto", data_type: "string" }, auth);
-    expect(await getBusinessTimezone()).toBe("America/Toronto");
+    expect(await getBusinessTimezone(DEFAULT_ORGANIZATION_ID)).toBe("America/Toronto");
   });
 
   it("falls back to a real (non-UTC) legacy _meta.timezone value when BUSINESS_TIMEZONE hasn't been published (backward compatibility for a pre-migration-0012 database)", async () => {
     await queryDb("UPDATE _meta SET value = 'America/Edmonton' WHERE key = 'timezone'");
-    expect(await getBusinessTimezone()).toBe("America/Edmonton");
+    expect(await getBusinessTimezone(DEFAULT_ORGANIZATION_ID)).toBe("America/Edmonton");
   });
 
   it("falls through to the safe default when neither BUSINESS_TIMEZONE nor a real _meta.timezone value exists — never silently UTC (closes the fresh-environment risk)", async () => {
@@ -169,7 +169,7 @@ describe("getBusinessTimezone() resolver — the one shared source Calendar and 
     await queryDb("UPDATE _meta SET value = 'UTC' WHERE key = 'timezone'");
     const legacy = await queryDb<{ value: string }>("SELECT value FROM _meta WHERE key = 'timezone'");
     expect(legacy[0].value).toBe("UTC");
-    expect(await getBusinessTimezone()).toBe(DEFAULT_BUSINESS_TIMEZONE);
+    expect(await getBusinessTimezone(DEFAULT_ORGANIZATION_ID)).toBe(DEFAULT_BUSINESS_TIMEZONE);
     expect(DEFAULT_BUSINESS_TIMEZONE).toBe("America/Vancouver");
   });
 });

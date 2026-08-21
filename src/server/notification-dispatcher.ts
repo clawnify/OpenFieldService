@@ -417,27 +417,42 @@ export interface ReminderScanResult {
  *  reminding about a cancelled one; a small, disclosed judgment call, not
  *  an invented business rule. */
 export async function enqueueDayBeforeReminders(): Promise<ReminderScanResult> {
-  const tz = await getBusinessTimezone();
-  const targetDate = businessDateOffset(tz, 1);
+  // Phase 11.5: a cron-triggered global scan legitimately spans every
+  // organization (there is no "actor" to scope by), so this is the one
+  // place business-timezone resolution loops over organizations explicitly
+  // rather than taking a single organizationId parameter — each org's own
+  // "tomorrow" is computed from its own BUSINESS_TIMEZONE setting, exactly
+  // as it always was for the one organization that existed before this
+  // phase (that single-org loop iteration is behaviorally identical to the
+  // prior single global call).
+  const orgs = await query<{ id: number }>("SELECT id FROM organizations WHERE status = 'active'");
 
-  const candidates = await query<ReminderCandidate>(
-    `SELECT id, identifier, customer_id, scheduled_date, scheduled_time FROM jobs
-     WHERE scheduled_date = ? AND status NOT IN ('cancelled', 'completed')`,
-    [targetDate]
-  );
-
+  let scanned = 0;
   let enqueued = 0;
-  for (const job of candidates) {
-    const contact = await getCustomerContact(job.customer_id);
-    if (!contact) continue;
-    const results = await enqueueAppointmentReminder({
-      jobId: job.id, jobIdentifier: job.identifier,
-      customerId: job.customer_id, customerName: contact.name, customerEmail: contact.email, customerPhone: contact.phone,
-      scheduledDate: job.scheduled_date, scheduledTime: job.scheduled_time,
-    });
-    if (results.email.enqueued || results.sms.enqueued) enqueued++;
+  let targetDate = "";
+  for (const org of orgs) {
+    const tz = await getBusinessTimezone(org.id);
+    targetDate = businessDateOffset(tz, 1);
+
+    const candidates = await query<ReminderCandidate>(
+      `SELECT id, identifier, customer_id, scheduled_date, scheduled_time FROM jobs
+       WHERE organization_id = ? AND scheduled_date = ? AND status NOT IN ('cancelled', 'completed')`,
+      [org.id, targetDate]
+    );
+    scanned += candidates.length;
+
+    for (const job of candidates) {
+      const contact = await getCustomerContact(job.customer_id);
+      if (!contact) continue;
+      const results = await enqueueAppointmentReminder({
+        jobId: job.id, jobIdentifier: job.identifier,
+        customerId: job.customer_id, customerName: contact.name, customerEmail: contact.email, customerPhone: contact.phone,
+        scheduledDate: job.scheduled_date, scheduledTime: job.scheduled_time,
+      });
+      if (results.email.enqueued || results.sms.enqueued) enqueued++;
+    }
   }
-  return { targetDate, scanned: candidates.length, enqueued };
+  return { targetDate, scanned, enqueued };
 }
 
 // ── Cloudflare Cron entry point ──────────────────────────────────────────

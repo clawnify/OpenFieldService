@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
-  applySchema, authHeaders, createCustomer, del, executeStatements,
+  DEFAULT_ORGANIZATION_ID, applySchema, authHeaders, createCustomer, del, executeStatements,
   post, put, queryDb, request, resetDatabase,
 } from "./helpers.js";
 
@@ -234,8 +234,8 @@ describe("rebate program registry", () => {
   it("keeps CLEANBC and BC_HYDRO independently registered with their own criteria sets", async () => {
     const { evaluateRebateEligibility } = await import("../src/server/modules/programs/bc/rebate.js");
     const profile = { house_size: 1500, primary_heating_source: "Electric", number_of_adults: 2, number_of_children: 0, household_income: 50000 };
-    const cleanbc = await evaluateRebateEligibility("CLEANBC", profile);
-    const bcHydro = await evaluateRebateEligibility("BC_HYDRO", profile);
+    const cleanbc = await evaluateRebateEligibility(DEFAULT_ORGANIZATION_ID, "CLEANBC", profile);
+    const bcHydro = await evaluateRebateEligibility(DEFAULT_ORGANIZATION_ID, "BC_HYDRO", profile);
     expect(cleanbc.criteria.map((c) => c.key).sort()).toEqual(["house_size", "household_income"]);
     expect(bcHydro.criteria.map((c) => c.key)).toEqual(["household_income"]);
   });
@@ -243,7 +243,7 @@ describe("rebate program registry", () => {
   it("a job type with no registered program (STANDARD) safely yields zero criteria, never a crash or a borrowed program's rules", async () => {
     const { evaluateRebateEligibility } = await import("../src/server/modules/programs/bc/rebate.js");
     const profile = { house_size: null, primary_heating_source: "", number_of_adults: null, number_of_children: null, household_income: null };
-    const result = await evaluateRebateEligibility("STANDARD", profile);
+    const result = await evaluateRebateEligibility(DEFAULT_ORGANIZATION_ID, "STANDARD", profile);
     expect(result.criteria).toEqual([]);
     expect(result.allowed).toBeNull();
     expect(result.thresholds_used).toEqual({});
@@ -256,7 +256,7 @@ describe("rebate program registry", () => {
     // at compile time; this proves the runtime registry itself is also safe,
     // not just the type system, per the task's explicit "no 500 from unknown
     // program lookup" requirement.
-    const result = await evaluateRebateEligibility("UNKNOWN_PROGRAM" as unknown as "STANDARD", profile);
+    const result = await evaluateRebateEligibility(DEFAULT_ORGANIZATION_ID, "UNKNOWN_PROGRAM" as unknown as "STANDARD", profile);
     expect(result.criteria).toEqual([]);
     expect(result.allowed).toBeNull();
   });

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vitest";
-import { applySchema, queryDb } from "./helpers.js";
+import { DEFAULT_ORGANIZATION_ID, applySchema, queryDb } from "./helpers.js";
 import { getBusinessTimezone } from "../src/server/business-timezone.js";
 import { initDB } from "../src/server/db.js";
 
@@ -21,7 +21,7 @@ beforeAll(async () => {
   await applySchema();
   // This file never makes an HTTP request (which would normally trigger
   // @clawnify/app's own initDB(c.env) middleware) before calling
-  // getBusinessTimezone() directly — same reason src/server/index.ts's
+  // getBusinessTimezone(DEFAULT_ORGANIZATION_ID) directly — same reason src/server/index.ts's
   // scheduled() entry point calls this explicitly (see its own comment).
   initDB(env);
 });
@@ -36,7 +36,7 @@ describe("fresh-database migration — BUSINESS_TIMEZONE is safe with zero manua
 
     // And the shared resolver agrees, with zero configuration beyond what
     // migrations/0012 itself seeded.
-    expect(await getBusinessTimezone()).toBe("America/Vancouver");
+    expect(await getBusinessTimezone(DEFAULT_ORGANIZATION_ID)).toBe("America/Vancouver");
   });
 
   it("re-applying migrations is idempotent — exactly one BUSINESS_TIMEZONE row total, never a duplicate", async () => {

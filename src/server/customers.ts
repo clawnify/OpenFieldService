@@ -55,6 +55,7 @@ export interface ResolvedReferral {
  * or `null` for a CREATE (a not-yet-existing customer can never self-refer).
  */
 export async function resolveReferralAttribution(
+  organizationId: number,
   input: ReferralInput,
   existing: ReferralExisting | null,
   selfId: number | null
@@ -79,7 +80,14 @@ export async function resolveReferralAttribution(
     if (selfId !== null && referredById === selfId) {
       throw new CustomerValidationError("A customer cannot be recorded as their own referrer");
     }
-    const referring = await get<{ id: number }>("SELECT id FROM customers WHERE id = ?", [referredById]);
+    // Phase 11.5: organization-scoped — a customer in another organization
+    // must be treated as nonexistent for referral-attribution purposes,
+    // same as every other cross-tenant lookup in this codebase, so a
+    // customer can never be recorded as referred by (and therefore never
+    // display the name of) a customer belonging to a different organization.
+    const referring = await get<{ id: number }>(
+      "SELECT id FROM customers WHERE id = ? AND organization_id = ?", [referredById, organizationId]
+    );
     if (!referring) {
       throw new CustomerValidationError("The selected referring customer does not exist");
     }

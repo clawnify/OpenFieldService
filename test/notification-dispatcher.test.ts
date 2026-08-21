@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
-  applySchema, authHeaders, createCustomer, createJob, executeStatements, mockNotificationProviders,
+  DEFAULT_ORGANIZATION_ID, applySchema, authHeaders, createCustomer, createJob, executeStatements, mockNotificationProviders,
   post, put, queryDb, resetDatabase, runScheduled,
 } from "./helpers.js";
 import {
@@ -98,7 +98,7 @@ describe("concurrency", () => {
   });
 
   it("duplicate Cron execution produces exactly one reminder row", async () => {
-    const tz = await getBusinessTimezone();
+    const tz = await getBusinessTimezone(DEFAULT_ORGANIZATION_ID);
     const tomorrow = businessDateOffset(tz, 1);
     const auth = await authHeaders();
     const customer = await createCustomer();
@@ -493,7 +493,7 @@ describe("templates", () => {
 
 describe("day-before reminder", () => {
   async function jobOnRelativeDay(daysFromToday: number, status?: string) {
-    const tz = await getBusinessTimezone();
+    const tz = await getBusinessTimezone(DEFAULT_ORGANIZATION_ID);
     const date = businessDateOffset(tz, daysFromToday);
     const auth = await authHeaders();
     const customer = await createCustomer();
@@ -533,7 +533,7 @@ describe("day-before reminder", () => {
   });
 
   it("a rescheduled job's CURRENT date governs whether it's queued", async () => {
-    const tz = await getBusinessTimezone();
+    const tz = await getBusinessTimezone(DEFAULT_ORGANIZATION_ID);
     const twoDaysOut = businessDateOffset(tz, 2);
     const tomorrow = businessDateOffset(tz, 1);
     const auth = await authHeaders();
@@ -556,7 +556,7 @@ describe("day-before reminder", () => {
   });
 
   it("email disabled: no email reminder queued", async () => {
-    const tz = await getBusinessTimezone();
+    const tz = await getBusinessTimezone(DEFAULT_ORGANIZATION_ID);
     const date = businessDateOffset(tz, 1);
     const auth = await authHeaders();
     const customer = await createCustomer();
@@ -569,7 +569,7 @@ describe("day-before reminder", () => {
   });
 
   it("SMS not consented: no SMS reminder queued", async () => {
-    const tz = await getBusinessTimezone();
+    const tz = await getBusinessTimezone(DEFAULT_ORGANIZATION_ID);
     const date = businessDateOffset(tz, 1);
     const auth = await authHeaders();
     const customer = await createCustomer();
@@ -581,7 +581,7 @@ describe("day-before reminder", () => {
   });
 
   it("SMS consented: SMS reminder is queued", async () => {
-    const tz = await getBusinessTimezone();
+    const tz = await getBusinessTimezone(DEFAULT_ORGANIZATION_ID);
     const date = businessDateOffset(tz, 1);
     const auth = await authHeaders();
     const customer = await createCustomer();
@@ -601,7 +601,7 @@ describe("day-before reminder", () => {
     // the reminder scan still honors it when that's the only source
     // available (a database that hasn't published the Global Setting yet).
     await executeStatements(["UPDATE _meta SET value = 'America/Vancouver' WHERE key = 'timezone'"]);
-    const tz = await getBusinessTimezone();
+    const tz = await getBusinessTimezone(DEFAULT_ORGANIZATION_ID);
     expect(tz).toBe("America/Vancouver");
     const vancouverTomorrow = businessDateOffset(tz, 1);
     const utcTomorrow = businessDateOffset("UTC", 1);
@@ -627,7 +627,7 @@ describe("day-before reminder", () => {
     }, auth);
     expect(publish.response.status).toBe(201);
 
-    const tz = await getBusinessTimezone();
+    const tz = await getBusinessTimezone(DEFAULT_ORGANIZATION_ID);
     expect(tz).toBe("America/Toronto"); // the Global Setting, not the disagreeing legacy _meta value
 
     await executeStatements(["UPDATE _meta SET value = 'UTC' WHERE key = 'timezone'"]);
@@ -636,7 +636,7 @@ describe("day-before reminder", () => {
   it("changing BUSINESS_TIMEZONE changes the reminder's date-boundary calculation on the next scan", async () => {
     const auth = await authHeaders();
     await post("/api/settings", { key: "BUSINESS_TIMEZONE", value: "America/Vancouver", data_type: "string" }, auth);
-    const vancouverTz = await getBusinessTimezone();
+    const vancouverTz = await getBusinessTimezone(DEFAULT_ORGANIZATION_ID);
     const vancouverTomorrow = businessDateOffset(vancouverTz, 1);
 
     const later = new Date(Date.now() + 60_000).toISOString();
@@ -648,14 +648,14 @@ describe("day-before reminder", () => {
     // Setting's "effective immediately going forward, not retroactively"
     // semantics (Section 19's required distinction between current runtime
     // resolution and historical/future version rows).
-    expect(await getBusinessTimezone()).toBe("America/Vancouver");
-    expect(businessDateOffset(await getBusinessTimezone(), 1)).toBe(vancouverTomorrow);
+    expect(await getBusinessTimezone(DEFAULT_ORGANIZATION_ID)).toBe("America/Vancouver");
+    expect(businessDateOffset(await getBusinessTimezone(DEFAULT_ORGANIZATION_ID), 1)).toBe(vancouverTomorrow);
   });
 
   it("winter (PST) day-before date boundary resolves correctly through BUSINESS_TIMEZONE, same as summer", async () => {
     const auth = await authHeaders();
     await post("/api/settings", { key: "BUSINESS_TIMEZONE", value: "America/Vancouver", data_type: "string" }, auth);
-    const tz = await getBusinessTimezone();
+    const tz = await getBusinessTimezone(DEFAULT_ORGANIZATION_ID);
     // businessDateOffset is pure calendar-day arithmetic (never touches wall-
     // clock hours), so it produces a valid date string regardless of season —
     // this proves the winter (PST) path resolves through the same Global

@@ -11,6 +11,7 @@ export interface UserRow {
   password_hash: string;
   role: Role;
   active: number;
+  organization_id: number;
   last_login_at: string | null;
   created_at: string;
   updated_at: string;
@@ -144,7 +145,7 @@ export function clearSessionCookie(c: Context): void {
   deleteCookie(c, SESSION_COOKIE, { path: "/" });
 }
 
-export async function getSessionUser(c: Context): Promise<PublicUser | null> {
+export async function getSessionUser(c: Context): Promise<(PublicUser & { organizationId: number }) | null> {
   const token = getCookie(c, SESSION_COOKIE);
   if (!token) return null;
   const tokenHash = await hashToken(token);
@@ -159,7 +160,7 @@ export async function getSessionUser(c: Context): Promise<PublicUser | null> {
   }
   const row = await get<UserRow>("SELECT * FROM users WHERE id = ?", [session.user_id]);
   if (!row || !row.active) return null;
-  return sanitizeUser(row);
+  return { ...sanitizeUser(row), organizationId: row.organization_id };
 }
 
 export async function invalidateUserSessions(userId: number): Promise<void> {

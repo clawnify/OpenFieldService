@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
-  applySchema, authHeaders, createCustomer, createJob, createUser,
+  applySchema, authHeaders, createCustomer, createJob, createSecondOrganization, createUser,
   del, loginAs, mockGoogleApi, post, put, queryDb, request, requestRaw, resetDatabase,
   type GoogleMock,
 } from "./helpers.js";
@@ -580,6 +580,40 @@ describe("manual sync and retry", () => {
     expect(sync.response.status).toBe(200);
     expect(sync.body.created).toBe(2);
     expect(google.state.events.size).toBe(2);
+  });
+
+  it("Sync Now only syncs jobs belonging to the caller's own organization (Phase 11.5 tenant isolation)", async () => {
+    const auth = await authHeaders(); // default org (Org A) admin
+    const customerA = await createCustomer("Org A Customer");
+    await createJob(customerA.id, "2026-08-20");
+
+    const orgB = await createSecondOrganization("Org B Field Services");
+    const { cookie: cookieB } = await loginAs(orgB.email, orgB.password);
+    const authB: RequestInit = { headers: { cookie: cookieB } };
+    const customerB = await post<{ id: number }>(
+      "/api/customers", { name: "Org B Customer", email: "orgb@example.test", phone: "555-0199" }, authB
+    );
+    expect(customerB.response.status).toBe(201);
+    const jobB = await post<{ id: number }>(
+      "/api/jobs", { customer_id: customerB.body.id, scheduled_date: "2026-08-21" }, authB
+    );
+    expect(jobB.response.status).toBe(201);
+
+    google = mockGoogleApi();
+    const cookie = (auth.headers as Record<string, string>).cookie;
+    await connectGoogleCalendar(cookie);
+    google.state.calls = [];
+
+    const sync = await post<{ created: number; updated: number; failed: number }>(
+      "/api/integrations/google-calendar/sync", {}, auth
+    );
+    expect(sync.response.status).toBe(200);
+    // Only Org A's own job may be synced — Org B's job (and its customer's
+    // name/address, per buildEventInput) must never reach Org A's calendar.
+    expect(sync.body.created).toBe(1);
+    expect(google.state.events.size).toBe(1);
+    const [event] = [...google.state.events.values()];
+    expect(JSON.stringify(event)).not.toContain("Org B Customer");
   });
 
   it("retries a failed job sync and clears the failure once it succeeds", async () => {

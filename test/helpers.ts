@@ -1,5 +1,6 @@
 import { env, exports as workerExports } from "cloudflare:workers";
 import { expect } from "vitest";
+import { hashPassword } from "../src/server/auth.js";
 
 export interface JsonResponse<T> {
   response: Response;
@@ -177,6 +178,13 @@ export async function resetDatabase() {
     "DELETE FROM bc_rebate_customer_profiles",
     "DELETE FROM customers",
     "DELETE FROM users",
+    // organizations (Phase 11.5) — deleted AFTER users (FK: users.organization_id
+    // has no ON DELETE action, so a still-referencing user row would violate
+    // the constraint). id=1 (DEFAULT_ORGANIZATION_ID) is never deleted — every
+    // other test file's fixtures assume it always exists; any additional
+    // organization a test created via createSecondOrganization() is cleaned
+    // up here like everything else.
+    "DELETE FROM organizations WHERE id != 1",
     "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter')",
     "DELETE FROM sqlite_sequence",
   ]);
@@ -185,6 +193,51 @@ export async function resetDatabase() {
 
 export const ADMIN_EMAIL = "admin@fieldscheduler.local";
 export const ADMIN_PASSWORD = "ChangeMe123!";
+
+// ── Phase 11.5 — tenant/organization test fixtures ──────────────────────
+//
+// The seeded admin (above) always belongs to DEFAULT_ORGANIZATION_ID (the
+// organization migration 0015 creates and every pre-existing row backfills
+// to). For isolation tests, a genuinely second organization needs its own
+// admin seeded directly via raw SQL — there is no API path to create a user
+// in an organization other than your own, by design (that's the whole
+// point of the boundary), so this mirrors how the default org's own admin
+// is seeded by migration rather than created through the API.
+
+export const DEFAULT_ORGANIZATION_ID = 1;
+
+export async function createOrganization(name: string): Promise<number> {
+  const result = await env.DB.prepare("INSERT INTO organizations (name, status) VALUES (?, 'active')").bind(name).run();
+  return result.meta.last_row_id as number;
+}
+
+export interface SecondOrgFixture {
+  organizationId: number;
+  email: string;
+  password: string;
+}
+
+let secondOrgCounter = 0;
+
+/** Seeds a brand-new organization plus its own admin user (real PBKDF2 hash,
+ *  a genuinely loginable credential, not a fixture-only stub). Call
+ *  `loginAs(fixture.email, fixture.password)` to get real session auth for
+ *  it, then use the ordinary post/put/del helpers exactly as with the
+ *  default-org admin — every fixture created that way is correctly scoped
+ *  to this new organization by the application's own create-path logic
+ *  (never by this helper reaching into the database for anything beyond
+ *  the org + its one seed admin). */
+export async function createSecondOrganization(name = "Second Org"): Promise<SecondOrgFixture> {
+  secondOrgCounter++;
+  const organizationId = await createOrganization(name);
+  const email = `org${organizationId}-admin-${secondOrgCounter}@example.test`;
+  const password = "SecondOrgPass1";
+  const passwordHash = await hashPassword(password);
+  await env.DB.prepare(
+    "INSERT INTO users (name, email, password_hash, role, active, organization_id) VALUES (?, ?, ?, 'admin', 1, ?)"
+  ).bind("Second Org Admin", email, passwordHash, organizationId).run();
+  return { organizationId, email, password };
+}
 
 export async function createUser(overrides: Record<string, unknown> = {}) {
   const result = await post<{ user: { id: number; email: string } }>("/api/users", {

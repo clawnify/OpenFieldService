@@ -86,7 +86,7 @@ describe("valid transitions — each of the 9 approved edges", () => {
     const actorId = await getAdminId();
     const leadId = await insertLead({ identifier: `LEAD-${fromStatus}-${toStatus}`, status: fromStatus });
 
-    const outcome = await transitionLead(env.DB, leadId, { toStatus, actorUserId: actorId, ...extra });
+    const outcome = await transitionLead(env.DB, leadId, { organizationId: 1, toStatus, actorUserId: actorId, ...extra });
     expect(outcome.fromStatus).toBe(fromStatus);
     expect(outcome.toStatus).toBe(toStatus);
 
@@ -116,7 +116,7 @@ describe("invalid transitions are rejected and mutate nothing", () => {
     const actorId = await getAdminId();
     const leadId = await insertLead({ identifier: `LEAD-BAD-${fromStatus}-${toStatus}`, status: fromStatus });
 
-    await expect(transitionLead(env.DB, leadId, { toStatus, actorUserId: actorId, lostReason: "Not Ready" }))
+    await expect(transitionLead(env.DB, leadId, { organizationId: 1, toStatus, actorUserId: actorId, lostReason: "Not Ready" }))
       .rejects.toMatchObject({ code: "invalid_transition" });
 
     const row = await leadRow(leadId);
@@ -128,7 +128,7 @@ describe("invalid transitions are rejected and mutate nothing", () => {
     const actorId = await getAdminId();
     const leadId = await insertLead({ identifier: "LEAD-TYPE-CHECK", status: "won" });
     try {
-      await transitionLead(env.DB, leadId, { toStatus: "lost", actorUserId: actorId, lostReason: "Not Ready" });
+      await transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "lost", actorUserId: actorId, lostReason: "Not Ready" });
       expect.unreachable("expected transitionLead to throw");
     } catch (err) {
       expect(err).toBeInstanceOf(LeadWorkflowError);
@@ -138,7 +138,7 @@ describe("invalid transitions are rejected and mutate nothing", () => {
 
   it("rejects a transition on a nonexistent lead with not_found", async () => {
     const actorId = await getAdminId();
-    await expect(transitionLead(env.DB, 999999, { toStatus: "contacted", actorUserId: actorId }))
+    await expect(transitionLead(env.DB, 999999, { organizationId: 1, toStatus: "contacted", actorUserId: actorId }))
       .rejects.toMatchObject({ code: "not_found" });
   });
 });
@@ -147,7 +147,7 @@ describe("lost-reason business rules", () => {
   it("rejects a missing lost reason", async () => {
     const actorId = await getAdminId();
     const leadId = await insertLead({ identifier: "LEAD-LOST-MISSING", status: "new" });
-    await expect(transitionLead(env.DB, leadId, { toStatus: "lost", actorUserId: actorId }))
+    await expect(transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "lost", actorUserId: actorId }))
       .rejects.toMatchObject({ code: "missing_data" });
     expect((await leadRow(leadId)).status).toBe("new");
     expect(await history(leadId)).toHaveLength(0);
@@ -156,7 +156,7 @@ describe("lost-reason business rules", () => {
   it("rejects a lost reason that isn't in the LEAD_LOST_REASON_OPTIONS catalog", async () => {
     const actorId = await getAdminId();
     const leadId = await insertLead({ identifier: "LEAD-LOST-INVALID", status: "new" });
-    await expect(transitionLead(env.DB, leadId, { toStatus: "lost", actorUserId: actorId, lostReason: "Made Up Reason" }))
+    await expect(transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "lost", actorUserId: actorId, lostReason: "Made Up Reason" }))
       .rejects.toMatchObject({ code: "missing_data" });
     expect((await leadRow(leadId)).status).toBe("new");
     expect(await history(leadId)).toHaveLength(0);
@@ -167,7 +167,7 @@ describe("lost-reason business rules", () => {
     const options = ["Price Too High", "Chose Competitor", "Not Ready", "Unreachable", "Outside Service Area", "Not Eligible", "Duplicate Lead", "No Longer Needed", "Other"];
     for (const [i, reason] of options.entries()) {
       const leadId = await insertLead({ identifier: `LEAD-LOST-CATALOG-${i}`, status: "new" });
-      await transitionLead(env.DB, leadId, { toStatus: "lost", actorUserId: actorId, lostReason: reason });
+      await transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "lost", actorUserId: actorId, lostReason: reason });
       expect((await leadRow(leadId)).lost_reason).toBe(reason);
     }
   });
@@ -175,7 +175,7 @@ describe("lost-reason business rules", () => {
   it("stores an optional lost_reason_note without requiring it", async () => {
     const actorId = await getAdminId();
     const leadId = await insertLead({ identifier: "LEAD-LOST-NOTE", status: "new" });
-    await transitionLead(env.DB, leadId, { toStatus: "lost", actorUserId: actorId, lostReason: "Other", lostReasonNote: "Went with a competing quote" });
+    await transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "lost", actorUserId: actorId, lostReason: "Other", lostReasonNote: "Went with a competing quote" });
     const row = await leadRow(leadId);
     expect(row.lost_reason).toBe("Other");
     expect(row.lost_reason_note).toBe("Went with a competing quote");
@@ -184,15 +184,15 @@ describe("lost-reason business rules", () => {
   it("does not require lost_reason_note even for 'Other'", async () => {
     const actorId = await getAdminId();
     const leadId = await insertLead({ identifier: "LEAD-LOST-NO-NOTE", status: "new" });
-    await transitionLead(env.DB, leadId, { toStatus: "lost", actorUserId: actorId, lostReason: "Other" });
+    await transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "lost", actorUserId: actorId, lostReason: "Other" });
     expect((await leadRow(leadId)).status).toBe("lost");
   });
 
   it("reopen (lost -> contacted) preserves the historical lost reason in lead_status_history and does not clear it on the active row", async () => {
     const actorId = await getAdminId();
     const leadId = await insertLead({ identifier: "LEAD-REOPEN", status: "new" });
-    await transitionLead(env.DB, leadId, { toStatus: "lost", actorUserId: actorId, lostReason: "Price Too High", lostReasonNote: "Budget concerns" });
-    await transitionLead(env.DB, leadId, { toStatus: "contacted", actorUserId: actorId, reason: "Customer called back" });
+    await transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "lost", actorUserId: actorId, lostReason: "Price Too High", lostReasonNote: "Budget concerns" });
+    await transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "contacted", actorUserId: actorId, reason: "Customer called back" });
 
     const row = await leadRow(leadId);
     expect(row.status).toBe("contacted");
@@ -209,7 +209,7 @@ describe("history / audit", () => {
   it("creates exactly one history row per successful transition with the correct actor", async () => {
     const actorId = await getAdminId();
     const leadId = await insertLead({ identifier: "LEAD-HIST-1", status: "new" });
-    await transitionLead(env.DB, leadId, { toStatus: "contacted", actorUserId: actorId });
+    await transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "contacted", actorUserId: actorId });
     const rows = await history(leadId);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ old_status: "new", new_status: "contacted", actor_user_id: actorId });
@@ -218,7 +218,7 @@ describe("history / audit", () => {
   it("uses the server-supplied actorUserId, not any client-suppliable value implicit in the input", async () => {
     const staff = await createUser({ email: "lead-workflow-actor@example.test" });
     const leadId = await insertLead({ identifier: "LEAD-HIST-ACTOR", status: "new" });
-    await transitionLead(env.DB, leadId, { toStatus: "contacted", actorUserId: staff.id });
+    await transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "contacted", actorUserId: staff.id });
     const rows = await history(leadId);
     expect(rows[0].actor_user_id).toBe(staff.id);
   });
@@ -226,7 +226,7 @@ describe("history / audit", () => {
   it("writes zero history rows when a transition is rejected", async () => {
     const actorId = await getAdminId();
     const leadId = await insertLead({ identifier: "LEAD-HIST-NONE", status: "new" });
-    await expect(transitionLead(env.DB, leadId, { toStatus: "won", actorUserId: actorId })).rejects.toThrow();
+    await expect(transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "won", actorUserId: actorId })).rejects.toThrow();
     expect(await history(leadId)).toHaveLength(0);
   });
 });
@@ -254,10 +254,10 @@ describe("atomicity", () => {
     const actorId = await getAdminId();
     const leadId = await insertLead({ identifier: "LEAD-STALE", status: "new" });
     // Move the lead out from under a caller who already validated against "new".
-    await transitionLead(env.DB, leadId, { toStatus: "contacted", actorUserId: actorId });
+    await transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "contacted", actorUserId: actorId });
 
     await expect(
-      transitionLead(env.DB, leadId, { toStatus: "qualified", actorUserId: actorId })
+      transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "qualified", actorUserId: actorId })
     ).resolves.toBeTruthy(); // this one is now valid from "contacted"
 
     // Simulate a second caller that read "new" before the above happened
@@ -277,8 +277,8 @@ describe("concurrency — competing transitions from the same stale state", () =
     const leadId = await insertLead({ identifier: "LEAD-RACE", status: "contacted" });
 
     const [r1, r2] = await Promise.allSettled([
-      transitionLead(env.DB, leadId, { toStatus: "qualified", actorUserId: actorId }),
-      transitionLead(env.DB, leadId, { toStatus: "lost", actorUserId: actorId, lostReason: "Not Ready" }),
+      transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "qualified", actorUserId: actorId }),
+      transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "lost", actorUserId: actorId, lostReason: "Not Ready" }),
     ]);
 
     const outcomes = [r1, r2];
@@ -308,7 +308,7 @@ describe("terminal behavior — Won", () => {
     const actorId = await getAdminId();
     for (const toStatus of ["new", "contacted", "qualified", "estimate", "lost"]) {
       const leadId = await insertLead({ identifier: `LEAD-WON-${toStatus}`, status: "won" });
-      await expect(transitionLead(env.DB, leadId, { toStatus, actorUserId: actorId, lostReason: "Not Ready" }))
+      await expect(transitionLead(env.DB, leadId, { organizationId: 1, toStatus, actorUserId: actorId, lostReason: "Not Ready" }))
         .rejects.toMatchObject({ code: "invalid_transition" });
     }
   });
@@ -318,7 +318,7 @@ describe("conversion boundary — Phase 8.1 must never populate conversion field
   it("a normal estimate -> won transition leaves converted_customer_id/converted_at/converted_by untouched", async () => {
     const actorId = await getAdminId();
     const leadId = await insertLead({ identifier: "LEAD-WON-BOUNDARY", status: "estimate" });
-    await transitionLead(env.DB, leadId, { toStatus: "won", actorUserId: actorId });
+    await transitionLead(env.DB, leadId, { organizationId: 1, toStatus: "won", actorUserId: actorId });
 
     const row = await leadRow(leadId);
     expect(row.status).toBe("won");

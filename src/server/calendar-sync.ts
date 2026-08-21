@@ -29,6 +29,7 @@ interface SyncJobRow {
   duration: number;
   address: string;
   notes: string;
+  organization_id: number;
   customer_name: string | null;
   technician_name: string | null;
   service_type_name: string | null;
@@ -204,6 +205,7 @@ async function syncJobForUserClaimed(
 
   const job = await get<SyncJobRow>(
     `SELECT j.id, j.identifier, j.status, j.scheduled_date, j.scheduled_time, j.duration, j.address, j.notes,
+            j.organization_id,
             c.name as customer_name, t.name as technician_name, st.name as service_type_name
      FROM jobs j
      LEFT JOIN customers c ON j.customer_id = c.id
@@ -238,7 +240,7 @@ async function syncJobForUserClaimed(
       return "deleted";
     }
 
-    const timeZone = await getBusinessTimezone();
+    const timeZone = await getBusinessTimezone(job.organization_id);
     const eventInput = buildEventInput(job, timeZone);
 
     if (mapping?.external_event_id && mapping.sync_status !== "deleted") {
@@ -340,7 +342,15 @@ export interface SyncNowResult {
   failed: number;
 }
 
-/** Manual "Sync Now": reconciles every job against this user's calendar. */
+/** Manual "Sync Now": reconciles every job against this user's calendar.
+ *
+ *  Phase 11.5: scoped to the calling user's own organization. `syncJobForUser`
+ *  -> `syncJobForUserClaimed`'s job lookup has no organization filter of its
+ *  own (it's an internal engine function, not a route — see the identical
+ *  note on the `/retry` route in index.ts), so this bulk fan-out is the
+ *  caller that MUST filter before ever calling it. Without this, every job
+ *  from every organization would be pushed into this user's personal Google
+ *  Calendar. */
 export async function syncAllJobsForUser(env: CalendarSyncEnv, userId: number): Promise<SyncNowResult> {
   const result: SyncNowResult = { created: 0, updated: 0, deleted: 0, failed: 0 };
   const integration = await get<{ sync_enabled: number }>(
@@ -348,7 +358,12 @@ export async function syncAllJobsForUser(env: CalendarSyncEnv, userId: number): 
   );
   if (!integration || !integration.sync_enabled) return result;
 
-  const jobs = await query<{ id: number }>("SELECT id FROM jobs ORDER BY scheduled_date ASC");
+  const actor = await get<{ organization_id: number }>("SELECT organization_id FROM users WHERE id = ?", [userId]);
+  if (!actor) return result;
+
+  const jobs = await query<{ id: number }>(
+    "SELECT id FROM jobs WHERE organization_id = ? ORDER BY scheduled_date ASC", [actor.organization_id]
+  );
   for (const { id } of jobs) {
     const outcome = await syncJobForUser(env, userId, id);
     switch (outcome) {

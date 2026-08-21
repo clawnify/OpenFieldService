@@ -67,8 +67,8 @@ export function isValidIanaTimezone(value: string): boolean {
  *  for the resolution order and why each fallback step exists. Always
  *  returns a validated IANA zone id — never propagates an invalid stored
  *  value to a caller. */
-export async function getBusinessTimezone(): Promise<string> {
-  const configured = await getSettingValue<string>(BUSINESS_TIMEZONE_SETTING_KEY);
+export async function getBusinessTimezone(organizationId: number): Promise<string> {
+  const configured = await getSettingValue<string>(organizationId, BUSINESS_TIMEZONE_SETTING_KEY);
   if (configured && isValidIanaTimezone(configured)) return configured;
 
   const legacy = await get<{ value: string }>("SELECT value FROM _meta WHERE key = 'timezone'");

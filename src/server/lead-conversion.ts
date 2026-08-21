@@ -78,6 +78,7 @@ interface LeadConversionRow {
   referral_name: string;
   referred_by_customer_id: number | null;
   converted_customer_id: number | null;
+  organization_id: number;
 }
 
 function normalizeEmail(email: string): string {
@@ -88,11 +89,16 @@ function normalizePhone(phone: string): string {
   return phone.replace(/\D/g, "");
 }
 
-async function findMatchingCustomerIds(lead: { phone: string; email: string }): Promise<number[]> {
+async function findMatchingCustomerIds(organizationId: number, lead: { phone: string; email: string }): Promise<number[]> {
   const email = normalizeEmail(lead.email || "");
   const phone = normalizePhone(lead.phone || "");
   if (!email && !phone) return [];
-  const rows = await query<{ id: number; email: string; phone: string }>("SELECT id, email, phone FROM customers");
+  // Phase 11.5: scoped to the Lead's own organization — a Lead must never
+  // match/reuse a Customer belonging to a different organization, even on
+  // an exact phone/email coincidence.
+  const rows = await query<{ id: number; email: string; phone: string }>(
+    "SELECT id, email, phone FROM customers WHERE organization_id = ?", [organizationId]
+  );
   const matched = new Set<number>();
   for (const c of rows) {
     if (email && normalizeEmail(c.email) === email) matched.add(c.id);
@@ -104,6 +110,10 @@ async function findMatchingCustomerIds(lead: { phone: string; email: string }): 
 export interface ConvertLeadInput {
   /** Real, server-resolved actor id — never a value trusted from a request body. */
   actorUserId: number;
+  /** Real, server-resolved organization id — never a value trusted from a
+   *  request body. A lead belonging to a different organization is treated
+   *  as not found, same as every other cross-tenant lookup in this codebase. */
+  organizationId: number;
 }
 
 export interface ConvertLeadOutcome {
@@ -159,9 +169,9 @@ export interface ConvertLeadOutcome {
 export async function convertLead(db: D1Database, leadId: number, input: ConvertLeadInput): Promise<ConvertLeadOutcome> {
   const lead = await get<LeadConversionRow>(
     `SELECT id, status, name, phone, email, address, city, state, zip, notes,
-            referral_source, referral_name, referred_by_customer_id, converted_customer_id
-     FROM leads WHERE id = ?`,
-    [leadId]
+            referral_source, referral_name, referred_by_customer_id, converted_customer_id, organization_id
+     FROM leads WHERE id = ? AND organization_id = ?`,
+    [leadId, input.organizationId]
   );
   if (!lead) throw new LeadConversionError("not_found", "Lead not found");
 
@@ -178,7 +188,9 @@ export async function convertLead(db: D1Database, leadId: number, input: Convert
 
   if (lead.status === "estimate") {
     try {
-      await transitionLead(db, leadId, { toStatus: "won", actorUserId: input.actorUserId, reason: "Converted to customer" });
+      await transitionLead(db, leadId, {
+        toStatus: "won", actorUserId: input.actorUserId, organizationId: input.organizationId, reason: "Converted to customer",
+      });
     } catch (err) {
       if (err instanceof LeadWorkflowError) {
         if (err.code === "conflict") {
@@ -195,7 +207,7 @@ export async function convertLead(db: D1Database, leadId: number, input: Convert
     }
   }
 
-  const matches = await findMatchingCustomerIds({ phone: lead.phone, email: lead.email });
+  const matches = await findMatchingCustomerIds(lead.organization_id, { phone: lead.phone, email: lead.email });
   if (matches.length > 1) {
     throw new LeadConversionError(
       "ambiguous_match",
@@ -218,17 +230,18 @@ export async function convertLead(db: D1Database, leadId: number, input: Convert
   // Propagates CustomerValidationError unchanged on failure — the route
   // layer already knows how to map that to a 400, same as createCustomer.
   const referral = await resolveReferralAttribution(
+    lead.organization_id,
     { referral_source: lead.referral_source, referral_name: lead.referral_name, referred_by_customer_id: lead.referred_by_customer_id },
     null, null
   );
 
   const results = await db.batch([
     db.prepare(
-      `INSERT INTO customers (name, email, phone, address, city, state, zip, notes,
+      `INSERT INTO customers (organization_id, name, email, phone, address, city, state, zip, notes,
          referral_source, referral_name, referred_by_customer_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
-      lead.name, lead.email, lead.phone, lead.address, lead.city, lead.state, lead.zip, lead.notes,
+      lead.organization_id, lead.name, lead.email, lead.phone, lead.address, lead.city, lead.state, lead.zip, lead.notes,
       referral.referral_source, referral.referral_name, referral.referred_by_customer_id
     ),
     db.prepare(

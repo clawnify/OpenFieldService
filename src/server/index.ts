@@ -151,7 +151,7 @@ type GoogleBindings = {
 // lives in wrangler.toml's [vars], not .dev.vars.
 type MapsBrowserBindings = { GOOGLE_MAPS_BROWSER_API_KEY?: string };
 
-type Env = { Bindings: { DB: D1Database } & GoogleBindings & StorageEnv & NotificationProviderBindings & GoogleGeocodingBindings & MapsBrowserBindings & RoutingBindings; Variables: { user: PublicUser } };
+type Env = { Bindings: { DB: D1Database } & GoogleBindings & StorageEnv & NotificationProviderBindings & GoogleGeocodingBindings & MapsBrowserBindings & RoutingBindings; Variables: { user: PublicUser; organizationId: number } };
 
 function googleEnv(c: Context<Env>): GoogleOAuthEnv & CalendarSyncEnv {
   const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, TOKEN_ENCRYPTION_KEY } = c.env;
@@ -187,14 +187,25 @@ app.use("/api/*", async (c, next) => {
     await next();
     return;
   }
-  const user = await getSessionUser(c);
-  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const sessionUser = await getSessionUser(c);
+  if (!sessionUser) return c.json({ error: "Unauthorized" }, 401);
+  const { organizationId, ...user } = sessionUser;
   c.set("user", user);
+  c.set("organizationId", organizationId);
   await next();
 });
 
 function currentUser(c: Context<Env>): PublicUser {
   return c.get("user");
+}
+
+// Phase 11.5 — the ONE authoritative place tenant context is resolved for
+// route handlers, mirroring currentUser()'s shape/placement exactly. Always
+// server-derived from the authenticated session (see the middleware above)
+// — a client-supplied organization_id is never read or trusted anywhere in
+// this file for authorization purposes.
+function actorOrganizationId(c: Context<Env>): number {
+  return c.get("organizationId");
 }
 
 // ── Shared Schemas ─────────────────────────────────────────────────
@@ -535,18 +546,22 @@ app.openapi(getStats, async (c) => {
     return c.json(await scopedTechnicianStats(techId), 200);
   }
 
-  const jobs = await get<{ count: number }>("SELECT COUNT(*) as count FROM jobs");
-  const customers = await get<{ count: number }>("SELECT COUNT(*) as count FROM customers");
-  const technicians = await get<{ count: number }>("SELECT COUNT(*) as count FROM technicians WHERE active = 1");
-  const serviceTypes = await get<{ count: number }>("SELECT COUNT(*) as count FROM service_types");
+  // Phase 11.5: every company-wide aggregate below is scoped to the actor's
+  // own organization — otherwise an admin/dispatcher of one organization
+  // would see counts/revenue blended in from every other organization.
+  const organizationId = actorOrganizationId(c);
+  const jobs = await get<{ count: number }>("SELECT COUNT(*) as count FROM jobs WHERE organization_id = ?", [organizationId]);
+  const customers = await get<{ count: number }>("SELECT COUNT(*) as count FROM customers WHERE organization_id = ?", [organizationId]);
+  const technicians = await get<{ count: number }>("SELECT COUNT(*) as count FROM technicians WHERE organization_id = ? AND active = 1", [organizationId]);
+  const serviceTypes = await get<{ count: number }>("SELECT COUNT(*) as count FROM service_types WHERE organization_id = ?", [organizationId]);
   const today = new Date().toISOString().split("T")[0];
-  const todayJobs = await get<{ count: number }>("SELECT COUNT(*) as count FROM jobs WHERE scheduled_date = ?", [today]);
+  const todayJobs = await get<{ count: number }>("SELECT COUNT(*) as count FROM jobs WHERE organization_id = ? AND scheduled_date = ?", [organizationId, today]);
   const upcomingJobs = await get<{ count: number }>(
-    `SELECT COUNT(*) as count FROM jobs WHERE status IN (${PRE_WORK_STATUSES.map(() => "?").join(",")}) AND scheduled_date >= ?`,
-    [...PRE_WORK_STATUSES, today]
+    `SELECT COUNT(*) as count FROM jobs WHERE organization_id = ? AND status IN (${PRE_WORK_STATUSES.map(() => "?").join(",")}) AND scheduled_date >= ?`,
+    [organizationId, ...PRE_WORK_STATUSES, today]
   );
-  const completedJobs = await get<{ count: number }>("SELECT COUNT(*) as count FROM jobs WHERE status = 'completed'");
-  const revenue = await get<{ total: number }>("SELECT COALESCE(SUM(price), 0) as total FROM jobs WHERE status = 'completed'");
+  const completedJobs = await get<{ count: number }>("SELECT COUNT(*) as count FROM jobs WHERE organization_id = ? AND status = 'completed'", [organizationId]);
+  const revenue = await get<{ total: number }>("SELECT COALESCE(SUM(price), 0) as total FROM jobs WHERE organization_id = ? AND status = 'completed'", [organizationId]);
   return c.json({
     jobs: jobs?.count || 0,
     customers: customers?.count || 0,
@@ -561,10 +576,10 @@ app.openapi(getStats, async (c) => {
     // "overdue" (see migrations/0007), so this can never silently go stale
     // the way a stored status would.
     invoices_outstanding: (await get<{ count: number }>(
-      "SELECT COUNT(*) as count FROM invoices WHERE status IN ('issued', 'partially_paid')"
+      "SELECT COUNT(*) as count FROM invoices WHERE organization_id = ? AND status IN ('issued', 'partially_paid')", [organizationId]
     ))?.count || 0,
     invoices_overdue: (await get<{ count: number }>(
-      "SELECT COUNT(*) as count FROM invoices WHERE status IN ('issued', 'partially_paid') AND due_date != '' AND due_date < ?", [today]
+      "SELECT COUNT(*) as count FROM invoices WHERE organization_id = ? AND status IN ('issued', 'partially_paid') AND due_date != '' AND due_date < ?", [organizationId, today]
     ))?.count || 0,
   }, 200);
 });
@@ -598,8 +613,8 @@ app.openapi(listJobs, async (c) => {
   const limit = parseInt(q.limit || "50", 10);
   const offset = (page - 1) * limit;
 
-  let where = "WHERE 1=1";
-  const params: unknown[] = [];
+  let where = "WHERE j.organization_id = ?";
+  const params: unknown[] = [actorOrganizationId(c)];
 
   if (q.search) {
     // Matches the search-box placeholder's promise ("...customer, job number,
@@ -684,7 +699,7 @@ const listEligibilityCodesRoute = createRoute({
 });
 
 app.openapi(listEligibilityCodesRoute, async (c) => {
-  const { rows, warningDaysConfigured } = await listEligibilityCodes();
+  const { rows, warningDaysConfigured } = await listEligibilityCodes(actorOrganizationId(c));
   // P1 fix (mem:risks/technician-job-read-scoping): this tracker previously
   // exposed every CleanBC job's customer name, technician name, and code
   // company-wide to any authenticated role, including technicians —
@@ -728,8 +743,8 @@ app.openapi(getJob, async (c) => {
      LEFT JOIN customers c ON j.customer_id = c.id
      LEFT JOIN technicians t ON j.technician_id = t.id
      LEFT JOIN service_types st ON j.service_type_id = st.id
-     WHERE j.id = ?`,
-    [id]
+     WHERE j.id = ? AND j.organization_id = ?`,
+    [id, actorOrganizationId(c)]
   );
   if (!job) return c.json({ error: "Job not found" }, 404);
   // P1 fix (mem:risks/technician-job-read-scoping): reuses the exact same
@@ -779,6 +794,7 @@ const createJob = createRoute({
     201: { description: "Created", content: { "application/json": { schema: JobSchema } } },
     400: { description: "Invalid scheduling data", content: { "application/json": { schema: ErrorSchema } } },
     403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Customer not found", content: { "application/json": { schema: ErrorSchema } } },
     409: { description: "Scheduling conflict", content: { "application/json": { schema: ScheduleConflictSchema } } },
   },
 });
@@ -803,6 +819,7 @@ app.openapi(createJob, async (c) => {
   }
 
   const data = c.req.valid("json");
+  const organizationId = actorOrganizationId(c);
 
   try {
     validateScheduleFields(data);
@@ -812,12 +829,20 @@ app.openapi(createJob, async (c) => {
   }
   if (data.technician_id !== undefined && data.technician_id !== null) {
     try {
-      await assertTechnicianAssignable(data.technician_id);
+      await assertTechnicianAssignable(organizationId, data.technician_id);
     } catch (err) {
       if (err instanceof ScheduleValidationError) return c.json({ error: err.message }, 400);
       throw err;
     }
   }
+
+  // Phase 11.5: the customer this job is for must belong to the actor's own
+  // organization — otherwise a caller could attach a job to another
+  // organization's customer entirely.
+  const ownedCustomer = await get<{ address: string; city: string; state: string; zip: string }>(
+    "SELECT address, city, state, zip FROM customers WHERE id = ? AND organization_id = ?", [data.customer_id, organizationId]
+  );
+  if (!ownedCustomer) return c.json({ error: "Customer not found" }, 404);
 
   const identifier = await nextIdentifier();
   // Status is never client-supplied at creation — it's always the entry status
@@ -826,23 +851,20 @@ app.openapi(createJob, async (c) => {
   const jobType: JobType = data.job_type ?? "STANDARD";
   const initialStatus = entryStatus(jobType);
 
-  // If address is empty, use customer address
+  // If address is empty, use customer address (already org-verified above)
   let address = data.address || "";
   if (!address) {
-    const cust = await get<{ address: string; city: string; state: string; zip: string }>(
-      "SELECT address, city, state, zip FROM customers WHERE id = ?", [data.customer_id]
-    );
-    if (cust) {
-      address = [cust.address, cust.city, cust.state, cust.zip].filter(Boolean).join(", ");
-    }
+    address = [ownedCustomer.address, ownedCustomer.city, ownedCustomer.state, ownedCustomer.zip].filter(Boolean).join(", ");
   }
 
-  // Default price/duration from service type
+  // Default price/duration from service type — also org-verified, so a
+  // client can't probe another organization's service-type pricing via
+  // this route either.
   let duration = data.duration || 60;
   let price = data.price || 0;
   if (data.service_type_id && (!data.duration || !data.price)) {
     const st = await get<{ default_duration: number; default_price: number }>(
-      "SELECT default_duration, default_price FROM service_types WHERE id = ?", [data.service_type_id]
+      "SELECT default_duration, default_price FROM service_types WHERE id = ? AND organization_id = ?", [data.service_type_id, organizationId]
     );
     if (st) {
       if (!data.duration) duration = st.default_duration;
@@ -865,11 +887,12 @@ app.openapi(createJob, async (c) => {
   }
 
   await run(
-    `INSERT INTO jobs (identifier, customer_id, technician_id, service_type_id, status, job_type, priority,
+    `INSERT INTO jobs (identifier, organization_id, customer_id, technician_id, service_type_id, status, job_type, priority,
        scheduled_date, scheduled_time, duration, price, address, notes, is_recurring, recurrence_interval)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       identifier,
+      organizationId,
       data.customer_id,
       data.technician_id ?? null,
       data.service_type_id ?? null,
@@ -992,8 +1015,18 @@ app.openapi(updateJob, async (c) => {
 
   const { id } = c.req.valid("param");
   const data = c.req.valid("json");
-  const existing = await get<Job>("SELECT * FROM jobs WHERE id = ?", [id]);
+  const organizationId = actorOrganizationId(c);
+  const existing = await get<Job>("SELECT * FROM jobs WHERE id = ? AND organization_id = ?", [id, organizationId]);
   if (!existing) return c.json({ error: "Job not found" }, 404);
+  // Phase 11.5: a client-supplied customer_id reassignment must stay within
+  // the job's own organization — otherwise a job could be attached to
+  // another organization's customer entirely.
+  if (data.customer_id !== undefined) {
+    const ownedCustomer = await get<{ id: number }>(
+      "SELECT id FROM customers WHERE id = ? AND organization_id = ?", [data.customer_id, organizationId]
+    );
+    if (!ownedCustomer) return c.json({ error: "Customer not found" }, 404);
+  }
 
   // Phase 7 — Advanced Scheduler: only computed/validated when this request
   // actually touches a scheduling field — an ordinary field-only edit (notes,
@@ -1035,7 +1068,7 @@ app.openapi(updateJob, async (c) => {
     // reassignment, no forced failure — see scheduling.ts).
     if (data.technician_id !== undefined && data.technician_id !== null) {
       try {
-        await assertTechnicianAssignable(data.technician_id);
+        await assertTechnicianAssignable(actorOrganizationId(c), data.technician_id);
       } catch (err) {
         if (err instanceof ScheduleValidationError) return c.json({ error: err.message }, 400);
         throw err;
@@ -1126,6 +1159,10 @@ app.openapi(deleteJob, async (c) => {
   if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
 
   const { id } = c.req.valid("param");
+  const owned = await get<{ id: number }>(
+    "SELECT id FROM jobs WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]
+  );
+  if (!owned) return c.json({ ok: true }, 200); // matches this route's pre-existing no-op-on-unknown-id behavior
   // Must run before the local delete: calendar_event_mappings cascades away with the
   // job row, taking the external_event_id with it, so Google cleanup has to happen first.
   await deleteJobFromAllCalendars(googleEnv(c), Number(id));
@@ -1138,10 +1175,10 @@ app.openapi(deleteJob, async (c) => {
 // authoritative transition rules. PUT /api/jobs/{id} above cannot touch status
 // at all (rejected by its .strict() schema).
 
-async function loadWorkflowJob(id: string | number) {
+async function loadWorkflowJob(organizationId: number, id: string | number) {
   return get<{ id: number; status: string; job_type: string; technician_id: number | null; eligibility_code: string; eligibility_code_expiry: string }>(
-    "SELECT id, status, job_type, technician_id, eligibility_code, eligibility_code_expiry FROM jobs WHERE id = ?",
-    [id]
+    "SELECT id, status, job_type, technician_id, eligibility_code, eligibility_code_expiry FROM jobs WHERE id = ? AND organization_id = ?",
+    [id, organizationId]
   );
 }
 
@@ -1157,7 +1194,7 @@ const getJobTransitions = createRoute({
 
 app.openapi(getJobTransitions, async (c) => {
   const { id } = c.req.valid("param");
-  const job = await loadWorkflowJob(id);
+  const job = await loadWorkflowJob(actorOrganizationId(c), id);
   if (!job) return c.json({ error: "Job not found" }, 404);
   const me = currentUser(c);
   const allowed = await allowedTransitionsForActor({ id: me.id, role: me.role }, job);
@@ -1182,7 +1219,7 @@ const getJobCanComplete = createRoute({
 
 app.openapi(getJobCanComplete, async (c) => {
   const { id } = c.req.valid("param");
-  const job = await loadWorkflowJob(id);
+  const job = await loadWorkflowJob(actorOrganizationId(c), id);
   if (!job) return c.json({ error: "Job not found" }, 404);
   return c.json(await canCompleteJob(job), 200);
 });
@@ -1214,13 +1251,16 @@ app.openapi(transitionJobRoute, async (c) => {
   const { id } = c.req.valid("param");
   const body = c.req.valid("json");
   const me = currentUser(c);
+  const organizationId = actorOrganizationId(c);
   const actor: Actor = { id: me.id, role: me.role };
   const attemptingCompletion = body.to_status === "completed";
   // job_compliance_audit.job_id is a real FK (this D1 database enforces
   // foreign keys — verified, not assumed) — never record an event against an
   // id that might not exist. A cheap existence check up front avoids that
   // without duplicating transitionJob()'s own (more thorough) lookup.
-  const jobExists = attemptingCompletion ? !!(await get<{ id: number }>("SELECT id FROM jobs WHERE id = ?", [id])) : false;
+  const jobExists = attemptingCompletion
+    ? !!(await get<{ id: number }>("SELECT id FROM jobs WHERE id = ? AND organization_id = ?", [id, organizationId]))
+    : false;
 
   // Compliance auditability (Phase 4): the completion gate itself lives in
   // workflow.ts's canCompleteJob(), called from inside transitionJob() below —
@@ -1232,6 +1272,7 @@ app.openapi(transitionJobRoute, async (c) => {
   try {
     await transitionJob(c.env.DB, Number(id), actor, {
       toStatus: body.to_status,
+      organizationId,
       reason: body.reason,
       eligibilityCode: body.eligibility_code,
       eligibilityCodeExpiry: body.eligibility_code_expiry,
@@ -1271,8 +1312,8 @@ app.openapi(transitionJobRoute, async (c) => {
      LEFT JOIN customers c ON j.customer_id = c.id
      LEFT JOIN technicians t ON j.technician_id = t.id
      LEFT JOIN service_types st ON j.service_type_id = st.id
-     WHERE j.id = ?`,
-    [id]
+     WHERE j.id = ? AND j.organization_id = ?`,
+    [id, organizationId]
   );
   // Phase 9.1 — cancellation / post-job survey notifications. Both use the
   // specific job_status_history row id for THIS transition (not job.id
@@ -1325,7 +1366,7 @@ app.openapi(getJobNotifications, async (c) => {
   const me = currentUser(c);
   if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
   const { id } = c.req.valid("param");
-  const job = await get<{ id: number }>("SELECT id FROM jobs WHERE id = ?", [id]);
+  const job = await get<{ id: number }>("SELECT id FROM jobs WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   if (!job) return c.json({ error: "Job not found" }, 404);
   const { limit, offset } = parseHistoryPagination(c.req.valid("query"));
   const page = await getJobNotificationHistory(Number(id), limit, offset);
@@ -1343,9 +1384,9 @@ app.openapi(getJobNotifications, async (c) => {
 // every other phase. Photo/signature bytes live in R2 (src/server/storage.ts);
 // D1 only ever stores object keys, never raw bytes or credentials.
 
-async function loadComplianceJob(id: string | number) {
+async function loadComplianceJob(organizationId: number, id: string | number) {
   return get<{ id: number; technician_id: number | null; status: string }>(
-    "SELECT id, technician_id, status FROM jobs WHERE id = ?", [id]
+    "SELECT id, technician_id, status FROM jobs WHERE id = ? AND organization_id = ?", [id, organizationId]
   );
 }
 
@@ -1379,7 +1420,7 @@ const onTheWayRoute = createRoute({
 
 app.openapi(onTheWayRoute, async (c) => {
   const { id } = c.req.valid("param");
-  const job = await loadComplianceJob(id);
+  const job = await loadComplianceJob(actorOrganizationId(c), id);
   if (!job) return c.json({ error: "Job not found" }, 404);
 
   const me = currentUser(c);
@@ -1394,7 +1435,7 @@ app.openapi(onTheWayRoute, async (c) => {
   // does not need to know or care about consent internals.
   await safeEnqueue(async () => {
     const full = await get<{ customer_id: number; identifier: string; technician_id: number | null }>(
-      "SELECT customer_id, identifier, technician_id FROM jobs WHERE id = ?", [id]
+      "SELECT customer_id, identifier, technician_id FROM jobs WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]
     );
     if (!full) return;
     const [contact, tech] = await Promise.all([
@@ -1458,7 +1499,7 @@ app.openapi(geocodeJobRoute, async (c) => {
 
   const { id } = c.req.valid("param");
   const job = await get<{ id: number; latitude: number | null; longitude: number | null; geocode_status: string }>(
-    "SELECT id, latitude, longitude, geocode_status FROM jobs WHERE id = ?", [id]
+    "SELECT id, latitude, longitude, geocode_status FROM jobs WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]
   );
   if (!job) return c.json({ error: "Job not found" }, 404);
 
@@ -1528,7 +1569,7 @@ const listJobMediaRoute = createRoute({
 
 app.openapi(listJobMediaRoute, async (c) => {
   const { id } = c.req.valid("param");
-  const job = await loadComplianceJob(id);
+  const job = await loadComplianceJob(actorOrganizationId(c), id);
   if (!job) return c.json({ error: "Job not found" }, 404);
   // P1 fix (mem:risks/technician-job-read-scoping): sibling of
   // getComplianceAuditRoute's fix — this read had the identical gap, only
@@ -1552,7 +1593,7 @@ app.openapi(listJobMediaRoute, async (c) => {
 app.post("/api/jobs/:id/photos", async (c) => {
   const me = currentUser(c);
   const idParam = c.req.param("id");
-  const job = await loadComplianceJob(idParam);
+  const job = await loadComplianceJob(actorOrganizationId(c), idParam);
   if (!job) return c.json({ error: "Job not found" }, 404);
   const actor: Actor = { id: me.id, role: me.role };
   if (!(await canActorAccessJobCompliance(actor, job))) {
@@ -1593,7 +1634,7 @@ app.post("/api/jobs/:id/photos", async (c) => {
 
 app.get("/api/jobs/:id/photos/:photoId/file", async (c) => {
   const idParam = c.req.param("id");
-  const job = await loadComplianceJob(idParam);
+  const job = await loadComplianceJob(actorOrganizationId(c), idParam);
   if (!job) return c.json({ error: "Job not found" }, 404);
   // P1 fix (mem:risks/technician-job-read-scoping): serves the actual photo
   // bytes — same sibling gap as the other compliance reads above, arguably
@@ -1623,7 +1664,7 @@ app.get("/api/jobs/:id/photos/:photoId/file", async (c) => {
 app.delete("/api/jobs/:id/photos/:photoId", async (c) => {
   const me = currentUser(c);
   const idParam = c.req.param("id");
-  const job = await loadComplianceJob(idParam);
+  const job = await loadComplianceJob(actorOrganizationId(c), idParam);
   if (!job) return c.json({ error: "Job not found" }, 404);
   const actor: Actor = { id: me.id, role: me.role };
   if (!(await canActorAccessJobCompliance(actor, job))) return c.json({ error: "Forbidden" }, 403);
@@ -1668,7 +1709,7 @@ const getCompletionReportRoute = createRoute({
 
 app.openapi(getCompletionReportRoute, async (c) => {
   const { id } = c.req.valid("param");
-  const job = await loadComplianceJob(id);
+  const job = await loadComplianceJob(actorOrganizationId(c), id);
   if (!job) return c.json({ error: "Job not found" }, 404);
   // P1 fix (mem:risks/technician-job-read-scoping): same sibling gap as
   // listJobMediaRoute above.
@@ -1702,7 +1743,7 @@ app.openapi(putCompletionReportRoute, async (c) => {
   const { id } = c.req.valid("param");
   const data = c.req.valid("json");
   const me = currentUser(c);
-  const job = await loadComplianceJob(id);
+  const job = await loadComplianceJob(actorOrganizationId(c), id);
   if (!job) return c.json({ error: "Job not found" }, 404);
   const actor: Actor = { id: me.id, role: me.role };
   if (!(await canActorAccessJobCompliance(actor, job))) return c.json({ error: "Forbidden" }, 403);
@@ -1729,7 +1770,7 @@ const submitCompletionReportRoute = createRoute({
 app.openapi(submitCompletionReportRoute, async (c) => {
   const { id } = c.req.valid("param");
   const me = currentUser(c);
-  const job = await loadComplianceJob(id);
+  const job = await loadComplianceJob(actorOrganizationId(c), id);
   if (!job) return c.json({ error: "Job not found" }, 404);
   const actor: Actor = { id: me.id, role: me.role };
   if (!(await canActorAccessJobCompliance(actor, job))) return c.json({ error: "Forbidden" }, 403);
@@ -1766,7 +1807,7 @@ const listSignaturesRoute = createRoute({
 
 app.openapi(listSignaturesRoute, async (c) => {
   const { id } = c.req.valid("param");
-  const job = await loadComplianceJob(id);
+  const job = await loadComplianceJob(actorOrganizationId(c), id);
   if (!job) return c.json({ error: "Job not found" }, 404);
   // P1 fix (mem:risks/technician-job-read-scoping): same sibling gap as
   // listJobMediaRoute above.
@@ -1806,7 +1847,7 @@ app.openapi(captureSignatureRoute, async (c) => {
   const { id } = c.req.valid("param");
   const data = c.req.valid("json");
   const me = currentUser(c);
-  const job = await loadComplianceJob(id);
+  const job = await loadComplianceJob(actorOrganizationId(c), id);
   if (!job) return c.json({ error: "Job not found" }, 404);
   const actor: Actor = { id: me.id, role: me.role };
   if (!(await canActorAccessJobCompliance(actor, job))) return c.json({ error: "Forbidden" }, 403);
@@ -1859,7 +1900,7 @@ const getComplianceAuditRoute = createRoute({
 
 app.openapi(getComplianceAuditRoute, async (c) => {
   const { id } = c.req.valid("param");
-  const job = await loadComplianceJob(id);
+  const job = await loadComplianceJob(actorOrganizationId(c), id);
   if (!job) return c.json({ error: "Job not found" }, 404);
   // P1 fix (mem:risks/technician-job-read-scoping): this read route was the
   // one gap in an otherwise fully ownership-scoped compliance sub-resource
@@ -1910,6 +1951,13 @@ app.openapi(getCustomerRebateEligibilityRoute, async (c) => {
   // income) for ANY customer, including ones they have no job with
   // whatsoever. Same job-ownership rule as listCustomers/getCustomer.
   const me = currentUser(c);
+  // Phase 11.5: existence is org-scoped first — a customer belonging to
+  // another organization is treated identically to a nonexistent one, same
+  // safe-404 convention as every other cross-tenant lookup in this file.
+  const customerOrgRow = await get<{ id: number }>(
+    "SELECT id FROM customers WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]
+  );
+  if (!customerOrgRow) return c.json({ error: "Customer not found" }, 404);
   if (me.role === "technician") {
     const techId = await actorTechnicianId({ id: me.id, role: me.role });
     const owns = techId !== null
@@ -1919,7 +1967,7 @@ app.openapi(getCustomerRebateEligibilityRoute, async (c) => {
   }
   const profile = await getCustomerRebateProfile(Number(id));
   if (!profile) return c.json({ error: "Customer not found" }, 404);
-  const result = await evaluateRebateEligibility(job_type, profile);
+  const result = await evaluateRebateEligibility(actorOrganizationId(c), job_type, profile);
   return c.json(result, 200);
 });
 
@@ -1940,7 +1988,7 @@ app.openapi(eligibilityCheckRoute, async (c) => {
   if (me.role === "technician") return c.json({ error: "Technicians cannot run eligibility checks" }, 403);
   const { id } = c.req.valid("param");
   const job = await get<{ id: number; customer_id: number; job_type: string }>(
-    "SELECT id, customer_id, job_type FROM jobs WHERE id = ?", [id]
+    "SELECT id, customer_id, job_type FROM jobs WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]
   );
   if (!job) return c.json({ error: "Job not found" }, 404);
   if (!isJobType(job.job_type) || job.job_type === "STANDARD") {
@@ -1948,7 +1996,7 @@ app.openapi(eligibilityCheckRoute, async (c) => {
   }
   const profile = await getCustomerRebateProfile(job.customer_id);
   if (!profile) return c.json({ error: "Customer not found" }, 404);
-  const result = await recordEligibilityCheck(Number(id), me.id, job.job_type, profile);
+  const result = await recordEligibilityCheck(actorOrganizationId(c), Number(id), me.id, job.job_type, profile);
   return c.json(result, 200);
 });
 
@@ -1974,7 +2022,7 @@ const getJobRebateAuditRoute = createRoute({
 
 app.openapi(getJobRebateAuditRoute, async (c) => {
   const { id } = c.req.valid("param");
-  const job = await loadComplianceJob(id);
+  const job = await loadComplianceJob(actorOrganizationId(c), id);
   if (!job) return c.json({ error: "Job not found" }, 404);
   // P1 fix (mem:risks/technician-job-read-scoping): this used to be
   // deliberately open to any authenticated role "same as job details" (see
@@ -2014,7 +2062,8 @@ app.openapi(updateJobEligibilityRoute, async (c) => {
   const { id } = c.req.valid("param");
   const data = c.req.valid("json");
   const job = await get<{ id: number; job_type: string; eligibility_code: string; eligibility_code_expiry: string }>(
-    "SELECT id, job_type, eligibility_code, eligibility_code_expiry FROM jobs WHERE id = ?", [id]
+    "SELECT id, job_type, eligibility_code, eligibility_code_expiry FROM jobs WHERE id = ? AND organization_id = ?",
+    [id, actorOrganizationId(c)]
   );
   if (!job) return c.json({ error: "Job not found" }, 404);
   if (job.job_type !== "CLEANBC") return c.json({ error: "Only CleanBC jobs have an eligibility code" }, 400);
@@ -2051,12 +2100,20 @@ const addJobNote = createRoute({
   },
   responses: {
     201: { description: "Note added", content: { "application/json": { schema: JobNoteSchema } } },
+    404: { description: "Job not found", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
 app.openapi(addJobNote, async (c) => {
   const { id } = c.req.valid("param");
   const { content } = c.req.valid("json");
+  // Phase 11.5: the job must belong to the actor's own organization —
+  // previously this route trusted a bare numeric job id with no ownership
+  // check at all.
+  const ownedJob = await get<{ id: number }>(
+    "SELECT id FROM jobs WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]
+  );
+  if (!ownedJob) return c.json({ error: "Job not found" }, 404);
   await run("INSERT INTO job_notes (job_id, content) VALUES (?, ?)", [id, content]);
   const note = await get<JobNote>(
     "SELECT * FROM job_notes WHERE job_id = ? ORDER BY id DESC LIMIT 1", [id]
@@ -2079,7 +2136,10 @@ app.openapi(deleteJobNote, async (c) => {
   if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
 
   const { id } = c.req.valid("param");
-  await run("DELETE FROM job_notes WHERE id = ?", [id]);
+  await run(
+    "DELETE FROM job_notes WHERE id = ? AND job_id IN (SELECT id FROM jobs WHERE organization_id = ?)",
+    [id, actorOrganizationId(c)]
+  );
   return c.json({ ok: true }, 200);
 });
 
@@ -2109,8 +2169,8 @@ app.openapi(listCustomers, async (c) => {
   const limit = parseInt(q.limit || "50", 10);
   const offset = (page - 1) * limit;
 
-  const conditions: string[] = [];
-  const params: unknown[] = [];
+  const conditions: string[] = ["c.organization_id = ?"];
+  const params: unknown[] = [actorOrganizationId(c)];
   if (q.search) {
     conditions.push("(c.name LIKE ? OR c.email LIKE ? OR c.phone LIKE ? OR c.address LIKE ?)");
     const s = `%${q.search}%`;
@@ -2158,17 +2218,20 @@ const listAllCustomers = createRoute({
 
 app.openapi(listAllCustomers, async (c) => {
   const me = currentUser(c);
+  const organizationId = actorOrganizationId(c);
   if (me.role === "technician") {
     const techId = await actorTechnicianId({ id: me.id, role: me.role });
     if (techId === null) return c.json({ customers: [] }, 200);
     const customers = await query<Pick<Customer, "id" | "name" | "address">>(
       `SELECT id, name, address FROM customers
-       WHERE id IN (SELECT customer_id FROM jobs WHERE technician_id = ?)
-       ORDER BY name ASC`, [techId]
+       WHERE organization_id = ? AND id IN (SELECT customer_id FROM jobs WHERE technician_id = ?)
+       ORDER BY name ASC`, [organizationId, techId]
     );
     return c.json({ customers }, 200);
   }
-  const customers = await query<Pick<Customer, "id" | "name" | "address">>("SELECT id, name, address FROM customers ORDER BY name ASC");
+  const customers = await query<Pick<Customer, "id" | "name" | "address">>(
+    "SELECT id, name, address FROM customers WHERE organization_id = ? ORDER BY name ASC", [organizationId]
+  );
   return c.json({ customers }, 200);
 });
 
@@ -2195,7 +2258,7 @@ app.openapi(getCustomer, async (c) => {
      FROM customers c
      LEFT JOIN customers rb ON c.referred_by_customer_id = rb.id
      ${CUSTOMER_REBATE_PROFILE_JOIN}
-     WHERE c.id = ?`, [id]
+     WHERE c.id = ? AND c.organization_id = ?`, [id, actorOrganizationId(c)]
   );
   if (!customer) return c.json({ error: "Customer not found" }, 404);
 
@@ -2269,7 +2332,7 @@ app.openapi(createCustomer, async (c) => {
   try {
     // A brand-new customer has no id yet, so self-referral (selfId) can
     // never apply here — that check only matters for updateCustomer.
-    referral = await resolveReferralAttribution(data, null, null);
+    referral = await resolveReferralAttribution(actorOrganizationId(c), data, null, null);
   } catch (err) {
     if (err instanceof CustomerValidationError) return c.json({ error: err.message }, 400);
     throw err;
@@ -2280,11 +2343,11 @@ app.openapi(createCustomer, async (c) => {
   // actually supplied at least one, matching the original "do not assume
   // these fields apply to every customer" design.
   const insertResult = await run(
-    `INSERT INTO customers (name, email, phone, address, city, state, zip, notes,
+    `INSERT INTO customers (organization_id, name, email, phone, address, city, state, zip, notes,
        referral_source, referral_name, referred_by_customer_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      data.name, data.email || "", data.phone || "", data.address || "",
+      actorOrganizationId(c), data.name, data.email || "", data.phone || "", data.address || "",
       data.city || "", data.state || "", data.zip || "", data.notes || "",
       referral.referral_source, referral.referral_name, referral.referred_by_customer_id,
     ]
@@ -2351,6 +2414,19 @@ app.openapi(updateCustomer, async (c) => {
   if (me.role === "technician" && Object.keys(data).some((k) => REBATE_PROFILE_FIELDS.has(k) && data[k as keyof typeof data] !== undefined)) {
     return c.json({ error: "Technicians cannot edit customer referral/rebate information" }, 403);
   }
+  // Phase 11.5: organization ownership checked first, before any query or
+  // mutation — same "RBAC/existence before any write" discipline already
+  // established for this exact route class (see mem:risks/job-update-
+  // ownership-bypass). Unlike jobs (which already 404'd on an unknown id
+  // pre-Phase-11.5), this route's pre-existing contract was a silent no-op
+  // on an unknown id (no existence check ran at all) — preserved here by
+  // returning the same 200 no-op for "doesn't exist" and "exists in another
+  // organization" alike, matching updateTechnician/updateServiceType/
+  // updateMaterial's identical pattern in this same diff.
+  const ownedCustomer = await get<{ id: number }>(
+    "SELECT id FROM customers WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]
+  );
+  if (!ownedCustomer) return c.json({ ok: true }, 200); // matches this route's pre-existing no-op-on-unknown-id behavior
 
   const fields: string[] = [];
   const vals: unknown[] = [];
@@ -2406,7 +2482,7 @@ app.openapi(updateCustomer, async (c) => {
     );
     if (!existing) return c.json({ error: "Customer not found" }, 404);
     try {
-      const referral = await resolveReferralAttribution(data, existing, Number(id));
+      const referral = await resolveReferralAttribution(actorOrganizationId(c), data, existing, Number(id));
       fields.push("referral_source = ?", "referral_name = ?", "referred_by_customer_id = ?");
       vals.push(referral.referral_source, referral.referral_name, referral.referred_by_customer_id);
     } catch (err) {
@@ -2443,7 +2519,7 @@ app.openapi(deleteCustomer, async (c) => {
   if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
 
   const { id } = c.req.valid("param");
-  await run("DELETE FROM customers WHERE id = ?", [id]);
+  await run("DELETE FROM customers WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   return c.json({ ok: true }, 200);
 });
 
@@ -2469,7 +2545,7 @@ app.openapi(getCustomerNotificationPreferences, async (c) => {
   const me = currentUser(c);
   if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
   const { id } = c.req.valid("param");
-  const customer = await get<{ id: number }>("SELECT id FROM customers WHERE id = ?", [id]);
+  const customer = await get<{ id: number }>("SELECT id FROM customers WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   if (!customer) return c.json({ error: "Customer not found" }, 404);
   const preferences = await getPreferencesView("customer", Number(id));
   return c.json({ preferences, sms_consent_sources: CONSENT_SOURCES }, 200);
@@ -2497,7 +2573,7 @@ app.openapi(updateCustomerNotificationPreferences, async (c) => {
   const me = currentUser(c);
   if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
   const { id } = c.req.valid("param");
-  const customer = await get<{ id: number }>("SELECT id FROM customers WHERE id = ?", [id]);
+  const customer = await get<{ id: number }>("SELECT id FROM customers WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   if (!customer) return c.json({ error: "Customer not found" }, 404);
   const data = c.req.valid("json");
   try {
@@ -2537,7 +2613,7 @@ app.openapi(getCustomerNotifications, async (c) => {
   const me = currentUser(c);
   if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
   const { id } = c.req.valid("param");
-  const customer = await get<{ id: number }>("SELECT id FROM customers WHERE id = ?", [id]);
+  const customer = await get<{ id: number }>("SELECT id FROM customers WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   if (!customer) return c.json({ error: "Customer not found" }, 404);
   const { limit, offset } = parseHistoryPagination(c.req.valid("query"));
   const page = await getCustomerNotificationHistory(Number(id), limit, offset);
@@ -2608,8 +2684,10 @@ async function nextLeadIdentifier(): Promise<string> {
  *  in the Technicians section) but with the opposite role criterion: a
  *  technician is never a valid Lead assignee, the inverse of "a technician
  *  link must actually be a technician." */
-async function validateLeadAssigneeUserId(userId: number): Promise<string | null> {
-  const user = await get<{ id: number; role: string }>("SELECT id, role FROM users WHERE id = ?", [userId]);
+async function validateLeadAssigneeUserId(organizationId: number, userId: number): Promise<string | null> {
+  const user = await get<{ id: number; role: string }>(
+    "SELECT id, role FROM users WHERE id = ? AND organization_id = ?", [userId, organizationId]
+  );
   if (!user) return "Assigned user not found";
   if (user.role === "technician") return "Assigned user must be an admin or dispatcher";
   return null;
@@ -2652,8 +2730,8 @@ app.openapi(listLeads, async (c) => {
   const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 200) : 50;
   const offset = (page - 1) * limit;
 
-  const conditions: string[] = [];
-  const params: unknown[] = [];
+  const conditions: string[] = ["l.organization_id = ?"];
+  const params: unknown[] = [actorOrganizationId(c)];
   if (q.search) {
     conditions.push("(l.identifier LIKE ? OR l.name LIKE ? OR l.phone LIKE ? OR l.email LIKE ?)");
     const s = `%${q.search}%`;
@@ -2671,7 +2749,7 @@ app.openapi(listLeads, async (c) => {
     conditions.push("l.referral_source = ?");
     params.push(q.referral_source);
   }
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const where = `WHERE ${conditions.join(" AND ")}`;
 
   const countRow = await get<{ count: number }>(`SELECT COUNT(*) as count FROM leads l ${where}`, params);
   // Deterministic, pagination-safe ordering: created_at alone can tie within
@@ -2700,7 +2778,7 @@ app.openapi(getLead, async (c) => {
   if (me.role === "technician") return c.json({ error: "Technicians cannot view leads" }, 403);
 
   const { id } = c.req.valid("param");
-  const lead = await get<Lead>(`${LEAD_SELECT} WHERE l.id = ?`, [id]);
+  const lead = await get<Lead>(`${LEAD_SELECT} WHERE l.id = ? AND l.organization_id = ?`, [id, actorOrganizationId(c)]);
   if (!lead) return c.json({ error: "Lead not found" }, 404);
   return c.json({ lead }, 200);
 });
@@ -2721,7 +2799,7 @@ app.openapi(getLeadStatusHistoryRoute, async (c) => {
   if (me.role === "technician") return c.json({ error: "Technicians cannot view leads" }, 403);
 
   const { id } = c.req.valid("param");
-  const lead = await get<{ id: number }>("SELECT id FROM leads WHERE id = ?", [id]);
+  const lead = await get<{ id: number }>("SELECT id FROM leads WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   if (!lead) return c.json({ error: "Lead not found" }, 404);
 
   const history = await query<z.infer<typeof LeadStatusHistorySchema>>(
@@ -2769,14 +2847,14 @@ app.openapi(createLead, async (c) => {
   if (!data.name.trim()) return c.json({ error: "Name is required" }, 400);
 
   if (data.assigned_user_id !== undefined && data.assigned_user_id !== null) {
-    const err = await validateLeadAssigneeUserId(data.assigned_user_id);
+    const err = await validateLeadAssigneeUserId(actorOrganizationId(c), data.assigned_user_id);
     if (err) return c.json({ error: err }, 400);
   }
 
   let referral;
   try {
     // A brand-new Lead has no id yet — same reasoning as createCustomer.
-    referral = await resolveReferralAttribution(data, null, null);
+    referral = await resolveReferralAttribution(actorOrganizationId(c), data, null, null);
   } catch (err) {
     if (err instanceof CustomerValidationError) return c.json({ error: err.message }, 400);
     throw err;
@@ -2794,12 +2872,12 @@ app.openapi(createLead, async (c) => {
   // supplied; lost_reason/lost_reason_note/converted_* are entirely
   // workflow-/conversion-owned and are not part of this schema at all.
   await run(
-    `INSERT INTO leads (identifier, name, phone, email, address, city, state, zip, status,
+    `INSERT INTO leads (identifier, organization_id, name, phone, email, address, city, state, zip, status,
        assigned_user_id, referral_source, referral_name, referred_by_customer_id,
        program_interest, estimated_value_cents, estimate_notes, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      identifier, data.name, data.phone || "", data.email || "", data.address || "",
+      identifier, actorOrganizationId(c), data.name, data.phone || "", data.email || "", data.address || "",
       data.city || "", data.state || "", data.zip || "",
       data.assigned_user_id ?? null,
       referral.referral_source, referral.referral_name, referral.referred_by_customer_id,
@@ -2868,14 +2946,15 @@ app.openapi(updateLead, async (c) => {
   const data = c.req.valid("json");
 
   const existing = await get<{ referral_source: string; referral_name: string; referred_by_customer_id: number | null }>(
-    "SELECT referral_source, referral_name, referred_by_customer_id FROM leads WHERE id = ?", [id]
+    "SELECT referral_source, referral_name, referred_by_customer_id FROM leads WHERE id = ? AND organization_id = ?",
+    [id, actorOrganizationId(c)]
   );
   if (!existing) return c.json({ error: "Lead not found" }, 404);
 
   if (data.name !== undefined && !data.name.trim()) return c.json({ error: "Name is required" }, 400);
 
   if (data.assigned_user_id !== undefined && data.assigned_user_id !== null) {
-    const err = await validateLeadAssigneeUserId(data.assigned_user_id);
+    const err = await validateLeadAssigneeUserId(actorOrganizationId(c), data.assigned_user_id);
     if (err) return c.json({ error: err }, 400);
   }
 
@@ -2893,7 +2972,7 @@ app.openapi(updateLead, async (c) => {
   // pattern as updateCustomer, reusing the identical validator.
   if (Object.keys(data).some((k) => LEAD_REFERRAL_FIELDS.has(k))) {
     try {
-      const referral = await resolveReferralAttribution(data, existing, null);
+      const referral = await resolveReferralAttribution(actorOrganizationId(c), data, existing, null);
       fields.push("referral_source = ?", "referral_name = ?", "referred_by_customer_id = ?");
       vals.push(referral.referral_source, referral.referral_name, referral.referred_by_customer_id);
     } catch (err) {
@@ -2951,6 +3030,7 @@ app.openapi(transitionLeadRoute, async (c) => {
     await transitionLead(c.env.DB, Number(id), {
       toStatus: body.to_status,
       actorUserId: me.id,
+      organizationId: actorOrganizationId(c),
       reason: body.reason,
       lostReason: body.lost_reason,
       lostReasonNote: body.lost_reason_note,
@@ -3002,7 +3082,7 @@ app.openapi(convertLeadRoute, async (c) => {
     // The real, authenticated session actor is the only source of identity
     // ever passed here — the request schema above has no actor field at
     // all to even read one from.
-    outcome = await convertLead(c.env.DB, Number(id), { actorUserId: me.id });
+    outcome = await convertLead(c.env.DB, Number(id), { actorUserId: me.id, organizationId: actorOrganizationId(c) });
   } catch (err) {
     if (err instanceof LeadConversionError) {
       const statusMap = { not_found: 404, invalid_state: 409, ambiguous_match: 409, conflict: 409 } as const;
@@ -3043,7 +3123,7 @@ app.openapi(getLeadNotificationPreferences, async (c) => {
   const me = currentUser(c);
   if (me.role === "technician") return c.json({ error: "Technicians cannot manage leads" }, 403);
   const { id } = c.req.valid("param");
-  const lead = await get<{ id: number }>("SELECT id FROM leads WHERE id = ?", [id]);
+  const lead = await get<{ id: number }>("SELECT id FROM leads WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   if (!lead) return c.json({ error: "Lead not found" }, 404);
   const preferences = await getPreferencesView("lead", Number(id));
   return c.json({ preferences, sms_consent_sources: CONSENT_SOURCES }, 200);
@@ -3065,7 +3145,7 @@ app.openapi(updateLeadNotificationPreferences, async (c) => {
   const me = currentUser(c);
   if (me.role === "technician") return c.json({ error: "Technicians cannot manage leads" }, 403);
   const { id } = c.req.valid("param");
-  const lead = await get<{ id: number }>("SELECT id FROM leads WHERE id = ?", [id]);
+  const lead = await get<{ id: number }>("SELECT id FROM leads WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   if (!lead) return c.json({ error: "Lead not found" }, 404);
   const data = c.req.valid("json");
   try {
@@ -3097,7 +3177,7 @@ app.openapi(getLeadNotifications, async (c) => {
   const me = currentUser(c);
   if (me.role === "technician") return c.json({ error: "Technicians cannot manage leads" }, 403);
   const { id } = c.req.valid("param");
-  const lead = await get<{ id: number }>("SELECT id FROM leads WHERE id = ?", [id]);
+  const lead = await get<{ id: number }>("SELECT id FROM leads WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   if (!lead) return c.json({ error: "Lead not found" }, 404);
   const { limit, offset } = parseHistoryPagination(c.req.valid("query"));
   const page = await getLeadNotificationHistory(Number(id), limit, offset);
@@ -3110,9 +3190,11 @@ app.openapi(getLeadNotifications, async (c) => {
  *  unassigned user with role "technician" — otherwise a dispatcher could silently
  *  link a technician profile to someone else's admin/dispatcher account. Returns
  *  an error string to surface as a 400, or null if `userId` is valid to assign. */
-async function validateTechnicianUserId(userId: number | null, excludeTechnicianId?: number): Promise<string | null> {
+async function validateTechnicianUserId(organizationId: number, userId: number | null, excludeTechnicianId?: number): Promise<string | null> {
   if (userId === null) return null;
-  const user = await get<{ id: number; role: string }>("SELECT id, role FROM users WHERE id = ?", [userId]);
+  const user = await get<{ id: number; role: string }>(
+    "SELECT id, role FROM users WHERE id = ? AND organization_id = ?", [userId, organizationId]
+  );
   if (!user) return "Linked user not found";
   if (user.role !== "technician") return "Linked user must have the Technician role";
   const existing = await get<{ id: number }>(
@@ -3139,8 +3221,9 @@ app.openapi(listTechnicians, async (c) => {
      FROM technicians t
      LEFT JOIN users u ON u.id = t.user_id
      LEFT JOIN (SELECT technician_id, COUNT(*) as cnt FROM jobs WHERE status IN (${ACTIVE_STATUSES.map(() => "?").join(",")}) GROUP BY technician_id) jc ON jc.technician_id = t.id
+     WHERE t.organization_id = ?
      ORDER BY t.name ASC`,
-    ACTIVE_STATUSES
+    [...ACTIVE_STATUSES, actorOrganizationId(c)]
   );
   return c.json({ technicians }, 200);
 });
@@ -3158,7 +3241,8 @@ const listAllTechnicians = createRoute({
 
 app.openapi(listAllTechnicians, async (c) => {
   const technicians = await query<Pick<Technician, "id" | "name" | "color">>(
-    "SELECT id, name, color FROM technicians WHERE active = 1 ORDER BY name ASC"
+    "SELECT id, name, color FROM technicians WHERE organization_id = ? AND active = 1 ORDER BY name ASC",
+    [actorOrganizationId(c)]
   );
   return c.json({ technicians }, 200);
 });
@@ -3185,13 +3269,14 @@ const createTechnician = createRoute({
 
 app.openapi(createTechnician, async (c) => {
   const data = c.req.valid("json");
-  const userIdError = await validateTechnicianUserId(data.user_id ?? null);
+  const organizationId = actorOrganizationId(c);
+  const userIdError = await validateTechnicianUserId(organizationId, data.user_id ?? null);
   if (userIdError) return c.json({ error: userIdError }, 400);
-  await run(
-    "INSERT INTO technicians (name, email, phone, color, user_id) VALUES (?, ?, ?, ?, ?)",
-    [data.name, data.email || "", data.phone || "", data.color || "#16a34a", data.user_id ?? null]
+  const insertResult = await run(
+    "INSERT INTO technicians (organization_id, name, email, phone, color, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+    [organizationId, data.name, data.email || "", data.phone || "", data.color || "#16a34a", data.user_id ?? null]
   );
-  const tech = await get<Technician>("SELECT * FROM technicians ORDER BY id DESC LIMIT 1");
+  const tech = await get<Technician>("SELECT * FROM technicians WHERE id = ?", [insertResult.lastInsertRowid]);
   return c.json(tech!, 201);
 });
 
@@ -3220,8 +3305,13 @@ const updateTechnician = createRoute({
 app.openapi(updateTechnician, async (c) => {
   const { id } = c.req.valid("param");
   const data = c.req.valid("json");
+  const organizationId = actorOrganizationId(c);
+  const owned = await get<{ id: number }>(
+    "SELECT id FROM technicians WHERE id = ? AND organization_id = ?", [id, organizationId]
+  );
+  if (!owned) return c.json({ ok: true }, 200); // matches this route's pre-existing no-op-on-unknown-id behavior
   if (data.user_id !== undefined) {
-    const userIdError = await validateTechnicianUserId(data.user_id, Number(id));
+    const userIdError = await validateTechnicianUserId(organizationId, data.user_id, Number(id));
     if (userIdError) return c.json({ error: userIdError }, 400);
   }
   const fields: string[] = [];
@@ -3257,7 +3347,7 @@ app.openapi(deleteTechnician, async (c) => {
   if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
 
   const { id } = c.req.valid("param");
-  await run("DELETE FROM technicians WHERE id = ?", [id]);
+  await run("DELETE FROM technicians WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   return c.json({ ok: true }, 200);
 });
 
@@ -3275,7 +3365,9 @@ const listServiceTypes = createRoute({
 });
 
 app.openapi(listServiceTypes, async (c) => {
-  const types = await query<ServiceType>("SELECT * FROM service_types ORDER BY name ASC");
+  const types = await query<ServiceType>(
+    "SELECT * FROM service_types WHERE organization_id = ? ORDER BY name ASC", [actorOrganizationId(c)]
+  );
   return c.json({ service_types: types }, 200);
 });
 
@@ -3300,11 +3392,11 @@ const createServiceType = createRoute({
 
 app.openapi(createServiceType, async (c) => {
   const data = c.req.valid("json");
-  await run(
-    "INSERT INTO service_types (name, description, default_duration, default_price, color) VALUES (?, ?, ?, ?, ?)",
-    [data.name, data.description || "", data.default_duration || 60, data.default_price || 0, data.color || "#6b7280"]
+  const insertResult = await run(
+    "INSERT INTO service_types (organization_id, name, description, default_duration, default_price, color) VALUES (?, ?, ?, ?, ?, ?)",
+    [actorOrganizationId(c), data.name, data.description || "", data.default_duration || 60, data.default_price || 0, data.color || "#6b7280"]
   );
-  const st = await get<ServiceType>("SELECT * FROM service_types ORDER BY id DESC LIMIT 1");
+  const st = await get<ServiceType>("SELECT * FROM service_types WHERE id = ?", [insertResult.lastInsertRowid]);
   return c.json(st!, 201);
 });
 
@@ -3331,6 +3423,10 @@ const updateServiceType = createRoute({
 app.openapi(updateServiceType, async (c) => {
   const { id } = c.req.valid("param");
   const data = c.req.valid("json");
+  const owned = await get<{ id: number }>(
+    "SELECT id FROM service_types WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]
+  );
+  if (!owned) return c.json({ ok: true }, 200); // matches this route's pre-existing no-op-on-unknown-id behavior
   const fields: string[] = [];
   const vals: unknown[] = [];
   for (const [k, v] of Object.entries(data)) {
@@ -3360,7 +3456,7 @@ app.openapi(deleteServiceType, async (c) => {
   if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
 
   const { id } = c.req.valid("param");
-  await run("DELETE FROM service_types WHERE id = ?", [id]);
+  await run("DELETE FROM service_types WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   return c.json({ ok: true }, 200);
 });
 
@@ -3386,8 +3482,8 @@ const getSchedule = createRoute({
 
 app.openapi(getSchedule, async (c) => {
   const q = c.req.valid("query");
-  let where = "WHERE j.scheduled_date >= ? AND j.scheduled_date <= ?";
-  const params: unknown[] = [q.start, q.end];
+  let where = "WHERE j.organization_id = ? AND j.scheduled_date >= ? AND j.scheduled_date <= ?";
+  const params: unknown[] = [actorOrganizationId(c), q.start, q.end];
   // P1 fix (mem:risks/technician-job-read-scoping): same rule as listJobs —
   // a technician always gets forced to their own resolved id, a
   // client-supplied ?technician_id= is never trusted for that role.
@@ -3505,6 +3601,7 @@ const getTechnicianRoute = createRoute({
 
 app.openapi(getTechnicianRoute, async (c) => {
   const me = currentUser(c);
+  const organizationId = actorOrganizationId(c);
   const q = c.req.valid("query");
   const { date } = q;
 
@@ -3519,12 +3616,19 @@ app.openapi(getTechnicianRoute, async (c) => {
     if (!q.technician_id) return c.json({ error: "technician_id is required" }, 400);
     const parsed = Number(q.technician_id);
     if (!Number.isInteger(parsed)) return c.json({ error: "technician_id must be an integer" }, 400);
+    // Phase 11.5: an admin/dispatcher-supplied technician_id must belong to
+    // the actor's own organization — otherwise this would compute (and pay
+    // for) a route over another organization's technician/jobs.
+    const ownedTech = await get<{ id: number }>(
+      "SELECT id FROM technicians WHERE id = ? AND organization_id = ?", [parsed, organizationId]
+    );
+    if (!ownedTech) return c.json({ error: "technician_id is required" }, 400);
     technicianId = parsed;
   }
 
   const rows = await query<{ id: number; scheduled_time: string; status: string; latitude: number | null; longitude: number | null; geocode_status: string | null }>(
-    "SELECT id, scheduled_time, status, latitude, longitude, geocode_status FROM jobs WHERE scheduled_date = ? AND technician_id = ?",
-    [date, technicianId]
+    "SELECT id, scheduled_time, status, latitude, longitude, geocode_status FROM jobs WHERE organization_id = ? AND scheduled_date = ? AND technician_id = ?",
+    [organizationId, date, technicianId]
   );
   const stops: RouteStopInput[] = rows.map((r) => ({
     jobId: r.id, scheduledTime: r.scheduled_time, status: r.status,
@@ -3557,12 +3661,17 @@ const addChecklistItem = createRoute({
   },
   responses: {
     201: { description: "Added", content: { "application/json": { schema: OkSchema } } },
+    404: { description: "Job not found", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
 app.openapi(addChecklistItem, async (c) => {
   const { id } = c.req.valid("param");
   const { label } = c.req.valid("json");
+  const ownedJob = await get<{ id: number }>(
+    "SELECT id FROM jobs WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]
+  );
+  if (!ownedJob) return c.json({ error: "Job not found" }, 404);
   const maxOrder = await get<{ m: number }>("SELECT COALESCE(MAX(sort_order), 0) as m FROM job_checklist WHERE job_id = ?", [id]);
   await run("INSERT INTO job_checklist (job_id, label, sort_order) VALUES (?, ?, ?)", [id, label, (maxOrder?.m || 0) + 1]);
   return c.json({ ok: true }, 201);
@@ -3579,7 +3688,11 @@ const toggleChecklistItem = createRoute({
 
 app.openapi(toggleChecklistItem, async (c) => {
   const { id } = c.req.valid("param");
-  await run("UPDATE job_checklist SET checked = CASE WHEN checked = 0 THEN 1 ELSE 0 END WHERE id = ?", [id]);
+  await run(
+    `UPDATE job_checklist SET checked = CASE WHEN checked = 0 THEN 1 ELSE 0 END
+     WHERE id = ? AND job_id IN (SELECT id FROM jobs WHERE organization_id = ?)`,
+    [id, actorOrganizationId(c)]
+  );
   return c.json({ ok: true }, 200);
 });
 
@@ -3598,7 +3711,10 @@ app.openapi(deleteChecklistItem, async (c) => {
   if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
 
   const { id } = c.req.valid("param");
-  await run("DELETE FROM job_checklist WHERE id = ?", [id]);
+  await run(
+    "DELETE FROM job_checklist WHERE id = ? AND job_id IN (SELECT id FROM jobs WHERE organization_id = ?)",
+    [id, actorOrganizationId(c)]
+  );
   return c.json({ ok: true }, 200);
 });
 
@@ -3616,7 +3732,9 @@ const listMaterials = createRoute({
 });
 
 app.openapi(listMaterials, async (c) => {
-  const materials = await query<Material>("SELECT * FROM materials ORDER BY name ASC");
+  const materials = await query<Material>(
+    "SELECT * FROM materials WHERE organization_id = ? ORDER BY name ASC", [actorOrganizationId(c)]
+  );
   return c.json({ materials }, 200);
 });
 
@@ -3638,8 +3756,8 @@ const createMaterial = createRoute({
 
 app.openapi(createMaterial, async (c) => {
   const data = c.req.valid("json");
-  await run("INSERT INTO materials (name, unit, unit_cost, in_stock) VALUES (?, ?, ?, ?)",
-    [data.name, data.unit || "ea", data.unit_cost || 0, data.in_stock || 0]);
+  await run("INSERT INTO materials (organization_id, name, unit, unit_cost, in_stock) VALUES (?, ?, ?, ?, ?)",
+    [actorOrganizationId(c), data.name, data.unit || "ea", data.unit_cost || 0, data.in_stock || 0]);
   return c.json({ ok: true }, 201);
 });
 
@@ -3663,6 +3781,10 @@ const updateMaterial = createRoute({
 app.openapi(updateMaterial, async (c) => {
   const { id } = c.req.valid("param");
   const data = c.req.valid("json");
+  const owned = await get<{ id: number }>(
+    "SELECT id FROM materials WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]
+  );
+  if (!owned) return c.json({ ok: true }, 200); // matches this route's pre-existing no-op-on-unknown-id behavior
   const fields: string[] = [];
   const vals: unknown[] = [];
   for (const [k, v] of Object.entries(data)) {
@@ -3687,7 +3809,7 @@ app.openapi(deleteMaterial, async (c) => {
   if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
 
   const { id } = c.req.valid("param");
-  await run("DELETE FROM materials WHERE id = ?", [id]);
+  await run("DELETE FROM materials WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   return c.json({ ok: true }, 200);
 });
 
@@ -3706,17 +3828,24 @@ const addJobMaterial = createRoute({
   },
   responses: {
     201: { description: "Added", content: { "application/json": { schema: OkSchema } } },
+    404: { description: "Job or material not found", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
 app.openapi(addJobMaterial, async (c) => {
   const { id } = c.req.valid("param");
   const data = c.req.valid("json");
-  let cost = data.unit_cost;
-  if (cost === undefined) {
-    const mat = await get<{ unit_cost: number }>("SELECT unit_cost FROM materials WHERE id = ?", [data.material_id]);
-    cost = mat?.unit_cost || 0;
-  }
+  const organizationId = actorOrganizationId(c);
+  // Phase 11.5: both the job and the material must belong to the actor's
+  // own organization — this route previously trusted a bare numeric job id
+  // with no ownership check at all.
+  const ownedJob = await get<{ id: number }>("SELECT id FROM jobs WHERE id = ? AND organization_id = ?", [id, organizationId]);
+  if (!ownedJob) return c.json({ error: "Job not found" }, 404);
+  const mat = await get<{ unit_cost: number }>(
+    "SELECT unit_cost FROM materials WHERE id = ? AND organization_id = ?", [data.material_id, organizationId]
+  );
+  if (!mat) return c.json({ error: "Material not found" }, 404);
+  const cost = data.unit_cost ?? mat.unit_cost;
   await run("INSERT INTO job_materials (job_id, material_id, quantity, unit_cost) VALUES (?, ?, ?, ?)",
     [id, data.material_id, data.quantity, cost]);
   return c.json({ ok: true }, 201);
@@ -3737,7 +3866,10 @@ app.openapi(deleteJobMaterial, async (c) => {
   if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
 
   const { id } = c.req.valid("param");
-  await run("DELETE FROM job_materials WHERE id = ?", [id]);
+  await run(
+    `DELETE FROM job_materials WHERE id = ? AND job_id IN (SELECT id FROM jobs WHERE organization_id = ?)`,
+    [id, actorOrganizationId(c)]
+  );
   return c.json({ ok: true }, 200);
 });
 
@@ -3758,6 +3890,22 @@ async function attachFinancials(invoice: Record<string, unknown>): Promise<Recor
     invoice as unknown as Parameters<typeof getInvoiceFinancials>[0], invoice.due_date as string
   );
   return { ...invoice, ...financials };
+}
+
+/** Phase 11.5 — a lightweight ownership guard used by every single-invoice
+ *  mutation below (issue/void/rebate/delete/payments), which all otherwise
+ *  call straight into financial.ts by bare invoice id. Rather than thread
+ *  organizationId through financial.ts's whole call graph (a much larger,
+ *  riskier change to this codebase's most sensitive domain), this narrow
+ *  pre-check confirms the invoice belongs to the actor's organization
+ *  before any of those functions ever run — same "existence/ownership
+ *  check first, before any mutation" discipline used everywhere else in
+ *  this file. */
+async function assertInvoiceInOrganization(organizationId: number, invoiceId: number): Promise<boolean> {
+  const row = await get<{ id: number }>(
+    "SELECT id FROM invoices WHERE id = ? AND organization_id = ?", [invoiceId, organizationId]
+  );
+  return !!row;
 }
 
 const listInvoices = createRoute({
@@ -3792,8 +3940,8 @@ app.openapi(listInvoices, async (c) => {
   const limit = parseInt(q.limit || "50", 10);
   const offset = (page - 1) * limit;
 
-  let where = "WHERE 1=1";
-  const params: unknown[] = [];
+  let where = "WHERE i.organization_id = ?";
+  const params: unknown[] = [actorOrganizationId(c)];
   if (q.status) { where += " AND i.status = ?"; params.push(q.status); }
   if (q.search) {
     where += " AND (i.identifier LIKE ? OR c.name LIKE ?)";
@@ -3853,7 +4001,7 @@ app.openapi(getInvoice, async (c) => {
      FROM invoices i
      LEFT JOIN customers c ON i.customer_id = c.id
      LEFT JOIN jobs j ON i.job_id = j.id
-     WHERE i.id = ?`, [id]
+     WHERE i.id = ? AND i.organization_id = ?`, [id, actorOrganizationId(c)]
   );
   if (!invoice) return c.json({ error: "Invoice not found" }, 404);
   const lines = await query<Record<string, unknown>>(
@@ -3887,6 +4035,7 @@ const createInvoice = createRoute({
     201: { description: "Created", content: { "application/json": { schema: z.any() } } },
     400: { description: "Invalid invoice data", content: { "application/json": { schema: ErrorSchema } } },
     403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Customer or job not found", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
@@ -3895,8 +4044,23 @@ app.openapi(createInvoice, async (c) => {
   if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
 
   const data = c.req.valid("json");
+  // Phase 11.5: a client-supplied customer_id (and, if present, job_id)
+  // must belong to the actor's own organization — otherwise a caller could
+  // attach a real financial record to another organization's customer.
+  const organizationId = actorOrganizationId(c);
+  const ownedCustomer = await get<{ id: number }>(
+    "SELECT id FROM customers WHERE id = ? AND organization_id = ?", [data.customer_id, organizationId]
+  );
+  if (!ownedCustomer) return c.json({ error: "Customer not found" }, 404);
+  if (data.job_id != null) {
+    const ownedJob = await get<{ id: number }>(
+      "SELECT id FROM jobs WHERE id = ? AND organization_id = ?", [data.job_id, organizationId]
+    );
+    if (!ownedJob) return c.json({ error: "Job not found" }, 404);
+  }
   try {
     const invoice = await createManualInvoice(c.env.DB, {
+      organizationId,
       customerId: data.customer_id,
       jobId: data.job_id ?? null,
       taxRatePercent: data.tax_rate ?? 0,
@@ -3943,7 +4107,9 @@ app.openapi(updateInvoice, async (c) => {
   const { id } = c.req.valid("param");
   const data = c.req.valid("json");
   const invoice = await getInvoiceById(Number(id));
-  if (!invoice) return c.json({ error: "Invoice not found" }, 404);
+  if (!invoice || !(await assertInvoiceInOrganization(actorOrganizationId(c), Number(id)))) {
+    return c.json({ error: "Invoice not found" }, 404);
+  }
 
   const fields: string[] = [];
   const vals: unknown[] = [];
@@ -3972,8 +4138,12 @@ const issueInvoiceRoute = createRoute({
 app.openapi(issueInvoiceRoute, async (c) => {
   const me = currentUser(c);
   if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const invoiceId = Number(c.req.valid("param").id);
+  if (!(await assertInvoiceInOrganization(actorOrganizationId(c), invoiceId))) {
+    return c.json({ error: "Invoice not found" }, 404);
+  }
   try {
-    const invoice = await issueInvoice(Number(c.req.valid("param").id), me.id);
+    const invoice = await issueInvoice(invoiceId, me.id);
     // Phase 9.1 — invoice.id alone is a safe discriminator: issueInvoice()
     // itself rejects issuing anything but a draft, so an invoice can only
     // ever move to "issued" once. Best-effort, never affects the financial
@@ -4015,8 +4185,12 @@ const voidInvoiceRoute = createRoute({
 app.openapi(voidInvoiceRoute, async (c) => {
   const me = currentUser(c);
   if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const invoiceId = Number(c.req.valid("param").id);
+  if (!(await assertInvoiceInOrganization(actorOrganizationId(c), invoiceId))) {
+    return c.json({ error: "Invoice not found" }, 404);
+  }
   try {
-    const invoice = await voidInvoice(Number(c.req.valid("param").id), me.id, c.req.valid("json").reason);
+    const invoice = await voidInvoice(invoiceId, me.id, c.req.valid("json").reason);
     return c.json(await attachFinancials(invoice as unknown as Record<string, unknown>), 200);
   } catch (err) {
     if (err instanceof FinancialError) {
@@ -4045,8 +4219,12 @@ const setRebateRoute = createRoute({
 app.openapi(setRebateRoute, async (c) => {
   const me = currentUser(c);
   if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const invoiceId = Number(c.req.valid("param").id);
+  if (!(await assertInvoiceInOrganization(actorOrganizationId(c), invoiceId))) {
+    return c.json({ error: "Invoice not found" }, 404);
+  }
   try {
-    const invoice = await setRebateAmount(Number(c.req.valid("param").id), me.id, c.req.valid("json").rebate_amount_cents);
+    const invoice = await setRebateAmount(invoiceId, me.id, c.req.valid("json").rebate_amount_cents);
     return c.json(await attachFinancials(invoice as unknown as Record<string, unknown>), 200);
   } catch (err) {
     if (err instanceof FinancialError) {
@@ -4074,6 +4252,9 @@ app.openapi(deleteInvoice, async (c) => {
   if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
 
   const { id } = c.req.valid("param");
+  if (!(await assertInvoiceInOrganization(actorOrganizationId(c), Number(id)))) {
+    return c.json({ error: "Invoice not found" }, 404);
+  }
   try {
     await deleteDraftInvoice(Number(id));
   } catch (err) {
@@ -4093,13 +4274,18 @@ const getInvoiceAuditRoute = createRoute({
   responses: {
     200: { description: "Financial audit trail for this invoice", content: { "application/json": { schema: z.any() } } },
     403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
 app.openapi(getInvoiceAuditRoute, async (c) => {
   const me = currentUser(c);
   if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
-  const audit = await getInvoiceAudit(Number(c.req.valid("param").id));
+  const invoiceId = Number(c.req.valid("param").id);
+  if (!(await assertInvoiceInOrganization(actorOrganizationId(c), invoiceId))) {
+    return c.json({ error: "Invoice not found" }, 404);
+  }
+  const audit = await getInvoiceAudit(invoiceId);
   return c.json({ audit }, 200);
 });
 
@@ -4123,7 +4309,7 @@ app.openapi(getInvoiceNotifications, async (c) => {
   const me = currentUser(c);
   if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
   const { id } = c.req.valid("param");
-  const invoice = await get<{ id: number }>("SELECT id FROM invoices WHERE id = ?", [id]);
+  const invoice = await get<{ id: number }>("SELECT id FROM invoices WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   if (!invoice) return c.json({ error: "Invoice not found" }, 404);
   const { limit, offset } = parseHistoryPagination(c.req.valid("query"));
   const page = await getInvoiceNotificationHistory(Number(id), limit, offset);
@@ -4139,13 +4325,18 @@ const listPaymentsRoute = createRoute({
   responses: {
     200: { description: "Payment history for this invoice", content: { "application/json": { schema: z.any() } } },
     403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
 app.openapi(listPaymentsRoute, async (c) => {
   const me = currentUser(c);
   if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
-  const payments = await listPayments(Number(c.req.valid("param").id));
+  const invoiceId = Number(c.req.valid("param").id);
+  if (!(await assertInvoiceInOrganization(actorOrganizationId(c), invoiceId))) {
+    return c.json({ error: "Invoice not found" }, 404);
+  }
+  const payments = await listPayments(invoiceId);
   return c.json({ payments }, 200);
 });
 
@@ -4175,6 +4366,9 @@ app.openapi(recordPaymentRoute, async (c) => {
   const me = currentUser(c);
   if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
   const { id } = c.req.valid("param");
+  if (!(await assertInvoiceInOrganization(actorOrganizationId(c), Number(id)))) {
+    return c.json({ error: "Invoice not found" }, 404);
+  }
   const data = c.req.valid("json");
   try {
     const invoice = await recordPayment(c.env.DB, Number(id), {
@@ -4229,8 +4423,17 @@ const voidPaymentRoute = createRoute({
 app.openapi(voidPaymentRoute, async (c) => {
   const me = currentUser(c);
   if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const paymentId = Number(c.req.valid("param").id);
+  // Phase 11.5: a payment has no organization_id of its own — its tenant
+  // ownership is inherited through its invoice, so this joins to confirm
+  // that invoice belongs to the actor's own organization.
+  const ownedPayment = await get<{ id: number }>(
+    "SELECT p.id FROM payments p JOIN invoices i ON i.id = p.invoice_id WHERE p.id = ? AND i.organization_id = ?",
+    [paymentId, actorOrganizationId(c)]
+  );
+  if (!ownedPayment) return c.json({ error: "Payment not found" }, 404);
   try {
-    await voidPayment(c.env.DB, Number(c.req.valid("param").id), me.id, c.req.valid("json").reason);
+    await voidPayment(c.env.DB, paymentId, me.id, c.req.valid("json").reason);
   } catch (err) {
     if (err instanceof FinancialError) {
       if (err.code === "not_found") return c.json({ error: err.message }, 404);
@@ -4261,6 +4464,10 @@ app.openapi(invoiceFromJob, async (c) => {
   if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
 
   const { id } = c.req.valid("param");
+  const ownedJob = await get<{ id: number }>(
+    "SELECT id FROM jobs WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]
+  );
+  if (!ownedJob) return c.json({ error: "Job not found" }, 404);
   try {
     const { invoice, created } = await generateInvoiceForJob(c.env.DB, Number(id), me.id);
     const result = await get<Record<string, unknown>>(
@@ -4388,8 +4595,8 @@ app.openapi(listUsers, async (c) => {
   if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
 
   const { search } = c.req.valid("query");
-  let where = "WHERE 1=1";
-  const params: unknown[] = [];
+  let where = "WHERE organization_id = ?";
+  const params: unknown[] = [actorOrganizationId(c)];
   if (search) {
     where += " AND (name LIKE ? OR email LIKE ?)";
     const s = `%${search}%`;
@@ -4434,7 +4641,8 @@ app.openapi(listAssignableUsers, async (c) => {
   const me = currentUser(c);
   if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
   const users = await query<{ id: number; name: string; role: Role }>(
-    "SELECT id, name, role FROM users WHERE role IN ('admin', 'dispatcher') ORDER BY name ASC"
+    "SELECT id, name, role FROM users WHERE organization_id = ? AND role IN ('admin', 'dispatcher') ORDER BY name ASC",
+    [actorOrganizationId(c)]
   );
   return c.json({ users }, 200);
 });
@@ -4471,8 +4679,8 @@ app.openapi(createUser, async (c) => {
 
   const passwordHash = await hashPassword(data.password);
   const result = await run(
-    "INSERT INTO users (name, email, password_hash, role, active) VALUES (?, ?, ?, ?, ?)",
-    [data.name.trim(), email, passwordHash, data.role || "dispatcher", data.active ?? 1]
+    "INSERT INTO users (organization_id, name, email, password_hash, role, active) VALUES (?, ?, ?, ?, ?, ?)",
+    [actorOrganizationId(c), data.name.trim(), email, passwordHash, data.role || "dispatcher", data.active ?? 1]
   );
   const user = await get<PublicUser>(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`, [result.lastInsertRowid]);
   return c.json({ user: user as PublicUser }, 201);
@@ -4494,7 +4702,7 @@ app.openapi(getUser, async (c) => {
   if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
 
   const { id } = c.req.valid("param");
-  const user = await get<PublicUser>(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`, [id]);
+  const user = await get<PublicUser>(`SELECT ${USER_COLUMNS} FROM users WHERE id = ? AND organization_id = ?`, [id, actorOrganizationId(c)]);
   if (!user) return c.json({ error: "User not found" }, 404);
   return c.json({ user }, 200);
 });
@@ -4528,16 +4736,22 @@ app.openapi(updateUser, async (c) => {
 
   const { id } = c.req.valid("param");
   const data = c.req.valid("json");
+  const organizationId = actorOrganizationId(c);
   const target = await get<{ id: number; role: string; active: number }>(
-    "SELECT id, role, active FROM users WHERE id = ?", [id]
+    "SELECT id, role, active FROM users WHERE id = ? AND organization_id = ?", [id, organizationId]
   );
   if (!target) return c.json({ error: "User not found" }, 404);
 
   if (data.active === 0) {
     if (Number(id) === me.id) return c.json({ error: "You cannot deactivate your own account" }, 400);
     if (target.role === "admin") {
+      // Phase 11.5: "last administrator" means the last one IN THIS
+      // ORGANIZATION — an admin count that included other organizations'
+      // admins would wrongly let the true last admin of this org deactivate
+      // themselves out of it.
       const otherActiveAdmins = await get<{ count: number }>(
-        "SELECT COUNT(*) as count FROM users WHERE role = 'admin' AND active = 1 AND id != ?", [id]
+        "SELECT COUNT(*) as count FROM users WHERE organization_id = ? AND role = 'admin' AND active = 1 AND id != ?",
+        [organizationId, id]
       );
       if ((otherActiveAdmins?.count || 0) === 0) {
         return c.json({ error: "Cannot deactivate the last active administrator" }, 400);
@@ -4587,7 +4801,7 @@ app.openapi(setUserPassword, async (c) => {
   if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
 
   const { id } = c.req.valid("param");
-  const target = await get("SELECT id FROM users WHERE id = ?", [id]);
+  const target = await get("SELECT id FROM users WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
   if (!target) return c.json({ error: "User not found" }, 404);
 
   const { password } = c.req.valid("json");
@@ -4616,11 +4830,15 @@ app.openapi(deleteUser, async (c) => {
   const { id } = c.req.valid("param");
   if (Number(id) === me.id) return c.json({ error: "You cannot delete your own account" }, 400);
 
-  const target = await get<{ id: number; role: string }>("SELECT id, role FROM users WHERE id = ?", [id]);
+  const organizationId = actorOrganizationId(c);
+  const target = await get<{ id: number; role: string }>(
+    "SELECT id, role FROM users WHERE id = ? AND organization_id = ?", [id, organizationId]
+  );
   if (!target) return c.json({ error: "User not found" }, 404);
   if (target.role === "admin") {
     const otherActiveAdmins = await get<{ count: number }>(
-      "SELECT COUNT(*) as count FROM users WHERE role = 'admin' AND active = 1 AND id != ?", [id]
+      "SELECT COUNT(*) as count FROM users WHERE organization_id = ? AND role = 'admin' AND active = 1 AND id != ?",
+      [organizationId, id]
     );
     if ((otherActiveAdmins?.count || 0) === 0) return c.json({ error: "Cannot delete the last administrator" }, 400);
   }
@@ -4664,7 +4882,7 @@ const listSettings = createRoute({
 
 app.openapi(listSettings, async (c) => {
   const { category } = c.req.valid("query");
-  const settings = await listCurrentSettings(category);
+  const settings = await listCurrentSettings(actorOrganizationId(c), category);
   return c.json({ settings }, 200);
 });
 
@@ -4682,7 +4900,7 @@ app.openapi(getSettingHistoryRoute, async (c) => {
   const me = currentUser(c);
   if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
   const { key } = c.req.valid("param");
-  const history = await getSettingHistory(key);
+  const history = await getSettingHistory(actorOrganizationId(c), key);
   return c.json({ history }, 200);
 });
 
@@ -4733,6 +4951,7 @@ app.openapi(publishSettingRoute, async (c) => {
 
   try {
     const setting = await publishSetting({
+      organizationId: actorOrganizationId(c),
       key: data.key,
       value: data.value,
       dataType: data.data_type,
@@ -4763,7 +4982,7 @@ app.openapi(retireSettingRoute, async (c) => {
   const me = currentUser(c);
   if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
   const { key } = c.req.valid("param");
-  const retired = await retireSetting(key, me.id);
+  const retired = await retireSetting(actorOrganizationId(c), key, me.id);
   if (!retired) return c.json({ error: "No active version for this key" }, 404);
   return c.json({ ok: true }, 200);
 });
@@ -5059,6 +5278,7 @@ const retryJobSync = createRoute({
   responses: {
     200: { description: "Retried", content: { "application/json": { schema: JobSyncStatusSchema } } },
     400: { description: "Not connected", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
@@ -5067,6 +5287,14 @@ app.openapi(retryJobSync, async (c) => {
   const { id } = c.req.valid("param");
   const integration = await get("SELECT id FROM calendar_integrations WHERE user_id = ?", [user.id]);
   if (!integration) return c.json({ error: "Google Calendar is not connected" }, 400);
+  // Phase 11.5: syncJobForUser()'s own job lookup has no organization
+  // filter (it's an internal engine function, not a route) — without this
+  // check, an actor could retry-sync another organization's job straight
+  // into their own connected Google Calendar.
+  const ownedJob = await get<{ id: number }>(
+    "SELECT id FROM jobs WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]
+  );
+  if (!ownedJob) return c.json({ error: "Job not found" }, 404);
 
   await syncJobForUser(googleEnv(c), user.id, Number(id));
   const mapping = await get<{ sync_status: string; sync_error: string; last_synced_at: string | null }>(

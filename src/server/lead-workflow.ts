@@ -62,8 +62,8 @@ const LEAD_LOST_REASON_SETTING_KEY = "LEAD_LOST_REASON_OPTIONS";
 /** Resolved against the existing Global Settings catalog (migration 0010) —
  *  never hardcoded here. Returns [] (rejecting every "lost" transition) if
  *  the catalog is somehow missing rather than silently accepting anything. */
-async function getLeadLostReasonCatalog(): Promise<string[]> {
-  const options = await getSettingValue<string[]>(LEAD_LOST_REASON_SETTING_KEY);
+async function getLeadLostReasonCatalog(organizationId: number): Promise<string[]> {
+  const options = await getSettingValue<string[]>(organizationId, LEAD_LOST_REASON_SETTING_KEY);
   return options ?? [];
 }
 
@@ -83,6 +83,7 @@ export interface LeadWorkflowRow {
   status: string;
   lost_reason: string;
   lost_reason_note: string;
+  organization_id: number;
 }
 
 export interface TransitionLeadInput {
@@ -91,6 +92,9 @@ export interface TransitionLeadInput {
    *  NEVER a value trusted from a request body. Recorded on the history row
    *  exactly as given; this module does no identity resolution of its own. */
   actorUserId: number;
+  /** Real, server-resolved organization id — a lead belonging to a
+   *  different organization is treated as not found. */
+  organizationId: number;
   /** Free-text context for the history row; irrelevant when toStatus is
    *  "lost" (lostReason is used instead — see below). */
   reason?: string;
@@ -134,8 +138,8 @@ export async function transitionLead(
   input: TransitionLeadInput
 ): Promise<LeadTransitionOutcome> {
   const lead = await get<LeadWorkflowRow>(
-    "SELECT id, status, lost_reason, lost_reason_note FROM leads WHERE id = ?",
-    [leadId]
+    "SELECT id, status, lost_reason, lost_reason_note, organization_id FROM leads WHERE id = ? AND organization_id = ?",
+    [leadId, input.organizationId]
   );
   if (!lead) throw new LeadWorkflowError("not_found", "Lead not found");
 
@@ -161,7 +165,7 @@ export async function transitionLead(
     if (!reason) {
       throw new LeadWorkflowError("missing_data", "A lost reason is required to mark a Lead as lost");
     }
-    const catalog = await getLeadLostReasonCatalog();
+    const catalog = await getLeadLostReasonCatalog(lead.organization_id);
     if (!catalog.includes(reason)) {
       throw new LeadWorkflowError("missing_data", `"${reason}" is not a recognized lost reason`);
     }
@@ -199,7 +203,7 @@ export async function transitionLead(
   }
 
   return {
-    lead: { id: leadId, status: toStatus, lost_reason: lostReason, lost_reason_note: lostReasonNote },
+    lead: { id: leadId, status: toStatus, lost_reason: lostReason, lost_reason_note: lostReasonNote, organization_id: lead.organization_id },
     fromStatus: lead.status as LeadStatus,
     toStatus,
   };

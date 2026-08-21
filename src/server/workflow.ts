@@ -311,6 +311,10 @@ export class WorkflowError extends Error {
 
 export interface TransitionInput {
   toStatus: string;
+  /** Real, server-resolved organization id — never a value trusted from a
+   *  request body. A job belonging to a different organization is treated
+   *  as not found. */
+  organizationId: number;
   reason?: string;
   eligibilityCode?: string;
   eligibilityCodeExpiry?: string;
@@ -337,8 +341,8 @@ export async function transitionJob(
   input: TransitionInput
 ): Promise<TransitionOutcome> {
   const job = await get<WorkflowJobRow>(
-    "SELECT id, status, job_type, technician_id, eligibility_code, eligibility_code_expiry FROM jobs WHERE id = ?",
-    [jobId]
+    "SELECT id, status, job_type, technician_id, eligibility_code, eligibility_code_expiry FROM jobs WHERE id = ? AND organization_id = ?",
+    [jobId, input.organizationId]
   );
   if (!job) throw new WorkflowError("not_found", "Job not found");
 

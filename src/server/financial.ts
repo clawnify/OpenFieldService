@@ -95,10 +95,10 @@ async function nextInvoiceIdentifier(): Promise<string> {
  *  admin-configurable flat-amount model, not a simulation of actual CleanBC/
  *  BC Hydro program tiers/eligibility caps — this app has no authority to
  *  invent those rules, and none are hardcoded here. */
-async function computeRebateAmountCents(jobType: JobType, totalCents: number): Promise<number> {
+async function computeRebateAmountCents(organizationId: number, jobType: JobType, totalCents: number): Promise<number> {
   if (jobType === "STANDARD") return 0;
   const key = jobType === "CLEANBC" ? "CLEANBC_REBATE_AMOUNT_CENTS" : "BC_HYDRO_REBATE_AMOUNT_CENTS";
-  const configured = await getSettingValue<number>(key);
+  const configured = await getSettingValue<number>(organizationId, key);
   if (configured === null || configured <= 0) return 0;
   return Math.min(Math.round(configured), totalCents);
 }
@@ -181,14 +181,15 @@ export async function generateInvoiceForJob(
   }
 
   const totals = computeTotals(lines, 0);
-  const rebateAmountCents = await computeRebateAmountCents(job.job_type as JobType, totals.totalCents);
+  const organizationId = job.organization_id as number;
+  const rebateAmountCents = await computeRebateAmountCents(organizationId, job.job_type as JobType, totals.totalCents);
   const identifier = await nextInvoiceIdentifier();
 
   const statements = [
     db.prepare(
-      `INSERT INTO invoices (identifier, customer_id, job_id, status, subtotal_cents, tax_rate, tax_amount_cents, rebate_amount_cents, total_cents, notes, due_date)
-       VALUES (?, ?, ?, 'draft', ?, 0, ?, ?, ?, '', '')`
-    ).bind(identifier, job.customer_id, jobId, totals.subtotalCents, totals.taxAmountCents, rebateAmountCents, totals.totalCents),
+      `INSERT INTO invoices (identifier, organization_id, customer_id, job_id, status, subtotal_cents, tax_rate, tax_amount_cents, rebate_amount_cents, total_cents, notes, due_date)
+       VALUES (?, ?, ?, ?, 'draft', ?, 0, ?, ?, ?, '', '')`
+    ).bind(identifier, organizationId, job.customer_id, jobId, totals.subtotalCents, totals.taxAmountCents, rebateAmountCents, totals.totalCents),
     ...lines.map((line) =>
       db.prepare(
         `INSERT INTO invoice_lines (invoice_id, description, quantity, unit_price_cents, total_cents)
@@ -222,6 +223,7 @@ export async function generateInvoiceForJob(
 }
 
 export interface ManualInvoiceInput {
+  organizationId: number;
   customerId: number;
   jobId: number | null;
   taxRatePercent: number;
@@ -251,9 +253,9 @@ export async function createManualInvoice(
 
   const statements = [
     db.prepare(
-      `INSERT INTO invoices (identifier, customer_id, job_id, status, subtotal_cents, tax_rate, tax_amount_cents, rebate_amount_cents, total_cents, notes, due_date)
-       VALUES (?, ?, ?, 'draft', ?, ?, ?, 0, ?, ?, ?)`
-    ).bind(identifier, input.customerId, input.jobId, totals.subtotalCents, input.taxRatePercent, totals.taxAmountCents, totals.totalCents, input.notes, input.dueDate),
+      `INSERT INTO invoices (identifier, organization_id, customer_id, job_id, status, subtotal_cents, tax_rate, tax_amount_cents, rebate_amount_cents, total_cents, notes, due_date)
+       VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, 0, ?, ?, ?)`
+    ).bind(identifier, input.organizationId, input.customerId, input.jobId, totals.subtotalCents, input.taxRatePercent, totals.taxAmountCents, totals.totalCents, input.notes, input.dueDate),
     ...input.lines.map((line) =>
       db.prepare(
         `INSERT INTO invoice_lines (invoice_id, description, quantity, unit_price_cents, total_cents)

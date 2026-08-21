@@ -36,9 +36,9 @@ export interface RebateEligibilityResult {
 }
 
 async function houseSizeCriterion(
-  profile: CustomerRebateProfile, asOf: string | undefined, key: string, used: Record<string, number | null>
+  organizationId: number, profile: CustomerRebateProfile, asOf: string | undefined, key: string, used: Record<string, number | null>
 ): Promise<RebateCriterion> {
-  const max = await getSettingValue<number>(key, asOf);
+  const max = await getSettingValue<number>(organizationId, key, asOf);
   used[key] = max;
   if (max === null) {
     return { key: "house_size", label: "House size within program limit", satisfied: null, detail: `${key} is not configured in Global Settings` };
@@ -54,9 +54,9 @@ async function houseSizeCriterion(
 }
 
 async function incomeCriterion(
-  profile: CustomerRebateProfile, asOf: string | undefined, key: string, used: Record<string, number | null>
+  organizationId: number, profile: CustomerRebateProfile, asOf: string | undefined, key: string, used: Record<string, number | null>
 ): Promise<RebateCriterion> {
-  const max = await getSettingValue<number>(key, asOf);
+  const max = await getSettingValue<number>(organizationId, key, asOf);
   used[key] = max;
   if (max === null) {
     return { key: "household_income", label: "Household income within program limit", satisfied: null, detail: `${key} is not configured in Global Settings` };
@@ -80,34 +80,35 @@ async function incomeCriterion(
  *  fallback onto another program's rules. Frozen: this module is the only
  *  place a program may ever be registered. */
 const REBATE_PROGRAM_REGISTRY: Readonly<Partial<Record<JobType, {
-  buildCriteria(profile: CustomerRebateProfile, asOf: string | undefined, used: Record<string, number | null>): Promise<RebateCriterion[]>;
+  buildCriteria(organizationId: number, profile: CustomerRebateProfile, asOf: string | undefined, used: Record<string, number | null>): Promise<RebateCriterion[]>;
 }>>> = Object.freeze({
   CLEANBC: {
-    async buildCriteria(profile, asOf, used) {
+    async buildCriteria(organizationId, profile, asOf, used) {
       return Promise.all([
-        houseSizeCriterion(profile, asOf, "CLEANBC_MAX_HOUSE_SIZE", used),
-        incomeCriterion(profile, asOf, "CLEANBC_MAX_HOUSEHOLD_INCOME", used),
+        houseSizeCriterion(organizationId, profile, asOf, "CLEANBC_MAX_HOUSE_SIZE", used),
+        incomeCriterion(organizationId, profile, asOf, "CLEANBC_MAX_HOUSEHOLD_INCOME", used),
       ]);
     },
   },
   BC_HYDRO: {
-    async buildCriteria(profile, asOf, used) {
-      return Promise.all([incomeCriterion(profile, asOf, "BC_HYDRO_MAX_HOUSEHOLD_INCOME", used)]);
+    async buildCriteria(organizationId, profile, asOf, used) {
+      return Promise.all([incomeCriterion(organizationId, profile, asOf, "BC_HYDRO_MAX_HOUSEHOLD_INCOME", used)]);
     },
   },
 });
 
 /** Computes (does not persist) whether a customer's rebate profile currently
  *  appears eligible for `jobType`'s program, per whatever thresholds are
- *  configured as of `asOf` (default now). Pass a past ISO timestamp to
- *  reproduce a historical evaluation exactly as it was computed at the time —
- *  see recordEligibilityCheck() for the persisted/audited version of this. */
+ *  configured (for `organizationId`) as of `asOf` (default now). Pass a past
+ *  ISO timestamp to reproduce a historical evaluation exactly as it was
+ *  computed at the time — see recordEligibilityCheck() for the persisted/
+ *  audited version of this. */
 export async function evaluateRebateEligibility(
-  jobType: JobType, profile: CustomerRebateProfile, asOf?: string
+  organizationId: number, jobType: JobType, profile: CustomerRebateProfile, asOf?: string
 ): Promise<RebateEligibilityResult> {
   const thresholdsUsed: Record<string, number | null> = {};
   const program = REBATE_PROGRAM_REGISTRY[jobType];
-  const criteria = program ? await program.buildCriteria(profile, asOf, thresholdsUsed) : [];
+  const criteria = program ? await program.buildCriteria(organizationId, profile, asOf, thresholdsUsed) : [];
   const allowed = criteria.length === 0 || criteria.some((c) => c.satisfied === null)
     ? null
     : criteria.every((c) => c.satisfied);
@@ -129,9 +130,9 @@ export interface RebateAuditRow {
  *  so a later Global Settings change can never alter what this row says
  *  happened. */
 export async function recordEligibilityCheck(
-  jobId: number, actorId: number, jobType: JobType, profile: CustomerRebateProfile
+  organizationId: number, jobId: number, actorId: number, jobType: JobType, profile: CustomerRebateProfile
 ): Promise<RebateEligibilityResult> {
-  const result = await evaluateRebateEligibility(jobType, profile);
+  const result = await evaluateRebateEligibility(organizationId, jobType, profile);
   await run(
     "INSERT INTO job_rebate_audit (job_id, event_type, actor_user_id, details) VALUES (?, 'eligibility_check', ?, ?)",
     [jobId, actorId, JSON.stringify({ profile, result })]
@@ -178,8 +179,8 @@ export interface EligibilityCodeRow {
  *  non-expired, non-submitted code is reported "active" and the caller is told
  *  via `warningDaysConfigured: false` to prompt for configuration rather than
  *  silently guessing a warning window. */
-export async function listEligibilityCodes(): Promise<{ rows: EligibilityCodeRow[]; warningDaysConfigured: boolean }> {
-  const warningDays = await getSettingValue<number>("CLEANBC_ELIGIBILITY_WARNING_DAYS");
+export async function listEligibilityCodes(organizationId: number): Promise<{ rows: EligibilityCodeRow[]; warningDaysConfigured: boolean }> {
+  const warningDays = await getSettingValue<number>(organizationId, "CLEANBC_ELIGIBILITY_WARNING_DAYS");
   const jobs = await query<{
     id: number; identifier: string; status: string; eligibility_code: string; eligibility_code_expiry: string;
     customer_name: string | null; technician_name: string | null; technician_id: number | null;
@@ -189,8 +190,9 @@ export async function listEligibilityCodes(): Promise<{ rows: EligibilityCodeRow
      FROM jobs j
      LEFT JOIN customers c ON j.customer_id = c.id
      LEFT JOIN technicians t ON j.technician_id = t.id
-     WHERE j.job_type = 'CLEANBC' AND j.eligibility_code != ''
-     ORDER BY j.eligibility_code_expiry ASC`
+     WHERE j.organization_id = ? AND j.job_type = 'CLEANBC' AND j.eligibility_code != ''
+     ORDER BY j.eligibility_code_expiry ASC`,
+    [organizationId]
   );
   const now = Date.now();
   const rows: EligibilityCodeRow[] = jobs.map((j) => {
