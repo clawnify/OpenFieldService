@@ -1,47 +1,91 @@
 import { get } from "./db.js";
 import type { Role } from "./auth.js";
+import { BC_PROGRAM_JOB_TYPES, BC_PROGRAM_STATUS_LABELS } from "./modules/programs/bc/workflow-definitions.js";
 
 /**
  * Central job-workflow engine. This is the ONLY place status-transition rules
  * live — API routes and the client must call into this module rather than
  * re-implement any part of the state machine. See `transitionJob()` for the
  * single authoritative entry point that actually changes a job's status.
+ *
+ * Phase 11.2 — this file is also the single authoritative job-type/workflow
+ * REGISTRY: JobType, JOB_TYPES, isJobType, and WORKFLOWS below are all
+ * derived from one JOB_TYPE_REGISTRY object rather than separately
+ * hardcoded. STANDARD is Core's own default job type (every industry needs a
+ * plain, non-program job); CLEANBC and BC_HYDRO are contributed as pure
+ * shape DATA by the BC regional-program module (see
+ * modules/programs/bc/workflow-definitions.ts — no business logic there,
+ * only status sequences/labels). This file is a narrowly-scoped, documented
+ * exception to Phase 11.1's "Core never imports modules/**" rule (see
+ * scripts/check-architecture-boundaries.mjs's COMPOSITION_ROOTS): the
+ * registry and the engine functions that close over it (forwardTransitions,
+ * transitionJob, etc.) must live in the same module scope, so composing the
+ * registry from Core's own default plus each module's contribution has to
+ * happen here rather than in a separate file. This does NOT mean Core is
+ * fully decoupled from BC — it still names "CLEANBC"/"BC_HYDRO" as registry
+ * keys (there is no dynamic/database-driven job-type system in this phase,
+ * see the Phase 11.2 addendum in docs/PLATFORM-GENERALIZATION-AUDIT.md for
+ * why) — but the actual workflow SHAPE (status order, status labels) no
+ * longer lives here as an inline literal.
  */
 
-export type JobType = "STANDARD" | "CLEANBC" | "BC_HYDRO";
-
-export const JOB_TYPES: JobType[] = ["STANDARD", "CLEANBC", "BC_HYDRO"];
-
-export function isJobType(value: string): value is JobType {
-  return (JOB_TYPES as string[]).includes(value);
+export interface JobTypeDefinition {
+  /** Ordered status sequence — index order IS the forward-progression rule.
+   *  "cancelled" is deliberately not listed: it's a universal transition
+   *  available from any non-terminal status (see forwardTransitions). */
+  statusSequence: readonly string[];
 }
 
-/** Ordered status sequence per job type — index order IS the forward-progression
- *  rule. "cancelled" is deliberately not listed here: it's a universal transition
- *  available from any non-terminal status in any workflow (see forwardTransitions). */
-export const WORKFLOWS: Record<JobType, readonly string[]> = {
-  STANDARD: ["scheduled", "in_progress", "completed", "invoiced"],
-  CLEANBC: [
-    "free_estimate", "application_pending", "eligibility_approved",
-    "install_scheduled", "in_progress", "completed", "gov_portal_submitted",
-  ],
-  BC_HYDRO: ["free_estimate", "install_scheduled", "in_progress", "completed", "gov_portal_submitted"],
-};
+const JOB_TYPE_REGISTRY = Object.freeze({
+  STANDARD: { statusSequence: ["scheduled", "in_progress", "completed", "invoiced"] },
+  ...BC_PROGRAM_JOB_TYPES,
+}) satisfies Readonly<Record<string, JobTypeDefinition>>;
 
-export const STATUS_LABELS: Record<string, string> = {
+export type JobType = keyof typeof JOB_TYPE_REGISTRY;
+
+export const JOB_TYPES: JobType[] = Object.keys(JOB_TYPE_REGISTRY) as JobType[];
+
+export function isJobType(value: string): value is JobType {
+  return Object.prototype.hasOwnProperty.call(JOB_TYPE_REGISTRY, value);
+}
+
+/** Small explicit accessor API (Phase 11.2) — prefer these over indexing
+ *  JOB_TYPE_REGISTRY/WORKFLOWS directly in new code. Both fail safely on an
+ *  unregistered id: getJobTypeDefinition's parameter type only accepts a
+ *  narrowed JobType (use isJobType() first to narrow an arbitrary string),
+ *  so there is no silent default — an unrecognized value simply cannot be
+ *  passed in at all. */
+export function getJobTypeDefinition(id: JobType): JobTypeDefinition {
+  return JOB_TYPE_REGISTRY[id];
+}
+
+export function listJobTypeDefinitions(): ReadonlyArray<{ id: JobType; definition: JobTypeDefinition }> {
+  return JOB_TYPES.map((id) => ({ id, definition: JOB_TYPE_REGISTRY[id] }));
+}
+
+export const WORKFLOWS: Record<JobType, readonly string[]> = Object.freeze(Object.fromEntries(
+  JOB_TYPES.map((id) => [id, JOB_TYPE_REGISTRY[id].statusSequence])
+)) as unknown as Record<JobType, readonly string[]>;
+
+export const STATUS_LABELS: Record<string, string> = Object.freeze({
   scheduled: "Scheduled",
   in_progress: "In Progress",
   completed: "Completed",
   invoiced: "Invoiced",
-  free_estimate: "Free Estimate",
-  application_pending: "Application Pending",
-  eligibility_approved: "Eligibility Approved",
-  install_scheduled: "Install Scheduled",
-  gov_portal_submitted: "Gov Portal Submitted",
   cancelled: "Cancelled",
-};
+  ...BC_PROGRAM_STATUS_LABELS,
+});
 
-const TERMINAL_STATUSES = new Set(["invoiced", "gov_portal_submitted"]);
+/** Derived from WORKFLOWS rather than hardcoded: "terminal" means "the last
+ *  status in some job type's sequence" — for STANDARD that's "invoiced", for
+ *  CLEANBC/BC_HYDRO that's "gov_portal_submitted". This removes Core's only
+ *  remaining hardcoded literal reference to a BC-specific status name. */
+const TERMINAL_STATUSES = new Set(
+  JOB_TYPES.map((id) => {
+    const seq = WORKFLOWS[id];
+    return seq[seq.length - 1];
+  })
+);
 
 export function isTerminalStatus(status: string): boolean {
   return TERMINAL_STATUSES.has(status);

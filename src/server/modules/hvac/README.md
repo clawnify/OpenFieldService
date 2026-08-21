@@ -1,12 +1,14 @@
 # HVAC industry module (server) — reserved, no code yet
 
-No server file currently lives here. `jobs.job_type`'s HVAC/rebate-program
-values (`CLEANBC`, `BC_HYDRO`) and their `WORKFLOWS` sequences are still
-defined in core `src/server/workflow.ts`, tightly coupled to the generic
-workflow *engine* that also lives there. Splitting the *data* (which job
-types/statuses exist) from the *engine* (the state-machine mechanics) is
-real logic work, not a file move — reserved for Phase 11.2 ("Extract
-`job_type`/`WORKFLOWS` into a data-driven registry").
-
-See `docs/PLATFORM-GENERALIZATION-AUDIT.md` sections 4, 10, and 11 for the
-full analysis of why this wasn't moved in Phase 11.1.
+No server file currently lives here. Phase 11.2 (see
+`docs/PLATFORM-GENERALIZATION-AUDIT.md` §22) turned `src/server/workflow.ts`'s
+`WORKFLOWS`/`JobType` into a registry composed from Core's own `STANDARD`
+definition plus data contributed by `modules/programs/bc/` — but the
+generic workflow *engine* (`forwardTransitions`, `transitionJob`, the
+registry composition itself) stays in Core's `workflow.ts`, not here,
+because the engine and the registry it closes over must share one module
+scope (see workflow.ts's own header comment for the full reasoning). This
+directory remains reserved for genuinely HVAC-industry-specific server
+code, should any emerge in a later phase — there is currently none, since
+`STANDARD` (Core's own default) is the only non-program job type and
+nothing HVAC-specific has been identified beyond it.

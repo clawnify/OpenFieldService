@@ -11,17 +11,24 @@
 //
 // Rule: files outside src/{server,client}/modules/ ("Core") must never import
 // from src/{server,client}/modules/** ("Industry/Regional modules") — except
-// the two composition roots (src/server/index.ts, src/client/app.tsx), which
-// are explicitly allowed to import every module (that's their job). Within
-// modules/, an industry module (hvac/) must never import from a regional
-// program module (programs/**) — the allowed dependency direction is the
-// reverse (programs may depend on an industry module when genuinely
-// necessary), never industry-on-region.
+// the composition roots, which are explicitly allowed to import a module
+// (that's their job). Within modules/, an industry module (hvac/) must never
+// import from a regional program module (programs/**) — the allowed
+// dependency direction is the reverse (programs may depend on an industry
+// module when genuinely necessary), never industry-on-region.
+//
+// Composition roots: src/server/index.ts and src/client/app.tsx (the two
+// application-composition entry points, allowed to import every module), plus
+// src/server/workflow.ts (Phase 11.2 — narrowly-scoped exception: Core's
+// job-type/workflow registry must be assembled in the same module scope as
+// the engine functions that consume it, so workflow.ts imports ONLY pure
+// data — no business logic — from modules/programs/bc/workflow-definitions.ts.
+// See workflow.ts's own header comment for the full justification.
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
 const ROOTS = ["src/server", "src/client"];
-const COMPOSITION_ROOTS = new Set(["src/server/index.ts", "src/client/app.tsx"]);
+const COMPOSITION_ROOTS = new Set(["src/server/index.ts", "src/client/app.tsx", "src/server/workflow.ts"]);
 const IMPORT_RE = /(?:from|import)\s*\(?\s*["']([^"']+)["']/g;
 
 async function walk(dir) {
@@ -91,7 +98,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("✅ Architecture boundaries clean: no Core file imports a module (outside the two composition roots), and no HVAC file imports a regional-program file.");
+  console.log("✅ Architecture boundaries clean: no Core file imports a module (outside the composition roots), and no HVAC file imports a regional-program file.");
 }
 
 main().catch((err) => {

@@ -455,3 +455,66 @@ Both moves confirmed pure renames via `git diff --find-renames` (net diff: 5 fil
 ### Status
 
 Phase 11.1 IMPLEMENTED / VERIFIED / **NOT COMMITTED** this session (a separate Phase 11.1 Safe-Commit checkpoint follows, matching the established Phase 10/11.0 pattern). Zero intentional behavior change anywhere. Phase 11.2 (data-driven `JobType`/`WORKFLOWS` registry) is the natural next step and is NOT STARTED.
+
+*(Editorial note, added during the Phase 11.2 addendum below without altering the record above: Phase 11.1 was committed at `5b20035` in its own Safe-Commit checkpoint before Phase 11.2 began.)*
+
+## 22. Phase 11.2 addendum — Data-Driven Job Type / Workflow Registry (2026-08-21)
+
+Removed the §17 risk-register P1 ("hardcoded `JobType` union + `WORKFLOWS` duplicated across files") to the extent achievable without a database-driven job-type system (explicitly out of scope this phase) or an excessive engine-wide dependency-injection refactor (explicitly discouraged by the task). **Zero intentional runtime/business-logic change.**
+
+### Old architecture
+
+`src/server/workflow.ts` declared `JobType`, `JOB_TYPES`, `isJobType()`, and `WORKFLOWS` as independent hardcoded literals in one file, with CLEANBC's and BC_HYDRO's full status sequences inlined directly alongside STANDARD's. `src/client/types.ts` (`JobType`) and `src/client/job-type-labels.ts` (`JOB_TYPE_OPTIONS`) duplicated the same 3-value union as a second, physically separate declaration, with no automated check that the two stayed in sync.
+
+### New architecture
+
+`src/server/workflow.ts` is now the single authoritative **registry**: a `JOB_TYPE_REGISTRY` object composed from Core's own `STANDARD` definition plus `BC_PROGRAM_JOB_TYPES` (new file: `src/server/modules/programs/bc/workflow-definitions.ts` — pure data, zero business logic, sibling to `rebate.ts`). `JobType`, `JOB_TYPES`, `isJobType()`, `WORKFLOWS`, and `STATUS_LABELS` are all **derived** from that one object rather than separately hardcoded. `TERMINAL_STATUSES` is now derived too (the last status of each job type's sequence), removing Core's last remaining hardcoded literal reference to the BC-specific status name `gov_portal_submitted`. The registry and `STATUS_LABELS` are both `Object.freeze()`d (immutable runtime configuration, per the task's §23). A small explicit accessor API was added: `getJobTypeDefinition(id)` and `listJobTypeDefinitions()` (§15) — additive, existing call sites (`WORKFLOWS`, `JOB_TYPES`, `isJobType`, `entryStatus`, `transitionJob`, etc.) are unchanged and were not required to switch to the new accessors.
+
+### Registry ownership / composition root
+
+```
+Core (workflow.ts): engine mechanics (forwardTransitions, transitionJob,
+                     resolveAllowedTransitions, canCompleteJob, ...) +
+                     STANDARD's own definition + the registry-composition
+                     itself
+        ↑ imports (narrowly-scoped exception, see below)
+        |
+modules/programs/bc/workflow-definitions.ts: pure CLEANBC/BC_HYDRO
+        status-sequence and status-label DATA, no logic
+```
+
+This is a **documented, narrow exception** to Phase 11.1's "Core never imports `modules/**`" rule, added to `scripts/check-architecture-boundaries.mjs`'s `COMPOSITION_ROOTS` alongside `index.ts`/`app.tsx`. The reason it has to live in `workflow.ts` itself rather than a separate composition file: the registry and the engine functions that close over it (`WORKFLOWS`, `TERMINAL_STATUSES`, `transitionJob`, etc.) must share one module scope in JavaScript — there is exactly one registry in this application (no per-tenant/per-request swapping), so a full dependency-injection refactor threading a registry parameter through every engine function and all of its callers (`index.ts`, `financial.ts`, `modules/programs/bc/rebate.ts`) was judged **excessive refactoring for no behavioral benefit**, which the task explicitly says to avoid (§4, §5). This is a considered trade-off, not an oversight — see workflow.ts's own header comment for the full reasoning, restated inline where the exception is used.
+
+**Honesty note (§20's own requirement):** this does NOT mean Core is fully decoupled from the BC program. `workflow.ts` still literally names `"CLEANBC"`/`"BC_HYDRO"` as registry keys when composing `JOB_TYPE_REGISTRY` (`{ STANDARD: {...}, ...BC_PROGRAM_JOB_TYPES }`) — there is no dynamic/database-driven job-type system (explicitly out of scope, §6). What changed is that the actual workflow **shape** (status order, status labels) for CLEANBC/BC_HYDRO no longer lives in Core as an inline literal — it's sourced from the BC module. The Core engine functions themselves (`forwardTransitions`, `resolveAllowedTransitions`, `transitionJob`, `canCompleteJob`) contain **no** `if (jobType === "CLEANBC")`-style dispatch and never did — they were already generic lookups into the data structure; the P1 issue was the *data's location*, not engine dispatch logic.
+
+### JobType source of truth
+
+Server: `keyof typeof JOB_TYPE_REGISTRY` in `workflow.ts` — genuinely derived, not a duplicate beside the registry. Client: `src/client/types.ts`'s `JobType` type remains a **second, physically necessary** declaration — the server/client bundle boundary (preserved from Phase 11.1, security-relevant: server code must never ship to the browser) means there is no shared module either side can import from. This second declaration is not left to silently drift: a new test (`test/job-type-registry.test.ts`, "client job-type mirror stays in sync with the server registry") imports both `JOB_TYPES` (server) and `JOB_TYPE_OPTIONS`/`JOB_TYPE_LABELS` (client) into the same test file — both are plain, dependency-free data modules with no DOM/preact runtime requirement — and asserts they match. This is the accepted, documented mitigation for the one duplication a hard bundle boundary makes structurally unavoidable without a database-driven or shared-package system (both out of scope).
+
+### Registered job types / stable IDs / API compatibility
+
+Unchanged: `STANDARD`, `CLEANBC`, `BC_HYDRO` — same 3 values, same order, same persisted/API strings. No migration. No API contract change: `job_type: z.enum(JOB_TYPES as [JobType, ...JobType[]])` in `index.ts` still sources its enum from the same exported `JOB_TYPES`, which still contains the identical 3 values.
+
+### Behavioral equivalence — verified live, not just by test
+
+Beyond the automated suite, this session created one job of each type through the real running application (`pnpm run dev`, Playwright, admin login, the actual "New Job" form) and queried the resulting rows directly in the local D1 database:
+
+| job_type | entry status (live DB row) | expected (pre-refactor `WORKFLOWS[type][0]`) |
+|---|---|---|
+| STANDARD | `scheduled` | `scheduled` |
+| CLEANBC | `free_estimate` | `free_estimate` |
+| BC_HYDRO | `free_estimate` | `free_estimate` |
+
+All three match exactly. Fixture jobs deleted after verification (`job_status_history` then `jobs` rows for the 3 created IDs) — no synthetic data left in the local dev DB.
+
+### Remaining BC/rebate coupling — explicitly deferred to Phase 11.3
+
+Untouched by this phase, exactly as instructed: `workflow.ts`'s one status-name check (`if (input.toStatus === "eligibility_approved")` inside `transitionJob`, required for the eligibility-code data capture on that specific transition), `financial.ts`'s `computeRebateAmountCents()` dispatch (`jobType === "CLEANBC" ? ... : ...`), `index.ts`'s 6 inline rebate/eligibility routes, and `settings-catalog.ts`'s mixed BC/Core settings catalog. All are rebate **business logic**, not job-type/workflow **shape** — Phase 11.3's own charter.
+
+### Verification result
+
+`tsc`/`eslint`/`check:architecture`/`vite build` all clean; production client bundle byte-identical (`index-B2RyNlRb.css`, `index-C406QDpN.js` — unchanged, since Phase 11.2 touched zero client files). Full suite: 923 pre-existing + 13 new registry tests = **936/936**. Targeted domain subset (rebate/workflow/scheduling/technician-route/maps-routing/google-calendar/notifications/leads/financial/compliance/global-settings/timezone/job-type-registry): 623/623. This session observed intermittent, non-deterministic test timeouts under full-parallel-suite load (a different random unrelated test each run — calendar-sync-concurrency, customer-referral, notification-history-api, rebate's own referral-profile test, settings category filter, technician-stats-scoping) that always passed cleanly when re-run in isolation; classified as pre-existing environmental/PBKDF2-cost resource contention (consistent with `vitest.config.ts`'s own documented timeout-headroom comment), not a Phase 11.2 regression — none of the intermittently-failing tests touch `JobType`/workflow code.
+
+### Status
+
+Phase 11.2 IMPLEMENTED / VERIFIED / **NOT COMMITTED** this session (a separate Phase 11.2 Safe-Commit checkpoint follows). Zero intentional behavior change anywhere. §17's P1 "hardcoded JobType/WORKFLOWS" risk is **PARTIALLY CLOSED** (single authoritative server-side registry; client mirror now automatically verified in sync; Core's workflow *shape* knowledge of CLEANBC/BC_HYDRO relocated to the BC module) — not CLOSED outright, since Core's registry composition still names the BC program's job-type IDs by design (see honesty note above). Phase 11.3 (rebate/regional-program business-logic extraction) is NOT STARTED.
