@@ -633,6 +633,65 @@ describe("manual sync and retry", () => {
     mapping = await queryDb("SELECT sync_status FROM calendar_event_mappings WHERE job_id = ?", [job.id]);
     expect(mapping[0].sync_status).toBe("synced");
   });
+
+  it("Org A cannot retry-sync Org B's job into Org A's own connected calendar (Phase 11.6 tenant isolation)", async () => {
+    google = mockGoogleApi();
+    const auth = await authHeaders(); // Org A admin, with a real connected calendar
+    await connectGoogleCalendar((auth.headers as Record<string, string>).cookie);
+
+    const orgB = await createSecondOrganization("Org B Field Services");
+    const { cookie: cookieB } = await loginAs(orgB.email, orgB.password);
+    const authB: RequestInit = { headers: { cookie: cookieB } };
+    const customerB = await post<{ id: number }>(
+      "/api/customers", { name: "Org B Retry Customer", email: "orgb-retry@example.test", phone: "555-0198" }, authB
+    );
+    expect(customerB.response.status).toBe(201);
+    const jobB = await post<{ id: number }>(
+      "/api/jobs", { customer_id: customerB.body.id, scheduled_date: "2026-09-05" }, authB
+    );
+    expect(jobB.response.status).toBe(201);
+    google.state.calls = [];
+
+    const retry = await post(`/api/integrations/google-calendar/jobs/${jobB.body.id}/retry`, {}, auth);
+    expect(retry.response.status).toBe(404);
+    expect(google.state.calls).toHaveLength(0);
+  });
+});
+
+describe("automatic sync fan-out — tenant isolation (Phase 11.6)", () => {
+  it("a job created/edited/transitioned/deleted in Org A never reaches Org B's connected calendar", async () => {
+    google = mockGoogleApi();
+    const orgB = await createSecondOrganization("Org B Field Services");
+    const { cookie: cookieB } = await loginAs(orgB.email, orgB.password);
+    google.state.userEmail = "orgb-personal@gmail.com";
+    await connectGoogleCalendar(cookieB);
+    google.state.calls = [];
+
+    // Org A (the default org, no connected calendar of its own) creates,
+    // edits, transitions, then deletes a job. syncJobToAllConnectedUsers/
+    // deleteJobFromAllCalendars must never touch Org B's integration —
+    // before the Phase 11.6 fix, both fanned out to EVERY connected user
+    // platform-wide regardless of organization.
+    const authA = await authHeaders();
+    const customer = await createCustomer("Org A Customer");
+    const job = await createJob(customer.id, "2026-08-20");
+    expect(google.state.calls).toHaveLength(0);
+    expect(google.state.events.size).toBe(0);
+
+    await put(`/api/jobs/${job.id}`, { notes: "updated" }, authA);
+    expect(google.state.calls).toHaveLength(0);
+
+    await post(`/api/jobs/${job.id}/transition`, { to_status: "in_progress" }, authA);
+    expect(google.state.calls).toHaveLength(0);
+
+    await del(`/api/jobs/${job.id}`, authA);
+    expect(google.state.calls).toHaveLength(0);
+
+    // Org B's own calendar integration and mappings remain completely
+    // untouched throughout.
+    const mappings = await queryDb("SELECT * FROM calendar_event_mappings");
+    expect(mappings).toHaveLength(0);
+  });
 });
 
 describe("disconnect", () => {

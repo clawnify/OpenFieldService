@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
-  DEFAULT_ORGANIZATION_ID, applySchema, authHeaders, createUser, del, loginAs, post, queryDb, request, requestRaw, resetDatabase,
+  DEFAULT_ORGANIZATION_ID, applySchema, authHeaders, createSecondOrganization, createUser, del, loginAs, post, queryDb, request, requestRaw, resetDatabase,
 } from "./helpers.js";
 import {
   DEFAULT_BUSINESS_TIMEZONE, getBusinessTimezone, isValidIanaTimezone,
@@ -90,6 +90,24 @@ describe("Global Settings: BUSINESS_TIMEZONE", () => {
 
     const technicianRes = await post("/api/settings", { key: "BUSINESS_TIMEZONE", value: "America/Chicago", data_type: "string" }, { headers: { cookie: technician.cookie } });
     expect(technicianRes.response.status).toBe(403);
+  });
+
+  it("Phase 11.6: getBusinessTimezone() is organization-scoped — Org B never inherits Org A's configured value", async () => {
+    const auth = await authHeaders();
+    await post("/api/settings", { key: "BUSINESS_TIMEZONE", value: "America/New_York", data_type: "string" }, auth);
+    expect(await getBusinessTimezone(DEFAULT_ORGANIZATION_ID)).toBe("America/New_York");
+
+    // Org B never configured its own BUSINESS_TIMEZONE — must resolve to the
+    // system default (DEFAULT_BUSINESS_TIMEZONE), never Org A's value, and
+    // never crash on a missing row.
+    const orgB = await createSecondOrganization("TZ Org B");
+    expect(await getBusinessTimezone(orgB.organizationId)).toBe(DEFAULT_BUSINESS_TIMEZONE);
+
+    // Org B configuring its own value afterward doesn't disturb Org A's.
+    const { cookie: cookieB } = await loginAs(orgB.email, orgB.password);
+    await post("/api/settings", { key: "BUSINESS_TIMEZONE", value: "America/Chicago", data_type: "string" }, { headers: { cookie: cookieB } });
+    expect(await getBusinessTimezone(orgB.organizationId)).toBe("America/Chicago");
+    expect(await getBusinessTimezone(DEFAULT_ORGANIZATION_ID)).toBe("America/New_York");
   });
 
   it("a dispatcher CAN read the current settings list (read-only), matching existing settings RBAC", async () => {

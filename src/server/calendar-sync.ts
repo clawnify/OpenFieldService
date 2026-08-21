@@ -286,11 +286,23 @@ async function syncJobForUserClaimed(
 }
 
 /** Fans a single job's change out to every user with sync enabled. Isolated per
- *  user and never throws — a Google failure must never block a local job write. */
+ *  user and never throws — a Google failure must never block a local job write.
+ *
+ *  Phase 11.6: scoped to the job's own organization. Without this, a job
+ *  create/edit/status-change in ANY organization would push that job's
+ *  customer/technician/notes data into the personal Google Calendar of EVERY
+ *  user platform-wide who has sync enabled, regardless of which organization
+ *  they belong to — the same bug class as `syncAllJobsForUser`'s fixed P0,
+ *  just triggered automatically on every job mutation instead of "Sync Now". */
 export async function syncJobToAllConnectedUsers(env: CalendarSyncEnv, jobId: number): Promise<void> {
   try {
+    const job = await get<{ organization_id: number }>("SELECT organization_id FROM jobs WHERE id = ?", [jobId]);
+    if (!job) return;
     const integrations = await query<{ user_id: number }>(
-      "SELECT user_id FROM calendar_integrations WHERE sync_enabled = 1"
+      `SELECT ci.user_id FROM calendar_integrations ci
+       JOIN users u ON u.id = ci.user_id
+       WHERE ci.sync_enabled = 1 AND u.organization_id = ?`,
+      [job.organization_id]
     );
     for (const { user_id } of integrations) {
       await syncJobForUser(env, user_id, jobId).catch(() => "failed" as const);
@@ -311,11 +323,25 @@ export async function syncJobToAllConnectedUsers(env: CalendarSyncEnv, jobId: nu
  *  succeeded on Google but crashed before the mapping write ever happened —
  *  without this, that event would be orphaned forever. deleteEvent() is
  *  404/410-tolerant, so attempting a delete for a user/job pair with no actual
- *  event is a harmless no-op. */
+ *  event is a harmless no-op.
+ *
+ *  Phase 11.6: scoped to the job's own organization (job row still exists at
+ *  call time — this must run before the local delete, per the caller's own
+ *  contract above), same reasoning as `syncJobToAllConnectedUsers`. Without
+ *  this, deleting a job in ANY organization would attempt to delete a
+ *  same-id-shaped event out of EVERY other organization's connected users'
+ *  calendars too (harmless in practice since the deterministic id is
+ *  namespaced by this job's own id, but still an unauthorized cross-org
+ *  provider call this actor has no right to trigger). */
 export async function deleteJobFromAllCalendars(env: CalendarSyncEnv, jobId: number): Promise<void> {
   try {
+    const job = await get<{ organization_id: number }>("SELECT organization_id FROM jobs WHERE id = ?", [jobId]);
+    if (!job) return;
     const integrations = await query<{ user_id: number }>(
-      "SELECT user_id FROM calendar_integrations WHERE sync_enabled = 1"
+      `SELECT ci.user_id FROM calendar_integrations ci
+       JOIN users u ON u.id = ci.user_id
+       WHERE ci.sync_enabled = 1 AND u.organization_id = ?`,
+      [job.organization_id]
     );
     for (const { user_id } of integrations) {
       try {

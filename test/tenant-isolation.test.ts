@@ -385,6 +385,67 @@ describe("tenant isolation — users", () => {
     const selfDelete = await del(`/api/users/${bUser.body.user.id}`, b.auth);
     expect(selfDelete.response.status).toBe(400); // "cannot delete your own account" fires first, but the guard is org-scoped regardless
   });
+
+  it("Org A admin cannot escalate Org B's user role, deactivate them, or reset their password (account-takeover surface)", async () => {
+    const a = await orgA();
+    const b = await orgB();
+    const bUser = await request<{ user: { id: number; role: string; active: number } }>("/api/auth/me", b.auth);
+    const bUserId = bUser.body.user.id;
+
+    const escalate = await put(`/api/users/${bUserId}`, { role: "admin" }, a.auth);
+    expect(escalate.response.status).toBe(404);
+
+    const deactivate = await put(`/api/users/${bUserId}`, { active: 0 }, a.auth);
+    expect(deactivate.response.status).toBe(404);
+
+    const resetPassword = await put(`/api/users/${bUserId}/password`, { password: "HijackedPass1" }, a.auth);
+    expect(resetPassword.response.status).toBe(404);
+
+    // Confirm none of the above actually touched Org B's user row.
+    const stillIntact = await queryDb<{ role: string; active: number }>(
+      "SELECT role, active FROM users WHERE id = ?", [bUserId]
+    );
+    expect(stillIntact[0].role).toBe(bUser.body.user.role);
+    expect(stillIntact[0].active).toBe(bUser.body.user.active);
+    // Org B's own admin can still log in with their real password afterward.
+    const stillLoginable = await request<{ user: { id: number } }>("/api/auth/me", b.auth);
+    expect(stillLoginable.response.status).toBe(200);
+  });
+});
+
+describe("tenant isolation — notification history", () => {
+  it("Org A cannot read Org B's job/customer notification history", async () => {
+    const a = await orgA();
+    const b = await orgB();
+    const bCustomerId = await makeCustomer(b, "Org B Notif Customer");
+    const bJobId = await makeJob(b, bCustomerId, "2026-09-06");
+
+    const jobHistory = await request(`/api/jobs/${bJobId}/notifications`, a.auth);
+    expect(jobHistory.response.status).toBe(404);
+
+    const customerHistory = await request(`/api/customers/${bCustomerId}/notifications`, a.auth);
+    expect(customerHistory.response.status).toBe(404);
+  });
+});
+
+describe("tenant isolation — paginated count/total isolation", () => {
+  it("Org A's customer list total reflects only Org A's rows, even with Org B rows present", async () => {
+    const a = await orgA();
+    const b = await orgB();
+
+    const beforeA = await request<{ total: number }>("/api/customers?limit=1", a.auth);
+    const baselineTotal = beforeA.body.total;
+
+    // Give Org B 3 more customers than Org A gets, so a cross-org total leak
+    // (summing both orgs' counts) would be trivially detectable.
+    await makeCustomer(a, "Org A Extra Customer");
+    await makeCustomer(b, "Org B Extra Customer 1");
+    await makeCustomer(b, "Org B Extra Customer 2");
+    await makeCustomer(b, "Org B Extra Customer 3");
+
+    const afterA = await request<{ total: number }>("/api/customers?limit=1", a.auth);
+    expect(afterA.body.total).toBe(baselineTotal + 1);
+  });
 });
 
 describe("tenant isolation — organization_id mass-assignment resistance", () => {
