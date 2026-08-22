@@ -47,6 +47,21 @@ import {
   recordEligibilityFieldChange,
 } from "./modules/programs/bc/rebate.js";
 import {
+  AssetError,
+  ASSET_STATUSES,
+  canDeleteAsset,
+  canManageAssets,
+  createAsset,
+  deleteAsset,
+  getAsset,
+  linkAssetToJob,
+  listAssets,
+  listAssetsForJob,
+  unlinkAssetFromJob,
+  updateAsset,
+} from "./assets.js";
+import { HVAC_ASSET_TYPES } from "./modules/hvac/asset-types.js";
+import {
   CUSTOMER_REBATE_PROFILE_JOIN,
   CUSTOMER_REBATE_PROFILE_OVERRIDE_COLUMNS,
   getCustomerRebateProfile,
@@ -3348,6 +3363,335 @@ app.openapi(deleteTechnician, async (c) => {
 
   const { id } = c.req.valid("param");
   await run("DELETE FROM technicians WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
+  return c.json({ ok: true }, 200);
+});
+
+// ── Assets / Equipment (Phase 11.4) ──────────────────────────────────
+//
+// Core term is "Asset"; UI may label it "Equipment" for HVAC users (see
+// customer-assets.tsx/job-assets.tsx). ASSET_TYPE_REGISTRY is composed here
+// (index.ts is an allowed architecture-guard composition root) from Core's
+// own empty base plus the HVAC module's contributed type list — mirrors
+// Phase 11.2's JOB_TYPE_REGISTRY pattern for "avoid an HVAC-only Core
+// union," but needs no composition-root exception in assets.ts itself:
+// there's no per-type engine behavior to close over, just a flat label
+// lookup used for validation (below) and the GET /api/assets/types listing
+// endpoint. src/server/assets.ts (Core) never imports this registry or any
+// modules/** path.
+const ASSET_TYPE_REGISTRY: Record<string, { label: string }> = { ...HVAC_ASSET_TYPES };
+const ASSET_TYPES = Object.keys(ASSET_TYPE_REGISTRY);
+
+const AssetSchema = z.object({
+  id: z.number().int(),
+  customer_id: z.number().int(),
+  asset_type: z.string(),
+  display_name: z.string(),
+  manufacturer: z.string(),
+  model: z.string(),
+  serial_number: z.string(),
+  installation_date: z.string().nullable(),
+  status: z.string(),
+  notes: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).openapi("Asset");
+
+/** organization_id is deliberately never part of this schema (request or
+ *  response) — mass-assignment protection matching every other tenant-
+ *  scoped resource in this app; it is always server-derived from
+ *  actorOrganizationId(c), never client-supplied. */
+const AssetInputSchema = z.object({
+  customer_id: z.number().int(),
+  asset_type: z.enum(ASSET_TYPES as [string, ...string[]]).optional(),
+  display_name: z.string().max(200).optional(),
+  manufacturer: z.string().max(200).optional(),
+  model: z.string().max(200).optional(),
+  serial_number: z.string().max(200).optional(),
+  installation_date: z.string().nullable().optional(),
+  status: z.enum(ASSET_STATUSES as [string, ...string[]]).optional(),
+  notes: z.string().max(2000).optional(),
+}).strict();
+
+const AssetUpdateInputSchema = AssetInputSchema.partial().strict();
+
+/** createAsset/updateAsset can only ever throw "invalid_customer" (404) or
+ *  "invalid_date" (400) — narrowly typed per call site (rather than one
+ *  generically-typed helper covering every AssetError code) so each
+ *  route's actual, smaller set of possible response statuses matches what
+ *  its own OpenAPI `responses` declares. updateAsset has its own, wider
+ *  mapping below (it can also throw "reparent_blocked", 409). */
+function createAssetErrorResponse(err: AssetError): { body: { error: string }; status: 400 | 404 } {
+  if (err.code === "invalid_customer") return { body: { error: "Customer not found" }, status: 404 };
+  return { body: { error: err.message }, status: 400 };
+}
+
+function updateAssetErrorResponse(err: AssetError): { body: { error: string }; status: 400 | 404 | 409 } {
+  if (err.code === "invalid_customer") return { body: { error: "Customer not found" }, status: 404 };
+  if (err.code === "reparent_blocked") return { body: { error: err.message }, status: 409 };
+  return { body: { error: err.message }, status: 400 };
+}
+
+const listAssetTypes = createRoute({
+  method: "get",
+  path: "/api/assets/types",
+  responses: {
+    200: {
+      description: "Known asset types (Core + HVAC module contributions)",
+      content: { "application/json": { schema: z.object({ types: z.array(z.object({ key: z.string(), label: z.string() })) }) } },
+    },
+  },
+});
+
+app.openapi(listAssetTypes, async (c) => {
+  const types = Object.entries(ASSET_TYPE_REGISTRY).map(([key, v]) => ({ key, label: v.label }));
+  return c.json({ types }, 200);
+});
+
+const listAssetsRoute = createRoute({
+  method: "get",
+  path: "/api/assets",
+  request: {
+    query: z.object({
+      customer_id: z.string().optional(),
+      asset_type: z.string().optional(),
+      status: z.string().optional(),
+      manufacturer: z.string().max(200).optional(),
+      search: z.string().max(200).optional(),
+      limit: z.string().optional(),
+      offset: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Assets", content: { "application/json": { schema: z.object({ assets: z.array(AssetSchema), total: z.number().int() }) } } },
+    400: { description: "Search or manufacturer filter is too complex", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listAssetsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAssets({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const q = c.req.valid("query");
+  const limit = Math.min(Math.max(parseInt(q.limit || "50", 10) || 50, 1), 200);
+  const offset = Math.max(parseInt(q.offset || "0", 10) || 0, 0);
+  try {
+    const { assets, total } = await listAssets(
+      actorOrganizationId(c),
+      {
+        customer_id: q.customer_id ? Number(q.customer_id) : undefined,
+        asset_type: q.asset_type,
+        status: q.status,
+        manufacturer: q.manufacturer,
+        search: q.search,
+      },
+      limit, offset
+    );
+    return c.json({ assets, total }, 200);
+  } catch (err) {
+    // Security-review finding (Phase 11.4): a wildcard-dense manufacturer/
+    // search value must produce this clean 400, never an uncaught D1 "LIKE
+    // pattern too complex" 500 — see assertSearchableFilter in assets.ts.
+    if (err instanceof AssetError && err.code === "invalid_filter") return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+const createAssetRoute = createRoute({
+  method: "post",
+  path: "/api/assets",
+  request: { body: { content: { "application/json": { schema: AssetInputSchema } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ asset: AssetSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Customer not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createAssetRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAssets({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const data = c.req.valid("json");
+  try {
+    const asset = await createAsset(actorOrganizationId(c), data);
+    return c.json({ asset }, 201);
+  } catch (err) {
+    if (err instanceof AssetError) {
+      const { body, status } = createAssetErrorResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const getAssetRoute = createRoute({
+  method: "get",
+  path: "/api/assets/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Asset detail", content: { "application/json": { schema: z.object({ asset: AssetSchema }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getAssetRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAssets({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const asset = await getAsset(actorOrganizationId(c), Number(id));
+  if (!asset) return c.json({ error: "Asset not found" }, 404);
+  return c.json({ asset }, 200);
+});
+
+const updateAssetRoute = createRoute({
+  method: "put",
+  path: "/api/assets/{id}",
+  request: { params: IdParam, body: { content: { "application/json": { schema: AssetUpdateInputSchema } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ asset: AssetSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Cannot reassign to a different customer while linked to a job", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(updateAssetRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAssets({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const data = c.req.valid("json");
+  try {
+    const asset = await updateAsset(actorOrganizationId(c), Number(id), data);
+    if (!asset) return c.json({ error: "Asset not found" }, 404);
+    return c.json({ asset }, 200);
+  } catch (err) {
+    if (err instanceof AssetError) {
+      const { body, status } = updateAssetErrorResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const deleteAssetRoute = createRoute({
+  method: "delete",
+  path: "/api/assets/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Still linked to a job — retire instead", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(deleteAssetRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canDeleteAsset({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  try {
+    const deleted = await deleteAsset(actorOrganizationId(c), Number(id));
+    if (!deleted) return c.json({ error: "Asset not found" }, 404);
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    // deleteAsset only ever throws AssetError("referenced", ...) — the
+    // "asset doesn't exist" case is a plain `false` return, handled above.
+    if (err instanceof AssetError) return c.json({ error: err.message }, 409);
+    throw err;
+  }
+});
+
+// ── Job <-> Asset linking ─────────────────────────────────────────────
+
+const listJobAssetsRoute = createRoute({
+  method: "get",
+  path: "/api/jobs/{id}/assets",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Assets linked to this job", content: { "application/json": { schema: z.object({ assets: z.array(AssetSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listJobAssetsRoute, async (c) => {
+  const { id } = c.req.valid("param");
+  const job = await get<{ id: number; technician_id: number | null }>(
+    "SELECT id, technician_id FROM jobs WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]
+  );
+  if (!job) return c.json({ error: "Job not found" }, 404);
+  // Same ownership predicate as getJob (mem:risks/technician-job-read-scoping)
+  // — admin/dispatcher any job in their org, a technician only their own
+  // assigned job. A technician never gets general Asset list/detail access
+  // (canManageAssets above), only this job-scoped, read-only view.
+  const me = currentUser(c);
+  if (!(await canActorAccessJobCompliance({ id: me.id, role: me.role }, job))) {
+    return c.json({ error: "You are not permitted to view this job" }, 403);
+  }
+  const assets = await listAssetsForJob(actorOrganizationId(c), Number(id));
+  return c.json({ assets: assets ?? [] }, 200);
+});
+
+const linkJobAssetRoute = createRoute({
+  method: "post",
+  path: "/api/jobs/{id}/assets",
+  request: { params: IdParam, body: { content: { "application/json": { schema: z.object({ asset_id: z.number().int() }).strict() } } } },
+  responses: {
+    201: { description: "Linked", content: { "application/json": { schema: z.object({ ok: z.boolean() }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Cross-customer mismatch or already linked", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(linkJobAssetRoute, async (c) => {
+  const me = currentUser(c);
+  // Blanket technician block, matching updateJob's own precedent (mem:risks/
+  // job-update-ownership-bypass) — no legitimate technician use case exists
+  // for modifying a job's linked equipment, even their own assigned job.
+  if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const { asset_id } = c.req.valid("json");
+  try {
+    await linkAssetToJob(actorOrganizationId(c), Number(id), asset_id);
+    return c.json({ ok: true }, 201);
+  } catch (err) {
+    if (err instanceof AssetError) {
+      if (err.code === "not_found") return c.json({ error: err.message }, 404);
+      if (err.code === "cross_customer" || err.code === "already_linked") return c.json({ error: err.message }, 409);
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
+});
+
+const unlinkJobAssetRoute = createRoute({
+  method: "delete",
+  path: "/api/jobs/{id}/assets/{assetId}",
+  request: { params: z.object({ id: z.string(), assetId: z.string() }) },
+  responses: {
+    200: { description: "Unlinked", content: { "application/json": { schema: OkSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(unlinkJobAssetRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
+
+  const { id, assetId } = c.req.valid("param");
+  const result = await unlinkAssetFromJob(actorOrganizationId(c), Number(id), Number(assetId));
+  if (result === "job_not_found") return c.json({ error: "Job not found" }, 404);
   return c.json({ ok: true }, 200);
 });
 

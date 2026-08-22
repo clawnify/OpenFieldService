@@ -9,6 +9,7 @@ import { GoogleSyncBadge } from "./google-sync-badge";
 import { JobCompliance } from "./job-compliance";
 import { ScheduleEditModal } from "./schedule-edit-modal";
 import { NotificationHistory } from "./notification-history";
+import { JobAssets } from "./job-assets";
 import { buildNavigationUrl, buildTelUrl, buildSmsUrl } from "../navigation";
 import {
   ArrowLeft, Trash2, Send, MapPin, Clock, DollarSign, User, Wrench, Plus, X, CheckSquare, Square, Package, FileText, BadgeCheck,
@@ -443,6 +444,8 @@ export function JobDetail() {
               </button>
             )}
           </div>
+
+          <JobAssets jobId={job.id} customerId={job.customer_id} role={user?.role} />
 
           {/* Activity / Notes */}
           <div class="detail-section">

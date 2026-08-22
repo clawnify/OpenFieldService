@@ -148,6 +148,11 @@ export async function resetDatabase() {
     "DELETE FROM materials",
     "DELETE FROM job_checklist",
     "DELETE FROM job_notes",
+    // job_assets (Phase 11.4) cascades from both jobs and assets (ON DELETE
+    // CASCADE), but per this file's own established convention every new
+    // table gets an explicit entry anyway — deleted before jobs/assets
+    // themselves, same ordering discipline as job_checklist/job_notes above.
+    "DELETE FROM job_assets",
     "DELETE FROM jobs",
     // leads (Phase 8.0) has no FK relationship requiring a particular
     // ordering here — every FK it holds (assigned_user_id/
@@ -176,6 +181,11 @@ export async function resetDatabase() {
     // here, checked explicitly rather than assumed (see the calendar_sync_
     // claims/global_settings history above this list).
     "DELETE FROM bc_rebate_customer_profiles",
+    // assets (Phase 11.4) cascades from customers (ON DELETE CASCADE) but,
+    // same as bc_rebate_customer_profiles above, gets its own explicit
+    // entry per this file's established convention rather than relying on
+    // the cascade alone — deleted before customers.
+    "DELETE FROM assets",
     "DELETE FROM customers",
     "DELETE FROM users",
     // organizations (Phase 11.5) — deleted AFTER users (FK: users.organization_id

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { api } from "./api";
-import type { GlobalSetting } from "./types";
+import type { AssetType, GlobalSetting } from "./types";
 
 /** Referral-source and heating-source dropdown options, sourced from Global
  *  Settings (category=reference_data) rather than hardcoded in each form — see
@@ -15,6 +15,12 @@ export function useReferenceData() {
   // endpoint, never hardcoded here — see src/server/lead-workflow.ts, which
   // is the actual validation authority; this is display-only.
   const [leadLostReasons, setLeadLostReasons] = useState<string[]>([]);
+  // Phase 11.4 — Asset/Equipment types. Unlike the 3 lists above (Global
+  // Settings option lists), this is sourced from GET /api/assets/types —
+  // the same server-side ASSET_TYPE_REGISTRY (Core + HVAC module
+  // contributions) used to validate asset_type on create/update, so the
+  // dropdown can never drift out of sync with what the server accepts.
+  const [assetTypes, setAssetTypes] = useState<AssetType[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -36,5 +42,19 @@ export function useReferenceData() {
     return () => { cancelled = true; };
   }, []);
 
-  return { referralSources, heatingSources, leadLostReasons };
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api<{ types: AssetType[] }>("GET", "/api/assets/types");
+        if (!cancelled) setAssetTypes(res.types);
+      } catch {
+        // Same graceful-degradation policy as the Global-Settings-backed
+        // lists above.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  return { referralSources, heatingSources, leadLostReasons, assetTypes };
 }

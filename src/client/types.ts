@@ -155,6 +155,29 @@ export interface Customer {
   updated_at: string;
 }
 
+// Phase 11.4 — Assets / Equipment. Core term "Asset"; UI may label it
+// "Equipment" for HVAC users. `asset_type` is one of the keys returned by
+// GET /api/assets/types (see AssetType below), never hardcoded here.
+export interface Asset {
+  id: number;
+  customer_id: number;
+  asset_type: string;
+  display_name: string;
+  manufacturer: string;
+  model: string;
+  serial_number: string;
+  installation_date: string | null;
+  status: "active" | "inactive" | "retired";
+  notes: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssetType {
+  key: string;
+  label: string;
+}
+
 export interface RebateCriterion {
   key: string;
   label: string;
