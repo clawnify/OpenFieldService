@@ -1590,6 +1590,28 @@ body {
 }
 
 .auth-title { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+
+/* Phase 13 — public contract signing page (sign-contract.tsx). Reuses
+   .auth-card's card/shadow/padding but needs to be wide enough for a
+   document body + commercial line-item table, unlike the 360px login card. */
+.sign-card { max-width: 640px; text-align: left; }
+.sign-document-body {
+  white-space: pre-wrap;
+  font-size: 14px;
+  line-height: 1.6;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  max-height: 400px;
+  overflow-y: auto;
+  margin-top: 12px;
+}
+.sign-consent-block { margin-top: 20px; display: flex; flex-direction: column; gap: 10px; }
+
+@media (max-width: 480px) {
+  .sign-card { padding: 20px 16px; }
+}
 .auth-subtitle { font-size: 13px; color: var(--text-secondary); margin-bottom: 18px; }
 
 .auth-card form .form-group { margin-bottom: 14px; }

@@ -15,6 +15,8 @@ import { LeadList } from "./components/lead-list";
 import { LeadDetail } from "./components/lead-detail";
 import { QuoteList } from "./components/quote-list";
 import { QuoteDetail } from "./components/quote-detail";
+import { ContractList } from "./components/contract-list";
+import { ContractDetail } from "./components/contract-detail";
 import { TechnicianList } from "./components/technician-list";
 import { ServiceTypeList } from "./components/service-type-list";
 import { MaterialList } from "./components/material-list";
@@ -73,12 +75,18 @@ export function App() {
     if (view === "quotes" && id) {
       return user?.role !== "technician" ? <QuoteDetail id={parseInt(id, 10)} navigate={navigate} /> : <TechnicianHome />;
     }
+    // Contracts is self-contained (own fetch, not AppContext) for the same
+    // reason as Quotes/Leads above — irrelevant to the technician role.
+    if (view === "contracts" && id) {
+      return user?.role !== "technician" ? <ContractDetail id={parseInt(id, 10)} navigate={navigate} /> : <TechnicianHome />;
+    }
     switch (view) {
       case "schedule": return <ScheduleView />;
       case "jobs": return <JobList />;
       case "customers": return <CustomerList />;
       case "leads": return user?.role !== "technician" ? <LeadList navigate={navigate} /> : <TechnicianHome />;
       case "quotes": return user?.role !== "technician" ? <QuoteList navigate={navigate} /> : <TechnicianHome />;
+      case "contracts": return user?.role !== "technician" ? <ContractList navigate={navigate} /> : <TechnicianHome />;
       case "technicians": return <TechnicianList />;
       case "services": return <ServiceTypeList />;
       case "materials": return <MaterialList />;

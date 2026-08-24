@@ -154,6 +154,30 @@ export async function resetDatabase() {
     // themselves, same ordering discipline as job_checklist/job_notes above.
     "DELETE FROM job_assets",
     "DELETE FROM jobs",
+    // contracts (Phase 13) MUST be deleted before quotes/quote_versions:
+    // contracts.quote_id is ON DELETE CASCADE (order-independent), but
+    // contracts.accepted_quote_version_id has NO ON DELETE action (a
+    // deliberate RESTRICT-like binding — see migrations/0018's header) —
+    // deleting a still-referenced quote_versions row first would fail with
+    // SQLITE_CONSTRAINT_FOREIGNKEY, the exact same forward-reference lesson
+    // Phase 12 already learned the hard way for quotes.current_version_id
+    // (see the comment on the quotes block right below). Deleting
+    // `contracts` first also cascades away contract_versions/
+    // contract_status_history/contract_signers/contract_signature_requests/
+    // contract_signature_events automatically (each ON DELETE CASCADE from
+    // its parent) — the explicit entries below are therefore redundant
+    // no-ops by the time they run, kept anyway per this file's own
+    // established "every new table gets its own entry" convention.
+    "DELETE FROM contracts",
+    // contract_templates MUST be deleted before contract_template_versions
+    // for the identical forward-reference reason (current_version_id).
+    "DELETE FROM contract_templates",
+    "DELETE FROM contract_template_versions",
+    "DELETE FROM contract_versions",
+    "DELETE FROM contract_status_history",
+    "DELETE FROM contract_signers",
+    "DELETE FROM contract_signature_requests",
+    "DELETE FROM contract_signature_events",
     // quotes.current_version_id REFERENCES quote_versions(id) with NO
     // delete action (see migrations/0017's header comment on why this
     // forward-reference is legal in SQLite) — this is the REVERSE of the
@@ -170,7 +194,9 @@ export async function resetDatabase() {
     // checked explicitly rather than assumed" convention. Deleted before
     // "leads" below since quotes.lead_id (ON DELETE SET NULL) would
     // otherwise survive a lead delete with a dangling reference during
-    // this per-test reset.
+    // this per-test reset. By this point `contracts` (above) is already
+    // gone, so nothing still references these quote_versions rows via
+    // accepted_quote_version_id either.
     "DELETE FROM quotes",
     "DELETE FROM quote_line_items",
     "DELETE FROM quote_status_history",
@@ -216,7 +242,7 @@ export async function resetDatabase() {
     // organization a test created via createSecondOrganization() is cleaned
     // up here like everything else.
     "DELETE FROM organizations WHERE id != 1",
-    "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter', 'quote_counter')",
+    "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter', 'quote_counter', 'contract_counter')",
     "DELETE FROM sqlite_sequence",
   ]);
   await reseedBaselineData();

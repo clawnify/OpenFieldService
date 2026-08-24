@@ -1,4 +1,4 @@
-export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "quotes" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility";
+export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "quotes" | "contracts" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility";
 
 export type Role = "admin" | "dispatcher" | "technician";
 
@@ -525,4 +525,132 @@ export interface TechnicianLookup {
   id: number;
   name: string;
   color: string;
+}
+
+// Phase 13 — Contracts / E-Sign. A Contract is a durable identity bound to
+// the EXACT accepted Quote commercial version (never the Quote's current/
+// latest state); its legal/commercial content lives in an immutable,
+// versioned ContractVersion — see src/server/contracts.ts and
+// migrations/0018_contracts.sql for the full model.
+export type ContractStatus = "draft" | "sent" | "partially_signed" | "signed" | "declined" | "expired" | "cancelled" | "voided";
+export type SignerRole = "customer" | "co_owner" | "company_rep" | "guarantor" | "other";
+export type SignatureMethod = "typed" | "click_to_sign";
+
+export interface Contract {
+  id: number;
+  identifier: string;
+  customer_id: number;
+  quote_id: number;
+  accepted_quote_version_id: number;
+  status: ContractStatus;
+  current_version_id: number | null;
+  voided_at: string | null;
+  void_reason: string;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string;
+  customer_name: string | null;
+  quote_identifier: string | null;
+}
+
+export interface ContractVersion {
+  id: number;
+  contract_id: number;
+  version_number: number;
+  title: string;
+  body: string;
+  template_version_id: number | null;
+  commercial_snapshot: string;
+  customer_snapshot: string;
+  company_snapshot: string;
+  effective_date: string | null;
+  expires_at: string | null;
+  document_hash: string | null;
+  hash_algorithm: string;
+  signed_document_key: string | null;
+  signed_document_hash: string | null;
+  signed_at: string | null;
+  created_by: number | null;
+  created_at: string;
+}
+
+export interface ContractSigner {
+  id: number;
+  contract_id: number;
+  name: string;
+  email: string;
+  phone: string;
+  role: SignerRole;
+  sort_order: number;
+  created_at: string;
+}
+
+export interface SignatureRequest {
+  id: number;
+  contract_id: number;
+  contract_version_id: number;
+  signer_id: number;
+  status: string;
+  provider: string;
+  provider_request_id: string | null;
+  expires_at: string;
+  consent_text_version: string;
+  consent_at: string | null;
+  signed_at: string | null;
+  signature_method: string | null;
+  signer_ip: string | null;
+  signer_user_agent: string | null;
+  declined_reason: string;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SignatureEvent {
+  id: number;
+  signature_request_id: number;
+  event_type: string;
+  actor_user_id: number | null;
+  ip_address: string | null;
+  user_agent: string | null;
+  metadata: string;
+  created_at: string;
+}
+
+export interface ContractStatusHistoryRow {
+  id: number;
+  contract_id: number;
+  old_status: string | null;
+  new_status: string;
+  actor_user_id: number | null;
+  reason: string;
+  created_at: string;
+}
+
+export interface ContractTemplate {
+  id: number;
+  name: string;
+  active: number;
+  current_version_id: number | null;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContractTemplateVersion {
+  id: number;
+  template_id: number;
+  version_number: number;
+  title: string;
+  body: string;
+  created_by: number | null;
+  created_at: string;
+}
+
+export interface EvidencePackage {
+  contract_identifier: string;
+  version_number: number;
+  document_hash: string | null;
+  signed_document_hash: string | null;
+  requests: (SignatureRequest & { signer?: ContractSigner; events: SignatureEvent[] })[];
 }

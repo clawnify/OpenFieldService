@@ -9,6 +9,7 @@ import { NotificationPreferences } from "./notification-preferences";
 import { NotificationHistory } from "./notification-history";
 import { CustomerAssets } from "./customer-assets";
 import { RelatedQuotes } from "./related-quotes";
+import { RelatedContracts } from "./related-contracts";
 import { ArrowLeft, Trash2, Edit3, Save, X } from "lucide-preact";
 
 const emptyForm = {
@@ -302,6 +303,8 @@ export function CustomerDetail() {
           <CustomerAssets customerId={customer.id} role={user?.role} />
 
           {user?.role !== "technician" && <RelatedQuotes customerId={customer.id} navigate={navigate} />}
+
+          {user?.role !== "technician" && <RelatedContracts customerId={customer.id} navigate={navigate} />}
 
           <div class="detail-section">
             <h3>Service History ({jobs.length})</h3>

@@ -3,6 +3,7 @@ import { api } from "../api";
 import { formatCents, formatCentsForInput, parseDollarsToCents } from "../money";
 import { QUOTE_STATUS_LABELS, LINE_ITEM_CATEGORIES, LINE_ITEM_CATEGORY_LABELS, DISCOUNT_TYPES } from "../quote-status";
 import { ConfirmDialog } from "./confirm-dialog";
+import { RelatedContracts } from "./related-contracts";
 import { ArrowLeft, Trash2, Edit3, Plus, X } from "lucide-preact";
 import type { Quote, QuoteVersionDetail, QuoteVersion, QuoteStatusHistoryRow, QuoteLineItem, DiscountType, LineItemCategory } from "../types";
 
@@ -64,6 +65,8 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
 
   const [pendingDelete, setPendingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  const [creatingContract, setCreatingContract] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -215,6 +218,19 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
       setActionError((err as Error).message);
     } finally {
       setCreatingRevision(false);
+    }
+  };
+
+  const createContract = async () => {
+    setCreatingContract(true);
+    setActionError(null);
+    try {
+      const res = await api<{ contract: { id: number } }>("POST", "/api/contracts", { quote_id: quote.id });
+      navigate(`/contracts/${res.contract.id}`);
+    } catch (err) {
+      setActionError((err as Error).message);
+    } finally {
+      setCreatingContract(false);
     }
   };
 
@@ -482,12 +498,14 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
               </table>
             </div>
           </div>
+
+          <RelatedContracts quoteId={quote.id} navigate={navigate} />
         </div>
 
         <div class="detail-sidebar">
           <div class="detail-sidebar-section">
             <h4>Actions</h4>
-            {allowed.length === 0 && !canCreateRevision ? (
+            {allowed.length === 0 && !canCreateRevision && quote.status !== "accepted" ? (
               <p class="text-muted">No further actions available</p>
             ) : (
               <div class="status-buttons">
@@ -498,6 +516,13 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
                 ))}
                 {canCreateRevision && (
                   <button class="status-btn" onClick={() => setPendingRevision(true)}>Create Revision</button>
+                )}
+                {/* Section 45 — explicit staff action on the Quote itself;
+                    a Contract is never auto-created on acceptance. */}
+                {quote.status === "accepted" && (
+                  <button class="status-btn" disabled={creatingContract} onClick={createContract}>
+                    {creatingContract ? "Creating..." : "Create Contract"}
+                  </button>
                 )}
               </div>
             )}

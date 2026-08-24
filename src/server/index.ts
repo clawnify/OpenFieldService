@@ -87,6 +87,43 @@ import {
   transitionQuote,
 } from "./quote-workflow.js";
 import {
+  SIGNATURE_METHODS,
+  SIGNER_ROLES,
+  ContractError,
+  addContractSigner,
+  canManageContracts,
+  cancelSignatureRequest,
+  createContract,
+  createContractRevision,
+  createContractTemplate,
+  createContractTemplateVersion,
+  declineSignature,
+  deleteContract,
+  deleteContractSigner,
+  getContract,
+  getContractVersion,
+  getEvidencePackage,
+  getSignatureRequestByToken,
+  listContractSigners,
+  listContractTemplates,
+  listContractVersions,
+  listContracts,
+  listSignatureRequests,
+  recordConsent,
+  resendSignatureRequest,
+  sendContractForSignature,
+  submitSignature,
+  updateContractVersion,
+} from "./contracts.js";
+import {
+  CONTRACT_STATUSES,
+  ContractWorkflowError,
+  canCreateContractRevisionFrom,
+  getContractStatusHistory,
+  resolveAllowedContractTransitions,
+  transitionContract,
+} from "./contract-workflow.js";
+import {
   CUSTOMER_REBATE_PROFILE_JOIN,
   CUSTOMER_REBATE_PROFILE_OVERRIDE_COLUMNS,
   getCustomerRebateProfile,
@@ -223,7 +260,15 @@ const app = createApp<Env>({
 const PUBLIC_API_PATHS = new Set(["/api/auth/login", "/api/auth/logout"]);
 
 app.use("/api/*", async (c, next) => {
-  if (PUBLIC_API_PATHS.has(c.req.path)) {
+  // Phase 13 — the ONLY prefix-based (not exact-match) public exemption in
+  // this codebase: contract signing links carry a dynamic token in the
+  // path, so an exact-match Set can't cover them. Authorization for every
+  // route under this prefix is the token itself (hashed at rest, single
+  // -version/single-signer-bound, expiring/revocable) — see contracts.ts's
+  // getSignatureRequestByToken(), the sole entry point every one of these
+  // routes goes through. Never trust any organization_id/customer_id from
+  // the request itself on this path — only what the token resolves to.
+  if (PUBLIC_API_PATHS.has(c.req.path) || c.req.path.startsWith("/api/public/")) {
     await next();
     return;
   }
@@ -4255,6 +4300,940 @@ app.openapi(getQuoteStatusHistoryRoute, async (c) => {
   if (!quote) return c.json({ error: "Quote not found" }, 404);
   const history = await getQuoteStatusHistory(quote.id);
   return c.json({ history }, 200);
+});
+
+// ── Contracts / E-Sign (Phase 13) ────────────────────────────────────
+// Server-authoritative status/version/hash fields throughout — Contract
+// commercial terms are a SNAPSHOT of the Quote's accepted version (Section
+// 32), captured once and never recomputed here. No input schema below
+// accepts organization_id/status/current_version_id/
+// accepted_quote_version_id/document_hash/signed_document_*/token/
+// token_hash/created_by/actor fields from the client.
+
+const ContractSignerSchema = z.object({
+  id: z.number().int(),
+  contract_id: z.number().int(),
+  name: z.string(),
+  email: z.string(),
+  phone: z.string(),
+  role: z.string(),
+  sort_order: z.number().int(),
+  created_at: z.string(),
+}).openapi("ContractSigner");
+
+const ContractVersionSchema = z.object({
+  id: z.number().int(),
+  contract_id: z.number().int(),
+  version_number: z.number().int(),
+  title: z.string(),
+  body: z.string(),
+  template_version_id: z.number().int().nullable(),
+  commercial_snapshot: z.string(),
+  customer_snapshot: z.string(),
+  company_snapshot: z.string(),
+  effective_date: z.string().nullable(),
+  expires_at: z.string().nullable(),
+  document_hash: z.string().nullable(),
+  hash_algorithm: z.string(),
+  signed_document_key: z.string().nullable(),
+  signed_document_hash: z.string().nullable(),
+  signed_at: z.string().nullable(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+}).openapi("ContractVersion");
+
+const ContractSchema = z.object({
+  id: z.number().int(),
+  identifier: z.string(),
+  customer_id: z.number().int(),
+  quote_id: z.number().int(),
+  accepted_quote_version_id: z.number().int(),
+  status: z.string(),
+  current_version_id: z.number().int().nullable(),
+  voided_at: z.string().nullable(),
+  void_reason: z.string(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  customer_name: z.string().nullable(),
+  quote_identifier: z.string().nullable(),
+}).openapi("Contract");
+
+// token_hash is deliberately never in this schema — see contracts.ts's
+// SIGNATURE_REQUEST_COLUMNS (the storage function itself never selects it
+// into any row that could reach this point).
+const SignatureRequestSchema = z.object({
+  id: z.number().int(),
+  contract_id: z.number().int(),
+  contract_version_id: z.number().int(),
+  signer_id: z.number().int(),
+  status: z.string(),
+  provider: z.string(),
+  provider_request_id: z.string().nullable(),
+  expires_at: z.string(),
+  consent_text_version: z.string(),
+  consent_at: z.string().nullable(),
+  signed_at: z.string().nullable(),
+  signature_method: z.string().nullable(),
+  signer_ip: z.string().nullable(),
+  signer_user_agent: z.string().nullable(),
+  declined_reason: z.string(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).openapi("SignatureRequest");
+
+const SignatureEventSchema = z.object({
+  id: z.number().int(),
+  signature_request_id: z.number().int(),
+  event_type: z.string(),
+  actor_user_id: z.number().int().nullable(),
+  ip_address: z.string().nullable(),
+  user_agent: z.string().nullable(),
+  metadata: z.string(),
+  created_at: z.string(),
+}).openapi("SignatureEvent");
+
+const ContractStatusHistorySchema = z.object({
+  id: z.number().int(),
+  contract_id: z.number().int(),
+  old_status: z.string().nullable(),
+  new_status: z.string(),
+  actor_user_id: z.number().int().nullable(),
+  reason: z.string(),
+  created_at: z.string(),
+}).openapi("ContractStatusHistory");
+
+const ContractTemplateSchema = z.object({
+  id: z.number().int(),
+  name: z.string(),
+  active: z.number().int(),
+  current_version_id: z.number().int().nullable(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).openapi("ContractTemplate");
+
+const ContractTemplateVersionSchema = z.object({
+  id: z.number().int(),
+  template_id: z.number().int(),
+  version_number: z.number().int(),
+  title: z.string(),
+  body: z.string(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+}).openapi("ContractTemplateVersion");
+
+const EvidenceRequestSchema = SignatureRequestSchema.extend({
+  signer: ContractSignerSchema.optional(),
+  events: z.array(SignatureEventSchema),
+});
+const EvidencePackageSchema = z.object({
+  contract_identifier: z.string(),
+  version_number: z.number().int(),
+  document_hash: z.string().nullable(),
+  signed_document_hash: z.string().nullable(),
+  requests: z.array(EvidenceRequestSchema),
+}).openapi("EvidencePackage");
+
+const CreateContractInputSchema = z.object({
+  quote_id: z.number().int(),
+  template_version_id: z.number().int().nullable().optional(),
+  title: z.string().max(200).optional(),
+  effective_date: z.string().nullable().optional(),
+  expires_at: z.string().nullable().optional(),
+}).strict();
+
+const UpdateContractVersionInputSchema = z.object({
+  title: z.string().max(200).optional(),
+  body: z.string().max(50000).optional(),
+  effective_date: z.string().nullable().optional(),
+  expires_at: z.string().nullable().optional(),
+}).strict();
+
+const SignerInputSchema = z.object({
+  name: z.string().max(200).optional(),
+  email: z.string().max(200).optional(),
+  phone: z.string().max(50).optional(),
+  role: z.enum(SIGNER_ROLES as unknown as [string, ...string[]]).optional(),
+}).strict();
+
+const CreateContractTemplateInputSchema = z.object({
+  name: z.string().min(1).max(200),
+  body: z.string().max(50000),
+}).strict();
+
+const CreateContractTemplateVersionInputSchema = z.object({
+  title: z.string().max(200).optional(),
+  body: z.string().max(50000),
+}).strict();
+
+const ConsentInputSchema = z.object({
+  consent_text_version: z.string().min(1).max(50),
+}).strict();
+
+const SubmitSignatureInputSchema = z.object({
+  signer_name: z.string().min(1).max(200),
+  signature_method: z.enum(SIGNATURE_METHODS as unknown as [string, ...string[]]),
+}).strict();
+
+const DeclineSignatureInputSchema = z.object({
+  reason: z.string().max(2000).optional(),
+}).strict();
+
+function contractErrorToResponse(err: ContractError): { body: { error: string }; status: 400 | 404 | 409 } {
+  if (err.code === "not_found" || err.code === "invalid_quote") return { body: { error: err.message }, status: 404 };
+  if (err.code === "not_draft" || err.code === "referenced" || err.code === "conflict" || err.code === "invalid_signer") return { body: { error: err.message }, status: 409 };
+  return { body: { error: err.message }, status: 400 };
+}
+
+/** Cloudflare's own edge-set header — never client-spoofable in practice
+ *  (Cloudflare overwrites any client-supplied value at the edge before the
+ *  Worker ever sees the request). Falls back to empty string only in local
+ *  dev/test where no real Cloudflare edge sits in front of the Worker. */
+function clientIp(c: Context<Env>): string {
+  return c.req.header("CF-Connecting-IP") ?? "";
+}
+function clientUserAgent(c: Context<Env>): string {
+  return c.req.header("user-agent") ?? "";
+}
+
+const listContractsRoute = createRoute({
+  method: "get",
+  path: "/api/contracts",
+  request: {
+    query: z.object({
+      status: z.string().optional(),
+      customer_id: z.string().optional(),
+      quote_id: z.string().optional(),
+      search: z.string().max(200).optional(),
+      limit: z.string().optional(),
+      offset: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Contracts", content: { "application/json": { schema: z.object({ contracts: z.array(ContractSchema), total: z.number().int() }) } } },
+    400: { description: "Invalid search filter", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listContractsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const q = c.req.valid("query");
+  const limit = Math.min(Math.max(parseInt(q.limit || "50", 10) || 50, 1), 200);
+  const offset = Math.max(parseInt(q.offset || "0", 10) || 0, 0);
+  try {
+    const { contracts, total } = await listContracts(
+      actorOrganizationId(c),
+      { status: q.status, customer_id: q.customer_id ? Number(q.customer_id) : undefined, quote_id: q.quote_id ? Number(q.quote_id) : undefined, search: q.search },
+      limit, offset
+    );
+    return c.json({ contracts, total }, 200);
+  } catch (err) {
+    if (err instanceof ContractError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+const createContractRoute = createRoute({
+  method: "post",
+  path: "/api/contracts",
+  request: { body: { content: { "application/json": { schema: CreateContractInputSchema } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ contract: ContractSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Quote not found or not accepted", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createContractRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const data = c.req.valid("json");
+  try {
+    const contract = await createContract(actorOrganizationId(c), me.id, data);
+    return c.json({ contract }, 201);
+  } catch (err) {
+    if (err instanceof ContractError) {
+      const { body, status } = contractErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const getContractRoute = createRoute({
+  method: "get",
+  path: "/api/contracts/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Contract detail", content: { "application/json": { schema: z.object({ contract: ContractSchema, version: ContractVersionSchema.nullable() }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getContractRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const contract = await getContract(actorOrganizationId(c), Number(id));
+  if (!contract) return c.json({ error: "Contract not found" }, 404);
+  const version = contract.current_version_id !== null ? await getContractVersion(contract.id, contract.current_version_id) : null;
+  return c.json({ contract, version }, 200);
+});
+
+const deleteContractRoute = createRoute({
+  method: "delete",
+  path: "/api/contracts/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Cannot delete a contract with transition history", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(deleteContractRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  try {
+    const deleted = await deleteContract(actorOrganizationId(c), Number(id));
+    if (!deleted) return c.json({ error: "Contract not found" }, 404);
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof ContractError) {
+      const { body, status } = contractErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const updateContractVersionRoute = createRoute({
+  method: "put",
+  path: "/api/contracts/{id}/version",
+  request: { params: IdParam, body: { content: { "application/json": { schema: UpdateContractVersionInputSchema } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ version: ContractVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Contract is not in draft status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(updateContractVersionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const data = c.req.valid("json");
+  try {
+    const version = await updateContractVersion(actorOrganizationId(c), Number(id), data);
+    return c.json({ version }, 200);
+  } catch (err) {
+    if (err instanceof ContractError) {
+      const { body, status } = contractErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const createContractRevisionRoute = createRoute({
+  method: "post",
+  path: "/api/contracts/{id}/revisions",
+  request: { params: IdParam, body: { content: { "application/json": { schema: z.object({}).strict() } } } },
+  responses: {
+    201: { description: "Revision created", content: { "application/json": { schema: z.object({ version: ContractVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "A revision cannot be created from the current status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createContractRevisionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const organizationId = actorOrganizationId(c);
+  const contract = await getContract(organizationId, Number(id));
+  if (!contract) return c.json({ error: "Contract not found" }, 404);
+  if (!canCreateContractRevisionFrom(contract.status)) {
+    return c.json({ error: `Cannot create a revision from status "${contract.status}"` }, 409);
+  }
+  try {
+    const version = await createContractRevision(organizationId, contract.id, me.id);
+    return c.json({ version }, 201);
+  } catch (err) {
+    if (err instanceof ContractError) {
+      const { body, status } = contractErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const listContractVersionsRoute = createRoute({
+  method: "get",
+  path: "/api/contracts/{id}/versions",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Version history", content: { "application/json": { schema: z.object({ versions: z.array(ContractVersionSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listContractVersionsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const contract = await getContract(actorOrganizationId(c), Number(id));
+  if (!contract) return c.json({ error: "Contract not found" }, 404);
+  const versions = await listContractVersions(contract.id);
+  return c.json({ versions }, 200);
+});
+
+const getContractVersionRoute = createRoute({
+  method: "get",
+  path: "/api/contracts/{id}/versions/{versionId}",
+  request: { params: z.object({ id: z.string(), versionId: z.string() }) },
+  responses: {
+    200: { description: "Version detail", content: { "application/json": { schema: z.object({ version: ContractVersionSchema }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getContractVersionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id, versionId } = c.req.valid("param");
+  const contract = await getContract(actorOrganizationId(c), Number(id));
+  if (!contract) return c.json({ error: "Contract not found" }, 404);
+  const version = await getContractVersion(contract.id, Number(versionId));
+  if (!version) return c.json({ error: "Version not found" }, 404);
+  return c.json({ version }, 200);
+});
+
+const getContractTransitionsRoute = createRoute({
+  method: "get",
+  path: "/api/contracts/{id}/transitions",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Allowed next statuses", content: { "application/json": { schema: z.object({ allowed: z.array(z.string()), can_create_revision: z.boolean() }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getContractTransitionsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const contract = await getContract(actorOrganizationId(c), Number(id));
+  if (!contract) return c.json({ error: "Contract not found" }, 404);
+  return c.json({ allowed: resolveAllowedContractTransitions(contract.status), can_create_revision: canCreateContractRevisionFrom(contract.status) }, 200);
+});
+
+const transitionContractRoute = createRoute({
+  method: "post",
+  path: "/api/contracts/{id}/transition",
+  request: {
+    params: IdParam,
+    body: { content: { "application/json": { schema: z.object({ to_status: z.enum(CONTRACT_STATUSES as unknown as [string, ...string[]]), reason: z.string().max(2000).optional() }).strict() } } },
+  },
+  responses: {
+    200: { description: "Transitioned", content: { "application/json": { schema: z.object({ contract: ContractSchema }) } } },
+    400: { description: "Invalid transition or missing data", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(transitionContractRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const { to_status, reason } = c.req.valid("json");
+  try {
+    await transitionContract(c.env.DB, Number(id), { toStatus: to_status, actorUserId: me.id, organizationId: actorOrganizationId(c), reason });
+    const contract = await getContract(actorOrganizationId(c), Number(id));
+    if (!contract) return c.json({ error: "Contract not found" }, 404);
+    return c.json({ contract }, 200);
+  } catch (err) {
+    if (err instanceof ContractWorkflowError) {
+      if (err.code === "not_found") return c.json({ error: err.message }, 404);
+      if (err.code === "conflict") return c.json({ error: err.message }, 409);
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
+});
+
+const getContractStatusHistoryRoute = createRoute({
+  method: "get",
+  path: "/api/contracts/{id}/status-history",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Status history", content: { "application/json": { schema: z.object({ history: z.array(ContractStatusHistorySchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getContractStatusHistoryRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const contract = await getContract(actorOrganizationId(c), Number(id));
+  if (!contract) return c.json({ error: "Contract not found" }, 404);
+  const history = await getContractStatusHistory(contract.id);
+  return c.json({ history }, 200);
+});
+
+const listContractSignersRoute = createRoute({
+  method: "get",
+  path: "/api/contracts/{id}/signers",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Signers", content: { "application/json": { schema: z.object({ signers: z.array(ContractSignerSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listContractSignersRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const contract = await getContract(actorOrganizationId(c), Number(id));
+  if (!contract) return c.json({ error: "Contract not found" }, 404);
+  const signers = await listContractSigners(contract.id);
+  return c.json({ signers }, 200);
+});
+
+const addContractSignerRoute = createRoute({
+  method: "post",
+  path: "/api/contracts/{id}/signers",
+  request: { params: IdParam, body: { content: { "application/json": { schema: SignerInputSchema } } } },
+  responses: {
+    201: { description: "Added", content: { "application/json": { schema: z.object({ signer: ContractSignerSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(addContractSignerRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const data = c.req.valid("json");
+  try {
+    const signer = await addContractSigner(actorOrganizationId(c), Number(id), data);
+    return c.json({ signer }, 201);
+  } catch (err) {
+    if (err instanceof ContractError) {
+      const { body, status } = contractErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const deleteContractSignerRoute = createRoute({
+  method: "delete",
+  path: "/api/contracts/{id}/signers/{signerId}",
+  request: { params: z.object({ id: z.string(), signerId: z.string() }) },
+  responses: {
+    200: { description: "Removed", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Signer has an active or completed signature request", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(deleteContractSignerRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id, signerId } = c.req.valid("param");
+  try {
+    await deleteContractSigner(actorOrganizationId(c), Number(id), Number(signerId));
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof ContractError) {
+      const { body, status } = contractErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const sendContractRoute = createRoute({
+  method: "post",
+  path: "/api/contracts/{id}/send",
+  request: { params: IdParam, body: { content: { "application/json": { schema: z.object({}).strict() } } } },
+  responses: {
+    200: {
+      description: "Sent for signature",
+      content: { "application/json": { schema: z.object({ contract: ContractSchema, signing_links: z.array(z.object({ signer_id: z.number().int(), signer_name: z.string(), token: z.string() })) }) } },
+    },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Contract is not in draft status, or has no signers", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(sendContractRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  try {
+    const result = await sendContractForSignature(c.env.DB, actorOrganizationId(c), Number(id), me.id);
+    return c.json({ contract: result.contract, signing_links: result.signingLinks.map((l) => ({ signer_id: l.signerId, signer_name: l.signerName, token: l.token })) }, 200);
+  } catch (err) {
+    if (err instanceof ContractError) {
+      const { body, status } = contractErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const listSignatureRequestsRoute = createRoute({
+  method: "get",
+  path: "/api/contracts/{id}/signature-requests",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Signature requests", content: { "application/json": { schema: z.object({ requests: z.array(SignatureRequestSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listSignatureRequestsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const contract = await getContract(actorOrganizationId(c), Number(id));
+  if (!contract) return c.json({ error: "Contract not found" }, 404);
+  const requests = await listSignatureRequests(contract.id);
+  return c.json({ requests }, 200);
+});
+
+const cancelSignatureRequestRoute = createRoute({
+  method: "post",
+  path: "/api/contracts/{id}/signature-requests/{requestId}/cancel",
+  request: { params: z.object({ id: z.string(), requestId: z.string() }), body: { content: { "application/json": { schema: z.object({ reason: z.string().max(2000).optional() }).strict() } } } },
+  responses: {
+    200: { description: "Cancelled", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Cannot cancel a request that is already terminal", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(cancelSignatureRequestRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id, requestId } = c.req.valid("param");
+  const { reason } = c.req.valid("json");
+  try {
+    await cancelSignatureRequest(c.env.DB, c.env, actorOrganizationId(c), Number(id), Number(requestId), me.id, reason ?? "");
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof ContractError) {
+      const { body, status } = contractErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const resendSignatureRequestRoute = createRoute({
+  method: "post",
+  path: "/api/contracts/{id}/signature-requests/{requestId}/resend",
+  request: { params: z.object({ id: z.string(), requestId: z.string() }), body: { content: { "application/json": { schema: z.object({}).strict() } } } },
+  responses: {
+    200: { description: "Resent", content: { "application/json": { schema: z.object({ signer_id: z.number().int(), signer_name: z.string(), token: z.string() }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Cannot resend a request that is already terminal", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(resendSignatureRequestRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id, requestId } = c.req.valid("param");
+  try {
+    const result = await resendSignatureRequest(c.env.DB, actorOrganizationId(c), Number(id), Number(requestId), me.id);
+    return c.json({ signer_id: result.signerId, signer_name: result.signerName, token: result.token }, 200);
+  } catch (err) {
+    if (err instanceof ContractError) {
+      const { body, status } = contractErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const getEvidencePackageRoute = createRoute({
+  method: "get",
+  path: "/api/contracts/{id}/evidence",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Evidence package", content: { "application/json": { schema: z.object({ evidence: EvidencePackageSchema }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getEvidencePackageRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const evidence = await getEvidencePackage(actorOrganizationId(c), Number(id));
+  if (!evidence) return c.json({ error: "Contract not found" }, 404);
+  return c.json({ evidence }, 200);
+});
+
+const listContractTemplatesRoute = createRoute({
+  method: "get",
+  path: "/api/contract-templates",
+  responses: {
+    200: { description: "Templates", content: { "application/json": { schema: z.object({ templates: z.array(ContractTemplateSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listContractTemplatesRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const templates = await listContractTemplates(actorOrganizationId(c));
+  return c.json({ templates }, 200);
+});
+
+const createContractTemplateRoute = createRoute({
+  method: "post",
+  path: "/api/contract-templates",
+  request: { body: { content: { "application/json": { schema: CreateContractTemplateInputSchema } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ template: ContractTemplateSchema, version: ContractTemplateVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createContractTemplateRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { name, body } = c.req.valid("json");
+  const { version, ...template } = await createContractTemplate(actorOrganizationId(c), me.id, name, body);
+  return c.json({ template, version }, 201);
+});
+
+const createContractTemplateVersionRoute = createRoute({
+  method: "post",
+  path: "/api/contract-templates/{id}/versions",
+  request: { params: IdParam, body: { content: { "application/json": { schema: CreateContractTemplateVersionInputSchema } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ version: ContractTemplateVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createContractTemplateVersionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const { title, body } = c.req.valid("json");
+  try {
+    const version = await createContractTemplateVersion(actorOrganizationId(c), Number(id), me.id, title ?? "", body);
+    return c.json({ version }, 201);
+  } catch (err) {
+    if (err instanceof ContractError) {
+      const { body: errBody, status } = contractErrorToResponse(err);
+      return c.json(errBody, status);
+    }
+    throw err;
+  }
+});
+
+// ── Public signing routes (Section 24-26) — token-gated, UNAUTHENTICATED.
+// Every route here resolves organization/contract/version/signer identity
+// EXCLUSIVELY through getSignatureRequestByToken()'s hashed-token lookup —
+// never from any request parameter. Every failure mode (missing token,
+// wrong token, expired, already-terminal) returns the SAME generic 404
+// with the SAME generic message — no enumeration of which failure occurred.
+
+const PublicSigningViewSchema = z.object({
+  contract_identifier: z.string(),
+  contract_status: z.string(),
+  version_title: z.string(),
+  version_body: z.string(),
+  effective_date: z.string().nullable(),
+  expires_at: z.string().nullable(),
+  commercial_snapshot: z.string(),
+  signer_name: z.string(),
+  signer_email: z.string(),
+  signer_role: z.string(),
+  request_status: z.string(),
+  consent_at: z.string().nullable(),
+  signed_at: z.string().nullable(),
+});
+
+const GENERIC_SIGNING_LINK_ERROR = "This signing link is invalid or has expired";
+
+const getPublicSigningViewRoute = createRoute({
+  method: "get",
+  path: "/api/public/contracts/sign/{token}",
+  request: { params: z.object({ token: z.string() }) },
+  responses: {
+    200: { description: "Signing view", content: { "application/json": { schema: z.object({ view: PublicSigningViewSchema }) } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getPublicSigningViewRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const view = await getSignatureRequestByToken(token);
+  if (!view) return c.json({ error: GENERIC_SIGNING_LINK_ERROR }, 404);
+  return c.json({
+    view: {
+      contract_identifier: view.contract.identifier,
+      contract_status: view.contract.status,
+      version_title: view.version.title,
+      version_body: view.version.body,
+      effective_date: view.version.effective_date,
+      expires_at: view.version.expires_at,
+      commercial_snapshot: view.version.commercial_snapshot,
+      signer_name: view.signer.name,
+      signer_email: view.signer.email,
+      signer_role: view.signer.role,
+      request_status: view.request.status,
+      consent_at: view.request.consent_at,
+      signed_at: view.request.signed_at,
+    },
+  }, 200);
+});
+
+const consentRoute = createRoute({
+  method: "post",
+  path: "/api/public/contracts/sign/{token}/consent",
+  request: { params: z.object({ token: z.string() }), body: { content: { "application/json": { schema: ConsentInputSchema } } } },
+  responses: {
+    200: { description: "Consent recorded", content: { "application/json": { schema: OkSchema } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(consentRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const { consent_text_version } = c.req.valid("json");
+  try {
+    await recordConsent(token, consent_text_version, clientIp(c), clientUserAgent(c));
+    return c.json({ ok: true }, 200);
+  } catch {
+    return c.json({ error: GENERIC_SIGNING_LINK_ERROR }, 404);
+  }
+});
+
+const submitSignatureRoute = createRoute({
+  method: "post",
+  path: "/api/public/contracts/sign/{token}/sign",
+  request: { params: z.object({ token: z.string() }), body: { content: { "application/json": { schema: SubmitSignatureInputSchema } } } },
+  responses: {
+    200: { description: "Signed", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Consent required or invalid input", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Link already used", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(submitSignatureRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const { signer_name, signature_method } = c.req.valid("json");
+  try {
+    // No organization_id is known or needed here — submitSignature()
+    // resolves the exact contract/version/signer entirely from the token
+    // itself (see its own doc comment in contracts.ts) before any write.
+    await submitSignature(c.env.DB, c.env, token, { signerName: signer_name, signatureMethod: signature_method }, clientIp(c), clientUserAgent(c));
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof ContractError) {
+      if (err.code === "invalid_token") return c.json({ error: GENERIC_SIGNING_LINK_ERROR }, 404);
+      if (err.code === "conflict") return c.json({ error: err.message }, 409);
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
+});
+
+const declineRoute = createRoute({
+  method: "post",
+  path: "/api/public/contracts/sign/{token}/decline",
+  request: { params: z.object({ token: z.string() }), body: { content: { "application/json": { schema: DeclineSignatureInputSchema } } } },
+  responses: {
+    200: { description: "Declined", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Link already used", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(declineRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const { reason } = c.req.valid("json");
+  try {
+    await declineSignature(c.env.DB, c.env, token, reason ?? "", clientIp(c), clientUserAgent(c));
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof ContractError) {
+      if (err.code === "invalid_token") return c.json({ error: GENERIC_SIGNING_LINK_ERROR }, 404);
+      if (err.code === "conflict") return c.json({ error: err.message }, 409);
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
 });
 
 // ── Service Types ──────────────────────────────────────────────────
