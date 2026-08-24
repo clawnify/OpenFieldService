@@ -12,6 +12,7 @@ import { CustomerSearchSelect } from "./customer-search-select";
 import { LeadStatusBadge } from "./lead-status-badge";
 import { NotificationPreferences } from "./notification-preferences";
 import { NotificationHistory } from "./notification-history";
+import { RelatedQuotes } from "./related-quotes";
 import { ArrowLeft, Edit3, Save, X, CheckCircle2 } from "lucide-preact";
 import type { Lead, LeadStatusHistoryRow } from "../types";
 
@@ -429,6 +430,8 @@ export function LeadDetail({ id, navigate }: { id: number; navigate: (to: string
               </div>
             )}
           </div>
+
+          <RelatedQuotes customerId={lead.converted_customer_id ?? undefined} leadId={lead.id} navigate={navigate} />
 
           <NotificationHistory entityType="lead" entityId={id} role={user?.role} />
         </div>

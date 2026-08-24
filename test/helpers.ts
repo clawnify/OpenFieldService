@@ -154,6 +154,27 @@ export async function resetDatabase() {
     // themselves, same ordering discipline as job_checklist/job_notes above.
     "DELETE FROM job_assets",
     "DELETE FROM jobs",
+    // quotes.current_version_id REFERENCES quote_versions(id) with NO
+    // delete action (see migrations/0017's header comment on why this
+    // forward-reference is legal in SQLite) — this is the REVERSE of the
+    // usual "children before parents" direction: `quotes` must be deleted
+    // FIRST, while it still points at its current version, or the delete
+    // is rejected as an FK violation (confirmed empirically — the original
+    // child-first ordering here failed with SQLITE_CONSTRAINT_FOREIGNKEY).
+    // Deleting `quotes` first also cascades away quote_versions (quote_id
+    // ON DELETE CASCADE) and quote_status_history (quote_id ON DELETE
+    // CASCADE) automatically, which in turn cascades quote_line_items
+    // (quote_version_id ON DELETE CASCADE) — the 3 explicit deletes below
+    // are therefore redundant no-ops by the time they run, kept anyway per
+    // this file's own established "every new table gets its own entry,
+    // checked explicitly rather than assumed" convention. Deleted before
+    // "leads" below since quotes.lead_id (ON DELETE SET NULL) would
+    // otherwise survive a lead delete with a dangling reference during
+    // this per-test reset.
+    "DELETE FROM quotes",
+    "DELETE FROM quote_line_items",
+    "DELETE FROM quote_status_history",
+    "DELETE FROM quote_versions",
     // leads (Phase 8.0) has no FK relationship requiring a particular
     // ordering here — every FK it holds (assigned_user_id/
     // referred_by_customer_id/converted_customer_id/converted_by) is
@@ -195,7 +216,7 @@ export async function resetDatabase() {
     // organization a test created via createSecondOrganization() is cleaned
     // up here like everything else.
     "DELETE FROM organizations WHERE id != 1",
-    "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter')",
+    "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter', 'quote_counter')",
     "DELETE FROM sqlite_sequence",
   ]);
   await reseedBaselineData();

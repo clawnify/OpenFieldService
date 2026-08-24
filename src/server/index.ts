@@ -62,6 +62,31 @@ import {
 } from "./assets.js";
 import { HVAC_ASSET_TYPES } from "./modules/hvac/asset-types.js";
 import {
+  DISCOUNT_TYPES,
+  LINE_ITEM_CATEGORIES,
+  QuoteError,
+  addLineItem,
+  canManageQuotes,
+  createQuote,
+  createQuoteRevision,
+  deleteLineItem,
+  deleteQuote,
+  getQuote,
+  getQuoteStatusHistory,
+  getQuoteVersion,
+  listQuoteVersions,
+  listQuotes,
+  updateLineItem,
+  updateQuoteVersion,
+} from "./quotes.js";
+import {
+  QUOTE_STATUSES,
+  QuoteWorkflowError,
+  canCreateRevisionFrom,
+  resolveAllowedQuoteTransitions,
+  transitionQuote,
+} from "./quote-workflow.js";
+import {
   CUSTOMER_REBATE_PROFILE_JOIN,
   CUSTOMER_REBATE_PROFILE_OVERRIDE_COLUMNS,
   getCustomerRebateProfile,
@@ -3693,6 +3718,543 @@ app.openapi(unlinkJobAssetRoute, async (c) => {
   const result = await unlinkAssetFromJob(actorOrganizationId(c), Number(id), Number(assetId));
   if (result === "job_not_found") return c.json({ error: "Job not found" }, 404);
   return c.json({ ok: true }, 200);
+});
+
+// ── Quotes / Estimates (Phase 12) ─────────────────────────────────────
+//
+// Domain/API term "Quote" (Section 5); UI may say "Quote / Estimate". RBAC
+// mirrors Leads/Financial exactly (admin/dispatcher manage, technician
+// blanket-blocked — canManageQuotes in quotes.ts) since Quotes are a
+// front-office/sales concern with no field-work component. Server always
+// computes totals (Section 10/23/28) — no route below ever accepts a
+// total_cents/subtotal_cents/tax_amount_cents/discount_cents field from the
+// client; only the INPUTS to that computation (line items, discount type/
+// value, tax rate) are ever client-settable, and only while status='draft'
+// (enforced independently inside quotes.ts, not just here).
+
+const QuoteLineItemSchema = z.object({
+  id: z.number().int(),
+  description: z.string(),
+  category: z.string(),
+  quantity: z.number(),
+  unit: z.string(),
+  unit_price_cents: z.number().int(),
+  total_cents: z.number().int(),
+  sort_order: z.number().int(),
+  asset_id: z.number().int().nullable(),
+}).openapi("QuoteLineItem");
+
+const QuoteVersionSchema = z.object({
+  id: z.number().int(),
+  quote_id: z.number().int(),
+  version_number: z.number().int(),
+  subtotal_cents: z.number().int(),
+  discount_type: z.string(),
+  discount_percent: z.number(),
+  discount_cents: z.number().int(),
+  tax_rate: z.number(),
+  tax_amount_cents: z.number().int(),
+  total_cents: z.number().int(),
+  notes: z.string(),
+  expires_at: z.string().nullable(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+}).openapi("QuoteVersion");
+
+const QuoteSchema = z.object({
+  id: z.number().int(),
+  identifier: z.string(),
+  customer_id: z.number().int(),
+  lead_id: z.number().int().nullable(),
+  status: z.string(),
+  current_version_id: z.number().int().nullable(),
+  accepted_by: z.number().int().nullable(),
+  accepted_at: z.string().nullable(),
+  accepted_version_id: z.number().int().nullable(),
+  rejected_reason: z.string(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  customer_name: z.string().nullable(),
+  lead_identifier: z.string().nullable(),
+}).openapi("Quote");
+
+const QuoteStatusHistorySchema = z.object({
+  id: z.number().int(),
+  quote_id: z.number().int(),
+  old_status: z.string().nullable(),
+  new_status: z.string(),
+  actor_user_id: z.number().int().nullable(),
+  reason: z.string(),
+  created_at: z.string(),
+}).openapi("QuoteStatusHistory");
+
+const LineItemInputSchema = z.object({
+  description: z.string().max(500).optional(),
+  category: z.enum(LINE_ITEM_CATEGORIES as unknown as [string, ...string[]]).optional(),
+  // Matches InvoiceLineInputSchema's quantity.positive() precedent; a
+  // negative quantity or price would drive computeQuoteTotals() negative
+  // despite its own discount-cap logic (that only clamps discount, not
+  // negative line inputs) — a price REDUCTION belongs in the discount
+  // fields, never in a line item itself.
+  quantity: z.number().positive().optional(),
+  unit: z.string().max(50).optional(),
+  unit_price_cents: z.number().int().min(0).optional(),
+  sort_order: z.number().int().optional(),
+  asset_id: z.number().int().nullable().optional(),
+}).strict();
+
+/** organization_id, every totals field, version_number, accepted_by/
+ *  accepted_at, and the audit actor are all deliberately absent from this
+ *  schema — mass-assignment protection (Section 28), matching the
+ *  established Asset/Job convention exactly. */
+const CreateQuoteInputSchema = z.object({
+  customer_id: z.number().int(),
+  lead_id: z.number().int().nullable().optional(),
+  discount_type: z.enum(DISCOUNT_TYPES as unknown as [string, ...string[]]).optional(),
+  discount_percent: z.number().min(0).max(100).optional(),
+  discount_cents: z.number().int().min(0).optional(),
+  tax_rate: z.number().min(0).max(100).optional(),
+  notes: z.string().max(2000).optional(),
+  expires_at: z.string().nullable().optional(),
+  line_items: z.array(LineItemInputSchema).optional(),
+}).strict();
+
+const UpdateVersionInputSchema = z.object({
+  discount_type: z.enum(DISCOUNT_TYPES as unknown as [string, ...string[]]).optional(),
+  discount_percent: z.number().min(0).max(100).optional(),
+  discount_cents: z.number().int().min(0).optional(),
+  tax_rate: z.number().min(0).max(100).optional(),
+  notes: z.string().max(2000).optional(),
+  expires_at: z.string().nullable().optional(),
+}).strict();
+
+function quoteErrorToResponse(err: QuoteError): { body: { error: string }; status: 400 | 404 | 409 } {
+  if (err.code === "not_found" || err.code === "invalid_customer" || err.code === "invalid_lead" || err.code === "invalid_asset") {
+    return { body: { error: err.message }, status: 404 };
+  }
+  if (err.code === "not_draft" || err.code === "referenced" || err.code === "conflict") {
+    return { body: { error: err.message }, status: 409 };
+  }
+  return { body: { error: err.message }, status: 400 };
+}
+
+const listQuotesRoute = createRoute({
+  method: "get",
+  path: "/api/quotes",
+  request: {
+    query: z.object({
+      status: z.string().optional(),
+      customer_id: z.string().optional(),
+      lead_id: z.string().optional(),
+      search: z.string().max(200).optional(),
+      limit: z.string().optional(),
+      offset: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Quotes",
+      content: { "application/json": { schema: z.object({ quotes: z.array(QuoteSchema.extend({ total_cents: z.number().int().nullable() })), total: z.number().int() }) } },
+    },
+    400: { description: "Invalid search filter", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listQuotesRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const q = c.req.valid("query");
+  const limit = Math.min(Math.max(parseInt(q.limit || "50", 10) || 50, 1), 200);
+  const offset = Math.max(parseInt(q.offset || "0", 10) || 0, 0);
+  try {
+    const { quotes, total } = await listQuotes(
+      actorOrganizationId(c),
+      {
+        status: q.status,
+        customer_id: q.customer_id ? Number(q.customer_id) : undefined,
+        lead_id: q.lead_id ? Number(q.lead_id) : undefined,
+        search: q.search,
+      },
+      limit, offset
+    );
+    return c.json({ quotes, total }, 200);
+  } catch (err) {
+    if (err instanceof QuoteError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+const createQuoteRoute = createRoute({
+  method: "post",
+  path: "/api/quotes",
+  request: { body: { content: { "application/json": { schema: CreateQuoteInputSchema } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ quote: QuoteSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Customer or lead not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createQuoteRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const data = c.req.valid("json");
+  try {
+    const quote = await createQuote(actorOrganizationId(c), me.id, data);
+    return c.json({ quote }, 201);
+  } catch (err) {
+    if (err instanceof QuoteError) {
+      const { body, status } = quoteErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const getQuoteRoute = createRoute({
+  method: "get",
+  path: "/api/quotes/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: {
+      description: "Quote detail",
+      content: { "application/json": { schema: z.object({ quote: QuoteSchema, version: QuoteVersionSchema.extend({ line_items: z.array(QuoteLineItemSchema) }).nullable() }) } },
+    },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getQuoteRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const quote = await getQuote(actorOrganizationId(c), Number(id));
+  if (!quote) return c.json({ error: "Quote not found" }, 404);
+  const version = quote.current_version_id !== null ? await getQuoteVersion(quote.id, quote.current_version_id) : null;
+  return c.json({ quote, version }, 200);
+});
+
+const deleteQuoteRoute = createRoute({
+  method: "delete",
+  path: "/api/quotes/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Cannot delete a quote with transition history", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(deleteQuoteRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  try {
+    const deleted = await deleteQuote(actorOrganizationId(c), Number(id));
+    if (!deleted) return c.json({ error: "Quote not found" }, 404);
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof QuoteError) {
+      const { body, status } = quoteErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const updateQuoteVersionRoute = createRoute({
+  method: "put",
+  path: "/api/quotes/{id}/version",
+  request: { params: IdParam, body: { content: { "application/json": { schema: UpdateVersionInputSchema } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ version: QuoteVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Quote is not in draft status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(updateQuoteVersionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const data = c.req.valid("json");
+  try {
+    const version = await updateQuoteVersion(actorOrganizationId(c), Number(id), data);
+    return c.json({ version }, 200);
+  } catch (err) {
+    if (err instanceof QuoteError) {
+      const { body, status } = quoteErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const addLineItemRoute = createRoute({
+  method: "post",
+  path: "/api/quotes/{id}/line-items",
+  request: { params: IdParam, body: { content: { "application/json": { schema: LineItemInputSchema } } } },
+  responses: {
+    201: { description: "Added", content: { "application/json": { schema: z.object({ version: QuoteVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Quote is not in draft status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(addLineItemRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const data = c.req.valid("json");
+  try {
+    const version = await addLineItem(actorOrganizationId(c), Number(id), data);
+    return c.json({ version }, 201);
+  } catch (err) {
+    if (err instanceof QuoteError) {
+      const { body, status } = quoteErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const updateLineItemRoute = createRoute({
+  method: "put",
+  path: "/api/quotes/{id}/line-items/{lineItemId}",
+  request: { params: z.object({ id: z.string(), lineItemId: z.string() }), body: { content: { "application/json": { schema: LineItemInputSchema } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ version: QuoteVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Quote is not in draft status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(updateLineItemRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id, lineItemId } = c.req.valid("param");
+  const data = c.req.valid("json");
+  try {
+    const version = await updateLineItem(actorOrganizationId(c), Number(id), Number(lineItemId), data);
+    return c.json({ version }, 200);
+  } catch (err) {
+    if (err instanceof QuoteError) {
+      const { body, status } = quoteErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const deleteLineItemRoute = createRoute({
+  method: "delete",
+  path: "/api/quotes/{id}/line-items/{lineItemId}",
+  request: { params: z.object({ id: z.string(), lineItemId: z.string() }) },
+  responses: {
+    200: { description: "Removed", content: { "application/json": { schema: z.object({ version: QuoteVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Quote is not in draft status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(deleteLineItemRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id, lineItemId } = c.req.valid("param");
+  try {
+    const version = await deleteLineItem(actorOrganizationId(c), Number(id), Number(lineItemId));
+    return c.json({ version }, 200);
+  } catch (err) {
+    if (err instanceof QuoteError) {
+      const { body, status } = quoteErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const listQuoteVersionsRoute = createRoute({
+  method: "get",
+  path: "/api/quotes/{id}/versions",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Version history", content: { "application/json": { schema: z.object({ versions: z.array(QuoteVersionSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listQuoteVersionsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const quote = await getQuote(actorOrganizationId(c), Number(id));
+  if (!quote) return c.json({ error: "Quote not found" }, 404);
+  const versions = await listQuoteVersions(quote.id);
+  return c.json({ versions }, 200);
+});
+
+const getQuoteVersionRoute = createRoute({
+  method: "get",
+  path: "/api/quotes/{id}/versions/{versionId}",
+  request: { params: z.object({ id: z.string(), versionId: z.string() }) },
+  responses: {
+    200: { description: "Version detail", content: { "application/json": { schema: z.object({ version: QuoteVersionSchema.extend({ line_items: z.array(QuoteLineItemSchema) }) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getQuoteVersionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id, versionId } = c.req.valid("param");
+  const quote = await getQuote(actorOrganizationId(c), Number(id));
+  if (!quote) return c.json({ error: "Quote not found" }, 404);
+  const version = await getQuoteVersion(quote.id, Number(versionId));
+  if (!version) return c.json({ error: "Version not found" }, 404);
+  return c.json({ version }, 200);
+});
+
+const createQuoteRevisionRoute = createRoute({
+  method: "post",
+  path: "/api/quotes/{id}/revisions",
+  request: { params: IdParam, body: { content: { "application/json": { schema: z.object({}).strict() } } } },
+  responses: {
+    201: { description: "Revision created", content: { "application/json": { schema: z.object({ version: QuoteVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "A revision cannot be created from the current status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createQuoteRevisionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const organizationId = actorOrganizationId(c);
+  const quote = await getQuote(organizationId, Number(id));
+  if (!quote) return c.json({ error: "Quote not found" }, 404);
+  if (!canCreateRevisionFrom(quote.status)) {
+    return c.json({ error: `Cannot create a revision from status "${quote.status}"` }, 409);
+  }
+  try {
+    const version = await createQuoteRevision(organizationId, quote.id, me.id);
+    return c.json({ version }, 201);
+  } catch (err) {
+    if (err instanceof QuoteError) {
+      const { body, status } = quoteErrorToResponse(err);
+      return c.json(body, status);
+    }
+    throw err;
+  }
+});
+
+const getQuoteTransitionsRoute = createRoute({
+  method: "get",
+  path: "/api/quotes/{id}/transitions",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Allowed next statuses", content: { "application/json": { schema: z.object({ allowed: z.array(z.string()), can_create_revision: z.boolean() }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getQuoteTransitionsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const quote = await getQuote(actorOrganizationId(c), Number(id));
+  if (!quote) return c.json({ error: "Quote not found" }, 404);
+  return c.json({ allowed: resolveAllowedQuoteTransitions(quote.status), can_create_revision: canCreateRevisionFrom(quote.status) }, 200);
+});
+
+const transitionQuoteRoute = createRoute({
+  method: "post",
+  path: "/api/quotes/{id}/transition",
+  request: {
+    params: IdParam,
+    body: { content: { "application/json": { schema: z.object({ to_status: z.enum(QUOTE_STATUSES as unknown as [string, ...string[]]), reason: z.string().max(2000).optional() }).strict() } } },
+  },
+  responses: {
+    200: { description: "Transitioned", content: { "application/json": { schema: z.object({ quote: QuoteSchema }) } } },
+    400: { description: "Invalid transition or missing data", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict — quote changed since last read, or has expired", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(transitionQuoteRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const { to_status, reason } = c.req.valid("json");
+  try {
+    await transitionQuote(c.env.DB, Number(id), { toStatus: to_status, actorUserId: me.id, organizationId: actorOrganizationId(c), reason });
+    const quote = await getQuote(actorOrganizationId(c), Number(id));
+    if (!quote) return c.json({ error: "Quote not found" }, 404);
+    return c.json({ quote }, 200);
+  } catch (err) {
+    if (err instanceof QuoteWorkflowError) {
+      if (err.code === "not_found") return c.json({ error: err.message }, 404);
+      if (err.code === "conflict" || err.code === "expired") return c.json({ error: err.message }, 409);
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
+});
+
+const getQuoteStatusHistoryRoute = createRoute({
+  method: "get",
+  path: "/api/quotes/{id}/status-history",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Status history", content: { "application/json": { schema: z.object({ history: z.array(QuoteStatusHistorySchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getQuoteStatusHistoryRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const { id } = c.req.valid("param");
+  const quote = await getQuote(actorOrganizationId(c), Number(id));
+  if (!quote) return c.json({ error: "Quote not found" }, 404);
+  const history = await getQuoteStatusHistory(quote.id);
+  return c.json({ history }, 200);
 });
 
 // ── Service Types ──────────────────────────────────────────────────

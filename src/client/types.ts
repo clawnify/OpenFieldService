@@ -1,4 +1,4 @@
-export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility";
+export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "quotes" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility";
 
 export type Role = "admin" | "dispatcher" | "technician";
 
@@ -176,6 +176,76 @@ export interface Asset {
 export interface AssetType {
   key: string;
   label: string;
+}
+
+// Phase 12 — Quotes / Estimates. Domain/API term "Quote"; UI may say
+// "Quote / Estimate". A Quote is a durable identity; its commercial content
+// (line items, totals) lives in an immutable, versioned QuoteVersion — see
+// src/server/quotes.ts and migrations/0017_quotes.sql for the full model.
+export type QuoteStatus = "draft" | "sent" | "accepted" | "rejected" | "expired" | "cancelled";
+export type DiscountType = "none" | "fixed" | "percent";
+export type LineItemCategory = "service" | "labor" | "material" | "equipment" | "other";
+
+export interface Quote {
+  id: number;
+  identifier: string;
+  customer_id: number;
+  lead_id: number | null;
+  status: QuoteStatus;
+  current_version_id: number | null;
+  accepted_by: number | null;
+  accepted_at: string | null;
+  accepted_version_id: number | null;
+  rejected_reason: string;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string;
+  customer_name: string | null;
+  lead_identifier: string | null;
+}
+
+export interface QuoteLineItem {
+  id: number;
+  quote_version_id: number;
+  description: string;
+  category: LineItemCategory;
+  quantity: number;
+  unit: string;
+  unit_price_cents: number;
+  total_cents: number;
+  sort_order: number;
+  asset_id: number | null;
+}
+
+export interface QuoteVersion {
+  id: number;
+  quote_id: number;
+  version_number: number;
+  subtotal_cents: number;
+  discount_type: DiscountType;
+  discount_percent: number;
+  discount_cents: number;
+  tax_rate: number;
+  tax_amount_cents: number;
+  total_cents: number;
+  notes: string;
+  expires_at: string | null;
+  created_by: number | null;
+  created_at: string;
+}
+
+export interface QuoteVersionDetail extends QuoteVersion {
+  line_items: QuoteLineItem[];
+}
+
+export interface QuoteStatusHistoryRow {
+  id: number;
+  quote_id: number;
+  old_status: string | null;
+  new_status: string;
+  actor_user_id: number | null;
+  reason: string;
+  created_at: string;
 }
 
 export interface RebateCriterion {
