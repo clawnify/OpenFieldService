@@ -7,6 +7,7 @@ import { createTwilioSmsProvider } from "./notification-twilio.js";
 import { ProviderError, sanitizeErrorMessage, safeCode } from "./notification-providers.js";
 import type { EmailProvider, SmsProvider } from "./notification-providers.js";
 import { getSignedDocumentBytesForDelivery } from "./contracts.js";
+import { getInvoicePdfBytesForDelivery, getReceiptPdfBytesForDelivery } from "./financial.js";
 import type { StorageEnv } from "./storage.js";
 
 /**
@@ -236,10 +237,11 @@ export type DispatchOutcome = "sent" | "retry" | "failed" | "cancelled" | "skipp
 /** The per-row pipeline. Caller MUST have already won `claimNotification()`
  *  for this id (status is 'sending') — this function does not claim.
  *  `env` is optional and only ever consulted for a template that actually
- *  needs an attachment (currently: `contract_signed_copy_v1`) — every
- *  pre-existing call site across ~50 test cases and the real Cron path
- *  keeps working unchanged whether or not it's supplied, since no other
- *  template reaches the attachment-resolution branch below. */
+ *  needs an attachment (`contract_signed_copy_v1`, and — Phase 13B —
+ *  `invoice_sent_v1`/`payment_receipt_v1`) — every pre-existing call site
+ *  across ~50 test cases and the real Cron path keeps working unchanged
+ *  whether or not it's supplied, since no other template reaches the
+ *  attachment-resolution branch below. */
 export async function dispatchOne(id: number, providers: Providers, env?: StorageEnv): Promise<DispatchOutcome> {
   const row = await get<OutboxRow>(
     `SELECT id, event_type, entity_type, entity_id, channel, recipient, template_key, payload, attempts, dedupe_key
@@ -306,6 +308,22 @@ export async function dispatchOne(id: number, providers: Providers, env?: Storag
         if (!env) throw new ProviderError("attachment_unavailable", "Storage binding unavailable for signed-copy attachment");
         const doc = await getSignedDocumentBytesForDelivery(env, row.entity_id);
         if (!doc) throw new ProviderError("attachment_unavailable", "Signed document could not be loaded for attachment");
+        attachments = [{ filename: doc.filename, contentType: doc.contentType, content: new Uint8Array(doc.bytes) }];
+      } else if (row.template_key === "invoice_sent_v1") {
+        // Phase 13B — unlike the Contract's stored artifact, the Invoice
+        // PDF is rendered LIVE here (matching the /pdf route exactly —
+        // see invoice-pdf.ts's own lifecycle-decision comment), so the
+        // attachment always reflects the invoice's current state at
+        // actual send time, not whatever it looked like when "Send" was
+        // first clicked (relevant on a resend after edits).
+        if (!env) throw new ProviderError("attachment_unavailable", "Storage binding unavailable for invoice attachment");
+        const doc = await getInvoicePdfBytesForDelivery(env, row.entity_id);
+        if (!doc) throw new ProviderError("attachment_unavailable", "Invoice could not be loaded for attachment");
+        attachments = [{ filename: doc.filename, contentType: doc.contentType, content: new Uint8Array(doc.bytes) }];
+      } else if (row.template_key === "payment_receipt_v1") {
+        if (!env) throw new ProviderError("attachment_unavailable", "Storage binding unavailable for receipt attachment");
+        const doc = await getReceiptPdfBytesForDelivery(env, row.entity_id);
+        if (!doc) throw new ProviderError("attachment_unavailable", "Receipt could not be loaded for attachment");
         attachments = [{ filename: doc.filename, contentType: doc.contentType, content: new Uint8Array(doc.bytes) }];
       }
       const result = await providers.email.send({

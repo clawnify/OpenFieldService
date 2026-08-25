@@ -432,3 +432,48 @@ export async function enqueuePaymentReceived(
     channels: ["email"],
   });
 }
+
+/** Phase 13B (Section 6) — the explicit "Send Invoice to Customer" action.
+ *  Deliberately NEVER called automatically from issueInvoiceRoute (the
+ *  Core Business Rule: "Invoice Delivery != Payment Recording" — a
+ *  customer email must never be a side effect of an invoice merely
+ *  becoming billable) — the only call site is index.ts's dedicated
+ *  POST /api/invoices/{id}/send route, always via
+ *  financial.ts#prepareInvoiceSend() so repeated calls reuse one row
+ *  rather than ever enqueueing a second one. discriminator is the
+ *  invoice's own id — prepareInvoiceSend's own existing-row check is the
+ *  actual reuse mechanism; this dedupe_key is the same defense-in-depth
+ *  backstop every other single-fire event in this file already has. */
+export async function enqueueInvoiceSent(
+  invoice: InvoiceContactInfo & { totalCents: number; dueDate: string; companyName: string; payUrl: string }
+): Promise<EnqueueResult> {
+  return enqueueChannel({
+    eventType: "invoice.sent", entityType: "invoice", entityId: invoice.invoiceId,
+    channel: "email", recipientType: "customer", recipientId: invoice.customerId, recipientContact: invoice.customerEmail,
+    templateKey: "invoice_sent_v1",
+    payload: {
+      customer_name: invoice.customerName, invoice_identifier: invoice.invoiceIdentifier, total_cents: invoice.totalCents,
+      due_date: invoice.dueDate, company_name: invoice.companyName, pay_url: invoice.payUrl,
+    },
+    discriminator: invoice.invoiceId,
+  });
+}
+
+/** Phase 13B (Section 21-24) — the Receipt email. Fired either
+ *  automatically (a confirmed online payment — see
+ *  index.ts's payment webhook/confirm routes) or explicitly (office
+ *  clicks "Email Receipt" after a manual payment — Section 24: "must NOT
+ *  be mandatory for manual/on-site payments"). Always via
+ *  financial.ts#preparePaymentReceiptEmail() for the same reuse-the-row
+ *  discipline as enqueueInvoiceSent. */
+export async function enqueuePaymentReceipt(
+  invoice: InvoiceContactInfo & { paymentId: number; amountCents: number }
+): Promise<EnqueueResult> {
+  return enqueueChannel({
+    eventType: "payment.receipt", entityType: "payment", entityId: invoice.paymentId,
+    channel: "email", recipientType: "customer", recipientId: invoice.customerId, recipientContact: invoice.customerEmail,
+    templateKey: "payment_receipt_v1",
+    payload: { customer_name: invoice.customerName, invoice_identifier: invoice.invoiceIdentifier, amount_cents: invoice.amountCents },
+    discriminator: invoice.paymentId,
+  });
+}

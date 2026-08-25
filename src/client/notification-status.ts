@@ -33,6 +33,8 @@ export const NOTIFICATION_EVENT_LABELS: Record<string, string> = {
   "job.post_job_survey": "Post-Job Survey",
   "invoice.issued": "Invoice Issued",
   "payment.received": "Payment Received",
+  "invoice.sent": "Invoice Sent",
+  "payment.receipt": "Receipt Emailed",
 };
 
 export function eventTypeLabel(eventType: string): string {

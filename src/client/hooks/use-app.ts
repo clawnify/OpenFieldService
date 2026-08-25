@@ -413,7 +413,10 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void, ro
 
   const recordPayment = useCallback(async (
     invoiceId: number,
-    data: { amount_cents: number; payer_type: string; method: string; reference?: string; notes?: string; paid_at?: string }
+    data: {
+      amount_cents: number; payer_type: string; method: string; reference?: string; notes?: string; paid_at?: string;
+      received_by?: string; email_receipt?: boolean;
+    }
   ) => {
     await api("POST", `/api/invoices/${invoiceId}/payments`, data);
     await refreshInvoiceState(invoiceId);

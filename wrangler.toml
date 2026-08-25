@@ -79,6 +79,14 @@ GOOGLE_MAPS_BROWSER_API_KEY = ""
 # GEOCODING_PROVIDER's key above.
 ROUTING_PROVIDER = "none"
 
+# Phase 13B — MOCK_PAYMENT_WEBHOOK_SECRET (Online Payment) is a secret: set
+# it in .dev.vars locally and with `wrangler secret put` in production —
+# never here. Leaving it blank is a normal, disclosed "online payment not
+# available" state (Section 34's Provider-Disabled Mode) — every other
+# financial workflow (manual/on-site payments, receipts, invoice PDF/email)
+# works fully with no online provider configured. See
+# src/server/payment-provider.ts.
+
 # Phase 9.2 — drains the notification outbox and scans for day-before
 # reminders. Every minute so the documented 1-minute first-retry backoff
 # (see src/server/notification-dispatcher.ts) is actually honored promptly;

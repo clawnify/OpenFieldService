@@ -3,6 +3,7 @@ import { App } from "./app";
 import { AuthProvider, useAuth } from "./auth-context";
 import { LoginPage } from "./components/login";
 import { SignContract } from "./components/sign-contract";
+import { PublicPay } from "./components/public-pay";
 import "./styles.css";
 
 function Root() {
@@ -22,10 +23,15 @@ function Root() {
 // precedent of being a top-level alternative to <App />, not a route
 // inside it.
 const signMatch = window.location.pathname.match(/^\/sign\/([^/]+)$/);
+// Phase 13B — same standalone-page precedent as /sign/:token above, for
+// the public online-payment link (see public-pay.tsx's own doc comment).
+const payMatch = window.location.pathname.match(/^\/pay\/([^/]+)$/);
 
 render(
   signMatch ? (
     <SignContract token={decodeURIComponent(signMatch[1])} />
+  ) : payMatch ? (
+    <PublicPay token={decodeURIComponent(payMatch[1])} />
   ) : (
     <AuthProvider>
       <Root />

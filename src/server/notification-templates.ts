@@ -134,6 +134,41 @@ const EMAIL_TEMPLATES: Record<string, (p: Payload) => EmailContent> = {
     ]);
     return { subject: `Your signed contract — ${contract}`, text, html };
   },
+  // Phase 13B (Section 6/7/33) — the explicit "Send Invoice" action, fired
+  // only when an office user deliberately triggers delivery (never
+  // automatically on issue — see the Core Business Rule in
+  // recalculateStatus/issueInvoiceRoute's own comments). `pay_url` is
+  // present only when online payment is enabled AND a payment link was
+  // generated alongside the send — absent, the email simply omits the Pay
+  // Online line rather than showing a dead/misleading link (Section 33:
+  // "If provider unavailable: Invoice email still sends, Pay Online
+  // omitted/disabled safely").
+  invoice_sent_v1: (p) => {
+    const name = str(p, "customer_name", "there");
+    const invoice = str(p, "invoice_identifier");
+    const total = formatCents(p, "total_cents");
+    const dueDate = str(p, "due_date");
+    const payUrl = str(p, "pay_url");
+    const lines = [
+      `Your invoice ${invoice} for ${total} is attached.`,
+      dueDate ? `Payment is due by ${dueDate}.` : "",
+    ].filter(Boolean);
+    if (payUrl) lines.push(`Pay online: ${payUrl}`);
+    const { text, html } = emailWrap(`Hi ${name},`, lines);
+    return { subject: `Invoice ${invoice} from ${str(p, "company_name", "us")}`, text, html };
+  },
+  // Phase 13B (Section 21-24) — explicit-or-automatic Receipt email
+  // (manual payments: explicit opt-in only; online payments: automatic —
+  // see financial.ts#processPaymentWebhookEvent's caller in index.ts).
+  payment_receipt_v1: (p) => {
+    const name = str(p, "customer_name", "there");
+    const invoice = str(p, "invoice_identifier");
+    const amount = formatCents(p, "amount_cents");
+    const { text, html } = emailWrap(`Hi ${name},`, [
+      `Your receipt for a payment of ${amount} on invoice ${invoice} is attached. Thank you.`,
+    ]);
+    return { subject: `Receipt for your payment — ${invoice}`, text, html };
+  },
 };
 
 const SMS_TEMPLATES: Record<string, (p: Payload) => SmsContent> = {

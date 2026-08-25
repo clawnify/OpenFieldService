@@ -159,15 +159,19 @@ describe("Invoice notification history", () => {
     return invoiceRows[0].id;
   }
 
-  it("20. shows invoice.issued and payment.received together", async () => {
+  // Phase 13B — invoice.issued/payment.received are no longer auto-fired
+  // (Section 5's Core Business Rule); the explicit Send Invoice action and
+  // an opt-in Email Receipt on payment are their replacements.
+  it("20. shows invoice.sent and payment.receipt together", async () => {
     const auth = await authHeaders();
     const invoiceId = await completedInvoice(auth);
-    await post(`/api/invoices/${invoiceId}/payments`, { amount_cents: 100, payer_type: "customer", method: "cash" }, auth);
+    await post(`/api/invoices/${invoiceId}/send`, {}, auth);
+    await post(`/api/invoices/${invoiceId}/payments`, { amount_cents: 100, payer_type: "customer", method: "cash", email_receipt: true }, auth);
     const res = await request<HistoryResponse>(`/api/invoices/${invoiceId}/notifications`, auth);
     expect(res.response.status).toBe(200);
     const types = res.body.notifications.map((n) => n.event_type);
-    expect(types).toContain("invoice.issued");
-    expect(types).toContain("payment.received");
+    expect(types).toContain("invoice.sent");
+    expect(types).toContain("payment.receipt");
   });
 
   it("technician is denied (canManageFinancials blackout)", async () => {

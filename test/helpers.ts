@@ -471,6 +471,75 @@ export function mockGoogleApi(overrides: Partial<GoogleMockState> = {}): GoogleM
   };
 }
 
+// ── PDF text extraction (Phase 13B content-correctness tests) ───────────
+//
+// pdf-lib's default save() Flate-compresses content streams, so a raw
+// substring check against a rendered PDF's bytes only ever finds the
+// literal object dictionaries — never the actual text drawn on the page.
+// This inflates every `stream ... endstream` block (using the Workers-
+// runtime-native DecompressionStream — PDF's FlateDecode is the same
+// zlib/RFC1950 format as the Streams API's "deflate") and decodes the hex
+// strings pdf-lib draws Tj text as, so a test can assert on what the
+// rendered page actually says. StandardFonts like Helvetica draw literal
+// single-byte-per-character text, so this round-trips as plain ASCII.
+// Best-effort: any block that isn't itself Flate-compressed (already-plain
+// object dictionaries) is skipped rather than failing the extraction.
+//
+// This is deliberately NOT a substitute for exact-byte comparison against
+// an immutable stored artifact (see contracts' signed_document_hash
+// pattern) — Invoice/Receipt PDFs are live-rendered and embed a real
+// generation timestamp (CreationDate/ModDate) on every render, so two
+// renders of the same invoice/payment seconds apart are legitimately
+// byte-different even though their financial content is identical. Text
+// extraction is the correct invariant to test here, not byte equality.
+
+export function pdfBytesToText(bytes: Uint8Array): string {
+  let result = "";
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    result += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return result;
+}
+
+function textToBytes(text: string): Uint8Array {
+  return Uint8Array.from(text, (ch) => ch.charCodeAt(0));
+}
+
+export async function extractPdfText(bytes: Uint8Array): Promise<string> {
+  const raw = pdfBytesToText(bytes);
+  let out = "";
+  let from = 0;
+  for (;;) {
+    const streamAt = raw.indexOf("stream", from);
+    if (streamAt === -1) break;
+    const endAt = raw.indexOf("endstream", streamAt);
+    if (endAt === -1) break;
+    let bodyStart = streamAt + "stream".length;
+    if (raw[bodyStart] === "\r") bodyStart++;
+    if (raw[bodyStart] === "\n") bodyStart++;
+    let bodyEnd = endAt;
+    if (raw[bodyEnd - 1] === "\n") bodyEnd--;
+    if (raw[bodyEnd - 1] === "\r") bodyEnd--;
+    const body = textToBytes(raw.slice(bodyStart, bodyEnd));
+    try {
+      const ds = new DecompressionStream("deflate");
+      const decompressedStream = new Response(body as BodyInit).body!.pipeThrough(ds);
+      const inflated = new Uint8Array(await new Response(decompressedStream).arrayBuffer());
+      out += pdfBytesToText(inflated);
+    } catch {
+      // Not a Flate stream (or malformed) — skip, this is best-effort text extraction for tests.
+    }
+    from = endAt + "endstream".length;
+  }
+  const decodedHex = out.replace(/<([0-9A-Fa-f]{2,})>/g, (_m, hex: string) => {
+    let decoded = "";
+    for (let i = 0; i + 1 < hex.length; i += 2) decoded += String.fromCharCode(parseInt(hex.slice(i, i + 2), 16));
+    return decoded;
+  });
+  return out + decodedHex;
+}
+
 // ── Notification provider mocks (Phase 9.2) ─────────────────────────────
 //
 // Same same-isolate monkey-patch trick as mockGoogleApi() above — the

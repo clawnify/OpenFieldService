@@ -98,6 +98,7 @@ export interface AppContextValue {
   setInvoiceRebate: (id: number, rebateAmountCents: number) => Promise<void>;
   recordPayment: (invoiceId: number, data: {
     amount_cents: number; payer_type: string; method: string; reference?: string; notes?: string; paid_at?: string;
+    received_by?: string; email_receipt?: boolean;
   }) => Promise<void>;
   voidPayment: (paymentId: number, invoiceId: number, reason: string) => Promise<void>;
 

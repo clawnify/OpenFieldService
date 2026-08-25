@@ -1,8 +1,8 @@
 import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
-  DEFAULT_ORGANIZATION_ID, applySchema, authHeaders, createCustomer, createJob, executeStatements, mockNotificationProviders,
-  post, put, queryDb, resetDatabase, runScheduled,
+  DEFAULT_ORGANIZATION_ID, applySchema, authHeaders, createCustomer, createJob, executeStatements, extractPdfText,
+  mockNotificationProviders, post, put, queryDb, requestRaw, resetDatabase, runScheduled, satisfyCompletionRequirements,
 } from "./helpers.js";
 import {
   buildProviders, businessDateOffset, enqueueDayBeforeReminders, getBusinessTimezone, runDispatchCycle,
@@ -488,6 +488,35 @@ describe("templates", () => {
     expect(email.subject.length).toBeGreaterThan(0);
     expect(email.text).not.toContain("undefined");
   });
+
+  // Phase 13B — invoice_sent_v1/payment_receipt_v1 are email-only (see
+  // notifications.ts's enqueueInvoiceSent/enqueuePaymentReceipt, both call
+  // enqueueChannel with channel: "email" directly, never enqueueEvent) —
+  // same precedent as Phase 13A's contract_signed_copy_v1, which is
+  // likewise deliberately absent from the dual-channel `cases` loop above
+  // rather than given a pointless SMS template that's never reachable.
+  it("renders a complete, safe email for invoice_sent_v1, with and without the optional due_date/pay_url", () => {
+    const full = renderEmail("invoice_sent_v1", {
+      customer_name: "Jane", invoice_identifier: "INV-1", total_cents: 15000, due_date: "2026-10-01",
+      company_name: "Acme", pay_url: "https://example.test/pay/abc",
+    });
+    expect(full.subject.length).toBeGreaterThan(0);
+    expect(full.text).toContain("https://example.test/pay/abc");
+    expect(full.text).not.toContain("{");
+    expect(full.text).not.toContain("undefined");
+
+    const minimal = renderEmail("invoice_sent_v1", { customer_name: "Jane", invoice_identifier: "INV-1", total_cents: 15000 });
+    expect(minimal.text.length).toBeGreaterThan(0);
+    expect(minimal.text).not.toContain("undefined");
+  });
+
+  it("renders a complete, safe email for payment_receipt_v1", () => {
+    const email = renderEmail("payment_receipt_v1", { customer_name: "Jane", invoice_identifier: "INV-1", amount_cents: 15000 });
+    expect(email.subject.length).toBeGreaterThan(0);
+    expect(email.text.length).toBeGreaterThan(0);
+    expect(email.text).not.toContain("{");
+    expect(email.text).not.toContain("undefined");
+  });
 });
 
 // ── Day-before reminder ───────────────────────────────────────────────────
@@ -765,6 +794,113 @@ describe("Contract signed-copy attachment resolution", () => {
     expect(mock.state.emailCalls).toHaveLength(0);
     const attempts = await attemptsFor(await signedCopyOutboxId(contractId));
     expect(attempts[0].error_code).toBe("attachment_unavailable");
+    mock.restore();
+  });
+});
+
+// ── Invoice/Receipt attachment resolution (Phase 13B, Section 6-8/21-24) ───
+// Same "email attachment matches the exact same artifact View/Download
+// would produce" proof as the Contract block above — testing review's
+// explicit request, mirroring that established pattern rather than
+// stopping coverage at "an outbox row exists with the right payload."
+
+async function createTechnician(name: string, adminAuth: RequestInit): Promise<number> {
+  const res = await post<{ id: number }>("/api/technicians", { name }, adminAuth);
+  expect(res.response.status).toBe(201);
+  return res.body.id;
+}
+
+async function issuedInvoiceFixture(email = "invoice-dispatch@example.test") {
+  const auth = await authHeaders();
+  const customer = await createCustomer();
+  await put(`/api/customers/${customer.id}`, { email }, auth);
+  const techId = await createTechnician("Dispatch Attachment Tech", auth);
+  const job = await createJob(customer.id, "2026-09-21", { technician_id: techId });
+  await post(`/api/jobs/${job.id}/transition`, { to_status: "in_progress" }, auth);
+  await satisfyCompletionRequirements(job.id, auth);
+  await post(`/api/jobs/${job.id}/transition`, { to_status: "completed" }, auth);
+  const rows = await queryDb<{ id: number; status: string }>("SELECT id, status FROM invoices WHERE job_id = ?", [job.id]);
+  const invoiceId = rows[0].id;
+  if (rows[0].status === "draft") {
+    const issued = await post(`/api/invoices/${invoiceId}/issue`, {}, auth);
+    expect(issued.response.status).toBe(200);
+  }
+  return { invoiceId, email, auth };
+}
+
+describe("Invoice/Receipt attachment resolution", () => {
+  // The fixture's job-creation/completion flow enqueues its own unrelated
+  // confirmation notifications alongside the invoice/receipt one under
+  // test, so assertions below scope to the specific attachment filename
+  // prefix rather than assuming runDispatchCycle()'s totals or
+  // emailCalls[0] belong to this test's event.
+
+  it("invoice_sent_v1 attaches a real PDF whose content matches GET /api/invoices/{id}/pdf's own render", async () => {
+    // Not a byte-for-byte comparison: Invoice/Receipt PDFs are live-rendered
+    // and stamp a real generation timestamp on every render (see the
+    // "live-rendered, not a frozen snapshot" architecture decision in
+    // financial.ts/receipt-pdf.ts), so two renders of the same invoice
+    // seconds apart legitimately differ byte-for-byte even though their
+    // financial content is identical — content extraction is the correct
+    // invariant here, matching invoice-delivery.test.ts's own receipt
+    // content-correctness test.
+    const mock = mockNotificationProviders();
+    const { invoiceId, email, auth } = await issuedInvoiceFixture();
+    await post(`/api/invoices/${invoiceId}/send`, {}, auth);
+    await runDispatchCycle(providers(), storageEnv());
+    const call = mock.state.emailCalls.find((c) => c.attachments?.some((a) => a.filename.startsWith("Invoice-")));
+    expect(call).toBeDefined();
+    expect(call!.to).toBe(email);
+    expect(call!.attachments).toHaveLength(1);
+    const attachedBytes = Uint8Array.from(atob(call!.attachments![0].content), (ch) => ch.charCodeAt(0));
+    expect(new TextDecoder().decode(attachedBytes.slice(0, 5))).toBe("%PDF-");
+    const attachedText = await extractPdfText(attachedBytes);
+
+    const invoiceRow = (await queryDb<{ identifier: string }>("SELECT identifier FROM invoices WHERE id = ?", [invoiceId]))[0];
+    expect(attachedText).toContain(invoiceRow.identifier);
+
+    const viewRes = await requestRaw(`/api/invoices/${invoiceId}/pdf`, auth);
+    const viewText = await extractPdfText(new Uint8Array(await viewRes.arrayBuffer()));
+    expect(viewText).toContain(invoiceRow.identifier);
+    mock.restore();
+  });
+
+  it("invoice_sent_v1 fails cleanly (retryable) rather than silently sending without an attachment when env is not supplied", async () => {
+    const mock = mockNotificationProviders();
+    const { invoiceId, auth } = await issuedInvoiceFixture();
+    await post(`/api/invoices/${invoiceId}/send`, {}, auth);
+    const outboxId = (await queryDb<{ id: number }>(
+      "SELECT id FROM notification_outbox WHERE entity_type = 'invoice' AND entity_id = ? AND event_type = 'invoice.sent'", [invoiceId]
+    ))[0].id;
+    await runDispatchCycle(providers()); // no env passed — mirrors every pre-existing call site in this file
+    expect(mock.state.emailCalls.some((c) => c.attachments?.some((a) => a.filename.startsWith("Invoice-")))).toBe(false);
+    const attempts = await attemptsFor(outboxId);
+    expect(attempts[0].error_code).toBe("attachment_unavailable");
+    mock.restore();
+  });
+
+  it("payment_receipt_v1 attaches a real PDF whose content matches GET /api/payments/{id}/receipt-pdf's own render", async () => {
+    // Content extraction, not byte equality — see the comment on the
+    // invoice_sent_v1 test above for why (live-rendered, timestamped PDFs).
+    const mock = mockNotificationProviders();
+    const { invoiceId, email, auth } = await issuedInvoiceFixture();
+    await post(`/api/invoices/${invoiceId}/payments`, {
+      amount_cents: 100, payer_type: "customer", method: "cash", reference: "DISPATCH-RECEIPT-CHECK", email_receipt: true,
+    }, auth);
+    await runDispatchCycle(providers(), storageEnv());
+    const call = mock.state.emailCalls.find((c) => c.attachments?.some((a) => a.filename.startsWith("Receipt-")));
+    expect(call).toBeDefined();
+    expect(call!.to).toBe(email);
+    expect(call!.attachments).toHaveLength(1);
+    const attachedBytes = Uint8Array.from(atob(call!.attachments![0].content), (ch) => ch.charCodeAt(0));
+    expect(new TextDecoder().decode(attachedBytes.slice(0, 5))).toBe("%PDF-");
+    const attachedText = await extractPdfText(attachedBytes);
+    expect(attachedText).toContain("DISPATCH-RECEIPT-CHECK");
+
+    const paymentRows = await queryDb<{ id: number }>("SELECT id FROM payments WHERE invoice_id = ?", [invoiceId]);
+    const viewRes = await requestRaw(`/api/payments/${paymentRows[0].id}/receipt-pdf`, auth);
+    const viewText = await extractPdfText(new Uint8Array(await viewRes.arrayBuffer()));
+    expect(viewText).toContain("DISPATCH-RECEIPT-CHECK");
     mock.restore();
   });
 });

@@ -26,7 +26,8 @@ export type Priority = "low" | "normal" | "high" | "urgent";
 // stored status at all (a computed display flag, invoice.is_overdue below).
 export type InvoiceStatus = "draft" | "issued" | "partially_paid" | "paid" | "void";
 export type PayerType = "customer" | "government" | "third_party";
-export type PaymentMethod = "cash" | "check" | "credit_card" | "debit_card" | "e_transfer" | "financing" | "other";
+export type PaymentMethod = "cash" | "check" | "credit_card" | "debit_card" | "e_transfer" | "bank_transfer" | "financing" | "other";
+export type PaymentSource = "manual" | "online_provider";
 
 export interface CompletionRequirement {
   key: string;
@@ -394,6 +395,22 @@ export interface Payment {
   voided_at: string | null;
   void_reason: string;
   created_at: string;
+  source: PaymentSource;
+  received_by: string;
+  payment_session_id: number | null;
+}
+
+// Phase 13B — the same shape as ContractDeliveryStatus (see below); one
+// generic aggregate shape reused for both Invoice-send and Receipt-email
+// delivery status.
+export interface DeliveryStatus {
+  total: number;
+  sent: number;
+  failed: number;
+  pending: number;
+  cancelled: number;
+  last_sent_at: string | null;
+  last_error: string | null;
 }
 
 export interface InvoiceAuditRow {

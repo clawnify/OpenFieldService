@@ -39,3 +39,12 @@ GOOGLE_MAPS_API_KEY=
 # from GOOGLE_MAPS_API_KEY above — restrict this one in Google Cloud
 # Console to the Routes API only, never reuse the geocoding key here.
 GOOGLE_ROUTES_API_KEY=
+
+# Phase 13B — gates the local/mock online payment flow (Section 34:
+# "Online Pay gracefully unavailable" when unset — every other financial
+# workflow, including manual/on-site payments, works with this blank).
+# Used to HMAC-sign/verify the mock payment provider's webhook events —
+# generate one with: openssl rand -base64 32. Not a real payment
+# processor credential (no production provider is configured by this
+# phase) — see src/server/payment-provider.ts.
+MOCK_PAYMENT_WEBHOOK_SECRET=

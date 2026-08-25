@@ -379,31 +379,47 @@ describe("invoice issued / payment received", () => {
     return { job, invoice: invoiceRows[0] };
   }
 
-  it("issuing an invoice queues an invoice.issued notification", async () => {
+  // Phase 13B — Core Business Rule (Section 5): "Invoice Delivery !=
+  // Payment Recording." Issuing an invoice and recording a payment used to
+  // automatically queue invoice.issued/payment.received emails
+  // respectively (the two tests these replace, preserved in spirit below
+  // but asserting the OPPOSITE outcome) — that made it structurally
+  // impossible to record an on-site cash payment without silently
+  // emailing the customer, since recording a payment requires the invoice
+  // to already be issued. See index.ts's issueInvoiceRoute/
+  // recordPaymentRoute comments for the full rationale.
+
+  it("issuing an invoice never automatically queues any notification", async () => {
     const auth = await authHeaders();
     const { invoice } = await completedJobWithDraftInvoice(auth);
-    // generateInvoiceForJob's own auto-issue path may already leave it as
-    // 'issued' via the completion transition — resolve current status directly.
     const current = await queryDb<{ id: number; status: string }>("SELECT id, status FROM invoices WHERE id = ?", [invoice.id]);
     if (current[0].status === "draft") {
       await post(`/api/invoices/${invoice.id}/issue`, {}, auth);
     }
     const rows = await outboxFor("invoice", invoice.id);
-    expect(rows.some((r) => r.event_type === "invoice.issued")).toBe(true);
+    expect(rows).toHaveLength(0);
   });
 
-  it("a duplicate issue attempt on an already-issued invoice does not duplicate the notification", async () => {
+  it("explicitly sending an invoice queues an invoice.sent notification, and a duplicate send request does not duplicate it", async () => {
     const auth = await authHeaders();
     const { invoice } = await completedJobWithDraftInvoice(auth);
     const current = await queryDb<{ status: string }>("SELECT status FROM invoices WHERE id = ?", [invoice.id]);
     if (current[0].status === "draft") await post(`/api/invoices/${invoice.id}/issue`, {}, auth);
-    const secondAttempt = await post(`/api/invoices/${invoice.id}/issue`, {}, auth);
-    expect(secondAttempt.response.status).toBe(400); // already issued — rejected before any enqueue call
+
+    const sent = await post(`/api/invoices/${invoice.id}/send`, {}, auth);
+    expect(sent.response.status).toBe(200);
     const rows = await outboxFor("invoice", invoice.id);
-    expect(rows.filter((r) => r.event_type === "invoice.issued")).toHaveLength(1);
+    expect(rows.filter((r) => r.event_type === "invoice.sent")).toHaveLength(1);
+
+    // Section 41 — a rapid duplicate call while the first send is still
+    // pending/sending must never create a second row.
+    const again = await post(`/api/invoices/${invoice.id}/send`, {}, auth);
+    expect(again.response.status).toBe(200);
+    const rowsAfter = await outboxFor("invoice", invoice.id);
+    expect(rowsAfter.filter((r) => r.event_type === "invoice.sent")).toHaveLength(1);
   });
 
-  it("recording a payment queues a payment.received notification", async () => {
+  it("recording a payment never automatically queues any notification", async () => {
     const auth = await authHeaders();
     const { invoice } = await completedJobWithDraftInvoice(auth);
     const current = await queryDb<{ status: string }>("SELECT status FROM invoices WHERE id = ?", [invoice.id]);
@@ -412,23 +428,34 @@ describe("invoice issued / payment received", () => {
       amount_cents: 100, payer_type: "customer", method: "cash",
     }, auth);
     expect(payRes.response.status).toBe(201);
-    const rows = await outboxFor("payment", 0); // placeholder, real check below by event_type on the invoice's own payments
-    const paymentRows = await queryDb<OutboxRow>("SELECT * FROM notification_outbox WHERE event_type = 'payment.received'");
-    expect(paymentRows.length).toBeGreaterThan(0);
-    expect(rows).toHaveLength(0); // sanity: entity_id=0 never matches anything real
+    const paymentRows = await queryDb<OutboxRow>("SELECT * FROM notification_outbox WHERE event_type = 'payment.receipt'");
+    expect(paymentRows).toHaveLength(0);
   });
 
-  it("a rejected payment (exceeds balance) never queues a notification", async () => {
+  it("recording a payment with email_receipt:true queues exactly one payment.receipt notification", async () => {
+    const auth = await authHeaders();
+    const { invoice } = await completedJobWithDraftInvoice(auth);
+    const current = await queryDb<{ status: string }>("SELECT status FROM invoices WHERE id = ?", [invoice.id]);
+    if (current[0].status === "draft") await post(`/api/invoices/${invoice.id}/issue`, {}, auth);
+    const payRes = await post(`/api/invoices/${invoice.id}/payments`, {
+      amount_cents: 100, payer_type: "customer", method: "cash", email_receipt: true,
+    }, auth);
+    expect(payRes.response.status).toBe(201);
+    const paymentRows = await queryDb<OutboxRow>("SELECT * FROM notification_outbox WHERE event_type = 'payment.receipt'");
+    expect(paymentRows).toHaveLength(1);
+  });
+
+  it("a rejected payment (exceeds balance) never queues a notification even with email_receipt:true", async () => {
     const auth = await authHeaders();
     const { invoice } = await completedJobWithDraftInvoice(auth);
     const current = await queryDb<{ status: string; total_cents: number }>("SELECT status, total_cents FROM invoices WHERE id = ?", [invoice.id]);
     if (current[0].status === "draft") await post(`/api/invoices/${invoice.id}/issue`, {}, auth);
-    const before = (await queryDb<{ count: number }>("SELECT COUNT(*) as count FROM notification_outbox WHERE event_type = 'payment.received'"))[0].count;
+    const before = (await queryDb<{ count: number }>("SELECT COUNT(*) as count FROM notification_outbox WHERE event_type = 'payment.receipt'"))[0].count;
     const overpay = await post(`/api/invoices/${invoice.id}/payments`, {
-      amount_cents: current[0].total_cents + 999999, payer_type: "customer", method: "cash",
+      amount_cents: current[0].total_cents + 999999, payer_type: "customer", method: "cash", email_receipt: true,
     }, auth);
     expect(overpay.response.status).toBe(400);
-    const after = (await queryDb<{ count: number }>("SELECT COUNT(*) as count FROM notification_outbox WHERE event_type = 'payment.received'"))[0].count;
+    const after = (await queryDb<{ count: number }>("SELECT COUNT(*) as count FROM notification_outbox WHERE event_type = 'payment.receipt'"))[0].count;
     expect(after).toBe(before);
   });
 });

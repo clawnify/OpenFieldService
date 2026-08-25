@@ -146,7 +146,7 @@ import { LeadWorkflowError, transitionLead } from "./lead-workflow.js";
 import { LeadConversionError, convertLead } from "./lead-conversion.js";
 import {
   enqueueAppointmentCancelled, enqueueAppointmentConfirmation, enqueueAppointmentRescheduled,
-  enqueueInvoiceIssued, enqueueOnTheWay, enqueuePaymentReceived, enqueuePostJobSurvey,
+  enqueueInvoiceSent, enqueueOnTheWay, enqueuePaymentReceipt, enqueuePostJobSurvey,
   getCustomerContact, latestPaymentId, latestScheduleHistoryId, latestStatusHistoryId, safeEnqueue,
 } from "./notifications.js";
 import { runCronCycle, type NotificationProviderBindings } from "./notification-dispatcher.js";
@@ -207,14 +207,26 @@ import {
   PAYER_TYPES,
   PAYMENT_METHODS,
   canManageFinancials,
+  cancelPaymentSessionByToken,
+  confirmMockPayment,
   createManualInvoice,
+  createPaymentSession,
   deleteDraftInvoice,
   generateInvoiceForJob,
   getInvoiceAudit,
   getInvoiceById,
+  getInvoiceDeliveryStatus,
   getInvoiceFinancials,
+  getInvoicePdfBytesForDelivery,
+  getPaymentDetail,
+  getPaymentReceiptDeliveryStatus,
+  getPaymentSessionByToken,
+  getReceiptPdfBytesForDelivery,
   issueInvoice,
   listPayments,
+  prepareInvoiceSend,
+  preparePaymentReceiptEmail,
+  processPaymentWebhookEvent,
   recordPayment,
   setRebateAmount,
   voidInvoice,
@@ -222,7 +234,7 @@ import {
   type PayerType,
   type PaymentMethod,
 } from "./financial.js";
-import { renderInvoicePdf } from "./invoice-pdf.js";
+import { MockPaymentProvider } from "./payment-provider.js";
 
 type GoogleBindings = {
   GOOGLE_CLIENT_ID?: string;
@@ -240,7 +252,14 @@ type GoogleBindings = {
 // lives in wrangler.toml's [vars], not .dev.vars.
 type MapsBrowserBindings = { GOOGLE_MAPS_BROWSER_API_KEY?: string };
 
-type Env = { Bindings: { DB: D1Database } & GoogleBindings & StorageEnv & NotificationProviderBindings & GoogleGeocodingBindings & MapsBrowserBindings & RoutingBindings; Variables: { user: PublicUser; organizationId: number } };
+// Phase 13B — secret-tier (lives in .dev.vars locally / `wrangler secret
+// put` in production, never wrangler.toml's [vars]), same convention as
+// every other provider secret above. Its mere presence/absence IS the
+// Provider-Disabled Mode gate (Section 34) — see paymentWebhookSecret()'s
+// own doc comment further down this file.
+type PaymentBindings = { MOCK_PAYMENT_WEBHOOK_SECRET?: string };
+
+type Env = { Bindings: { DB: D1Database } & GoogleBindings & StorageEnv & NotificationProviderBindings & GoogleGeocodingBindings & MapsBrowserBindings & RoutingBindings & PaymentBindings; Variables: { user: PublicUser; organizationId: number } };
 
 function googleEnv(c: Context<Env>): GoogleOAuthEnv & CalendarSyncEnv {
   const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, TOKEN_ENCRYPTION_KEY } = c.env;
@@ -269,7 +288,13 @@ const app = createApp<Env>({
 // which is a no-op without one). Registered immediately after app
 // creation so it wraps every route defined below.
 
-const PUBLIC_API_PATHS = new Set(["/api/auth/login", "/api/auth/logout"]);
+// Phase 13B — the payment-provider webhook has no session of any kind (a
+// real provider's server calls it directly, cookie-less, the same way
+// Stripe/etc. webhooks work) — its security boundary is the HMAC
+// signature check inside the handler (Section 30), not session auth, by
+// design. An exact-match entry (not a token in the path) is correct here,
+// unlike the /api/public/ prefix exemption below.
+const PUBLIC_API_PATHS = new Set(["/api/auth/login", "/api/auth/logout", "/api/webhooks/payments/mock"]);
 
 app.use("/api/*", async (c, next) => {
   // Phase 13 — the ONLY prefix-based (not exact-match) public exemption in
@@ -5853,6 +5878,22 @@ app.openapi(deleteJobMaterial, async (c) => {
 // migrations/0007_financial_invoicing.sql and financial.ts's module doc for
 // why, and for what's stored vs. always computed on read.
 
+// Phase 13B — the one PaymentProvider instance this deployment uses
+// (Section 9: Core must never be locked to one payment company — every
+// route below reaches the provider through this single seam). Stateless,
+// so one shared instance is safe across requests (see payment-provider.ts).
+const paymentProvider = new MockPaymentProvider();
+
+/** Section 34 (Provider-Disabled Mode) / Section 59 (secrets belong in env,
+ *  never Global Settings): online payment is "enabled" purely by whether
+ *  this secret is configured — the exact same convention
+ *  RESEND_API_KEY/GOOGLE_MAPS_API_KEY already use elsewhere in this file.
+ *  Returns null (never throws) when unconfigured, so every call site can
+ *  treat "no secret" as a normal, disclosed, gracefully-unavailable state. */
+function paymentWebhookSecret(c: { env: { MOCK_PAYMENT_WEBHOOK_SECRET?: string } }): string | null {
+  return c.env.MOCK_PAYMENT_WEBHOOK_SECRET || null;
+}
+
 /** Attaches every computed money field (see financial.ts's module doc — never
  *  stored, always derived) for a single-invoice response. Delegates to
  *  getInvoiceFinancials() rather than recomputing the same aggregate here;
@@ -5969,56 +6010,137 @@ app.get("/api/invoices/:id/pdf", async (c) => {
   const organizationId = actorOrganizationId(c);
   if (!(await assertInvoiceInOrganization(organizationId, id))) return c.json({ error: "Invoice not found" }, 404);
 
-  const invoice = await get<Record<string, unknown>>(
-    `SELECT i.*, c.name as customer_name, c.email as customer_email, c.phone as customer_phone,
-            c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
-            j.identifier as job_identifier
-     FROM invoices i
-     LEFT JOIN customers c ON i.customer_id = c.id
-     LEFT JOIN jobs j ON i.job_id = j.id
-     WHERE i.id = ?`, [id]
-  );
-  if (!invoice) return c.json({ error: "Invoice not found" }, 404);
-  const lines = await query<{ description: string; quantity: number; unit_price_cents: number; total_cents: number }>(
-    "SELECT description, quantity, unit_price_cents, total_cents FROM invoice_lines WHERE invoice_id = ? ORDER BY id ASC", [id]
-  );
-  const payments = await query<{ amount_cents: number; method: string; paid_at: string; reference: string; voided_at: string | null }>(
-    "SELECT amount_cents, method, paid_at, reference, voided_at FROM payments WHERE invoice_id = ? ORDER BY paid_at ASC, id ASC", [id]
-  );
-  const financials = await getInvoiceFinancials(invoice as unknown as Parameters<typeof getInvoiceFinancials>[0], invoice.due_date as string);
-  const company = await getCompanyProfile(organizationId);
-  const logo = await getCompanyLogo(c.env, organizationId);
-
-  const bytes = await renderInvoicePdf({
-    identifier: invoice.identifier as string,
-    status: invoice.status as string,
-    issuedAt: invoice.issued_at as string | null,
-    dueDate: invoice.due_date as string,
-    notes: invoice.notes as string,
-    jobIdentifier: invoice.job_identifier as string | null,
-    customer: {
-      name: (invoice.customer_name as string) || "", email: (invoice.customer_email as string) || "",
-      phone: (invoice.customer_phone as string) || "", address: (invoice.customer_address as string) || "",
-      city: (invoice.customer_city as string) || "", state: (invoice.customer_state as string) || "", zip: (invoice.customer_zip as string) || "",
-    },
-    lines,
-    taxRate: invoice.tax_rate as number,
-    financials,
-    payments: payments.filter((p) => !p.voided_at),
-    company,
-    logo: logo ? { bytes: logo.bytes, format: logo.contentType === "image/jpeg" ? "jpeg" : "png" } : null,
-  });
+  // Phase 13B — reuses the exact same builder the automatic Invoice-email
+  // attachment resolves through (financial.ts#getInvoicePdfBytesForDelivery),
+  // so View/Download/Print and the emailed attachment are always the same
+  // rendering code path, never a duplicated "PDF for email" variant.
+  const doc = await getInvoicePdfBytesForDelivery(c.env, id);
+  if (!doc) return c.json({ error: "Invoice not found" }, 404);
 
   const disposition = c.req.query("mode") === "download" ? "attachment" : "inline";
-  return new Response(bytes.slice().buffer as ArrayBuffer, {
+  return new Response(doc.bytes, {
     headers: {
       "Content-Type": "application/pdf",
-      "Content-Disposition": `${disposition}; filename="Invoice-${invoice.identifier}.pdf"`,
+      "Content-Disposition": `${disposition}; filename="${doc.filename}"`,
       "X-Content-Type-Options": "nosniff",
       "Content-Security-Policy": "default-src 'none'; sandbox",
       "Cache-Control": "private, no-store",
     },
   });
+});
+
+// ── Phase 13B — Invoice Delivery (Section 6-8) ─────────────────────────
+// Deliberately separate from issue/payments (Section 5's Core Business
+// Rule) — see issueInvoiceRoute's own comment above for why the old
+// automatic-on-issue email was removed.
+
+const sendInvoiceRoute = createRoute({
+  method: "post",
+  path: "/api/invoices/{id}/send",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Send result", content: { "application/json": { schema: z.object({ action: z.string() }) } } },
+    400: { description: "Invalid state", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(sendInvoiceRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const invoiceId = Number(c.req.valid("param").id);
+  const organizationId = actorOrganizationId(c);
+  if (!(await assertInvoiceInOrganization(organizationId, invoiceId))) {
+    return c.json({ error: "Invoice not found" }, 404);
+  }
+  const invoice = await getInvoiceById(invoiceId);
+  if (!invoice) return c.json({ error: "Invoice not found" }, 404);
+  if (invoice.status === "draft" || invoice.status === "void") {
+    return c.json({ error: `Cannot send a ${invoice.status} invoice — issue it first` }, 400);
+  }
+  const contact = await getCustomerContact(invoice.customer_id);
+  if (!contact) return c.json({ error: "Customer contact not found" }, 400);
+
+  // Section 33 — "Pay Online" link is included only when online payment is
+  // configured; a payment-link generation failure (e.g. a $0 balance)
+  // never blocks the send itself, it just omits the link.
+  let payUrl = "";
+  const secret = paymentWebhookSecret(c);
+  if (secret) {
+    try {
+      const { rawToken } = await createPaymentSession(paymentProvider, organizationId, invoiceId, me.id);
+      payUrl = `${new URL(c.req.url).origin}/pay/${rawToken}`;
+    } catch {
+      // no remaining balance, or some other non-fatal session-creation
+      // issue — the invoice still sends, just without a Pay Online link.
+    }
+  }
+  const company = await getCompanyProfile(organizationId);
+
+  const result = await prepareInvoiceSend(invoiceId, () => enqueueInvoiceSent({
+    invoiceId: invoice.id, invoiceIdentifier: invoice.identifier,
+    customerId: invoice.customer_id, customerName: contact.name, customerEmail: contact.email, customerPhone: contact.phone,
+    totalCents: invoice.total_cents, dueDate: invoice.due_date, companyName: company.company_name || company.legal_name || "",
+    payUrl,
+  }));
+  return c.json({ action: result.action }, 200);
+});
+
+const getInvoiceDeliveryStatusRoute = createRoute({
+  method: "get",
+  path: "/api/invoices/{id}/delivery-status",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Delivery status", content: { "application/json": { schema: z.object({ delivery: z.any() }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getInvoiceDeliveryStatusRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const invoiceId = Number(c.req.valid("param").id);
+  if (!(await assertInvoiceInOrganization(actorOrganizationId(c), invoiceId))) {
+    return c.json({ error: "Invoice not found" }, 404);
+  }
+  const delivery = await getInvoiceDeliveryStatus(invoiceId);
+  return c.json({ delivery }, 200);
+});
+
+// ── Phase 13B — Online Payment (Section 9-13, 33) ──────────────────────
+
+const createPaymentLinkRoute = createRoute({
+  method: "post",
+  path: "/api/invoices/{id}/payment-link",
+  request: { params: IdParam },
+  responses: {
+    201: { description: "Payment link", content: { "application/json": { schema: z.object({ url: z.string(), expires_at: z.string() }) } } },
+    400: { description: "Invalid state", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    503: { description: "Online payment not available", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createPaymentLinkRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const invoiceId = Number(c.req.valid("param").id);
+  const organizationId = actorOrganizationId(c);
+  if (!(await assertInvoiceInOrganization(organizationId, invoiceId))) {
+    return c.json({ error: "Invoice not found" }, 404);
+  }
+  const secret = paymentWebhookSecret(c);
+  if (!secret) return c.json({ error: "Online payment is not available" }, 503);
+  try {
+    const { rawToken, session } = await createPaymentSession(paymentProvider, organizationId, invoiceId, me.id);
+    return c.json({ url: `${new URL(c.req.url).origin}/pay/${rawToken}`, expires_at: session.expires_at }, 201);
+  } catch (err) {
+    if (err instanceof FinancialError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
 });
 
 const getInvoice = createRoute({
@@ -6184,20 +6306,15 @@ app.openapi(issueInvoiceRoute, async (c) => {
     return c.json({ error: "Invoice not found" }, 404);
   }
   try {
+    // Phase 13B — Core Business Rule (Section 5): Invoice Delivery !=
+    // Payment Recording. Issuing an invoice makes it billable/eligible for
+    // payment; it must NEVER, by itself, email the customer — that used to
+    // happen automatically here (an invoice.issued notification), which
+    // made it impossible to issue an invoice for an on-site cash payment
+    // without also silently emailing the customer. The explicit "Send
+    // Invoice to Customer" action (POST /api/invoices/{id}/send, below)
+    // is now the ONLY way an invoice email goes out.
     const invoice = await issueInvoice(invoiceId, me.id);
-    // Phase 9.1 — invoice.id alone is a safe discriminator: issueInvoice()
-    // itself rejects issuing anything but a draft, so an invoice can only
-    // ever move to "issued" once. Best-effort, never affects the financial
-    // response below regardless of outcome.
-    await safeEnqueue(async () => {
-      const contact = await getCustomerContact(invoice.customer_id);
-      if (!contact) return;
-      await enqueueInvoiceIssued({
-        invoiceId: invoice.id, invoiceIdentifier: invoice.identifier,
-        customerId: invoice.customer_id, customerName: contact.name, customerEmail: contact.email, customerPhone: contact.phone,
-        totalCents: invoice.total_cents,
-      });
-    });
     return c.json(await attachFinancials(invoice as unknown as Record<string, unknown>), 200);
   } catch (err) {
     if (err instanceof FinancialError) {
@@ -6393,6 +6510,17 @@ const recordPaymentRoute = createRoute({
       reference: z.string().optional(),
       notes: z.string().optional(),
       paid_at: z.string().optional(),
+      // Phase 13B (Section 16): free-text — who physically took the
+      // payment. Optional, never required (Section 16: "Do not require
+      // reference for Cash unless business policy explicitly requires
+      // it" — same non-mandatory spirit).
+      received_by: z.string().optional(),
+      // Phase 13B (Section 24): explicit, OFF by default. Recording a
+      // payment NEVER emails the customer automatically (Section 5's Core
+      // Business Rule/Section 25's on-site-payment acceptance test) — this
+      // is the one opt-in exception, a deliberate same-request choice, not
+      // a silent default-on behavior.
+      email_receipt: z.boolean().optional(),
     }) } } },
   },
   responses: {
@@ -6412,6 +6540,11 @@ app.openapi(recordPaymentRoute, async (c) => {
   }
   const data = c.req.valid("json");
   try {
+    // source is deliberately never client-suppliable here — every payment
+    // recorded through THIS route (the office/manual action) is "manual"
+    // by construction; "online_provider" is set exclusively by
+    // processPaymentWebhookEvent (financial.ts), never reachable from this
+    // schema (mass-assignment guard, Section 39).
     const invoice = await recordPayment(c.env.DB, Number(id), {
       amountCents: data.amount_cents,
       payerType: data.payer_type as PayerType,
@@ -6419,6 +6552,7 @@ app.openapi(recordPaymentRoute, async (c) => {
       reference: data.reference ?? "",
       notes: data.notes ?? "",
       paidAt: data.paid_at ?? new Date().toISOString(),
+      receivedBy: data.received_by ?? "",
     }, me.id);
     // Phase 9.1 — a payment's own id (not the invoice's) is the
     // discriminator, since multiple payments can exist per invoice.
@@ -6426,16 +6560,18 @@ app.openapi(recordPaymentRoute, async (c) => {
     // payment id is read back the same way job_schedule_history/
     // job_status_history row ids are — a read-only lookup, not a change to
     // financial.ts.
-    await safeEnqueue(async () => {
-      const contact = await getCustomerContact(invoice.customer_id);
-      const paymentId = await latestPaymentId(invoice.id);
-      if (!contact || paymentId === null) return;
-      await enqueuePaymentReceived({
-        invoiceId: invoice.id, invoiceIdentifier: invoice.identifier,
-        customerId: invoice.customer_id, customerName: contact.name, customerEmail: contact.email, customerPhone: contact.phone,
-        paymentId, amountCents: data.amount_cents,
+    if (data.email_receipt) {
+      await safeEnqueue(async () => {
+        const contact = await getCustomerContact(invoice.customer_id);
+        const paymentId = await latestPaymentId(invoice.id);
+        if (!contact || paymentId === null) return;
+        await preparePaymentReceiptEmail(paymentId, () => enqueuePaymentReceipt({
+          invoiceId: invoice.id, invoiceIdentifier: invoice.identifier,
+          customerId: invoice.customer_id, customerName: contact.name, customerEmail: contact.email, customerPhone: contact.phone,
+          paymentId, amountCents: data.amount_cents,
+        }));
       });
-    });
+    }
     return c.json(await attachFinancials(invoice as unknown as Record<string, unknown>), 201);
   } catch (err) {
     if (err instanceof FinancialError) {
@@ -6483,6 +6619,235 @@ app.openapi(voidPaymentRoute, async (c) => {
     throw err;
   }
   return c.json({ ok: true }, 200);
+});
+
+// ── Phase 13B — Payment Receipts (Section 21-24) ────────────────────
+// No `receipts` table/entity — a Receipt is a live-rendered view of one
+// `payments` row (see receipt-pdf.ts's own header comment). Every route
+// here reuses the exact same tenant-via-invoice ownership check as
+// voidPaymentRoute above.
+
+async function assertPaymentInOrganization(organizationId: number, paymentId: number): Promise<boolean> {
+  const row = await get<{ id: number }>(
+    "SELECT p.id FROM payments p JOIN invoices i ON i.id = p.invoice_id WHERE p.id = ? AND i.organization_id = ?",
+    [paymentId, organizationId]
+  );
+  return !!row;
+}
+
+app.get("/api/payments/:id/receipt-pdf", async (c) => {
+  const me = currentUser(c);
+  if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Payment not found" }, 404);
+  if (!(await assertPaymentInOrganization(actorOrganizationId(c), id))) return c.json({ error: "Payment not found" }, 404);
+
+  const doc = await getReceiptPdfBytesForDelivery(c.env, id);
+  if (!doc) return c.json({ error: "Payment not found" }, 404);
+
+  const disposition = c.req.query("mode") === "download" ? "attachment" : "inline";
+  return new Response(doc.bytes, {
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `${disposition}; filename="${doc.filename}"`,
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'; sandbox",
+      "Cache-Control": "private, no-store",
+    },
+  });
+});
+
+const getReceiptDeliveryStatusRoute = createRoute({
+  method: "get",
+  path: "/api/payments/{id}/receipt-status",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Delivery status", content: { "application/json": { schema: z.object({ delivery: z.any() }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getReceiptDeliveryStatusRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const paymentId = Number(c.req.valid("param").id);
+  if (!(await assertPaymentInOrganization(actorOrganizationId(c), paymentId))) {
+    return c.json({ error: "Payment not found" }, 404);
+  }
+  const delivery = await getPaymentReceiptDeliveryStatus(paymentId);
+  return c.json({ delivery }, 200);
+});
+
+const emailReceiptRoute = createRoute({
+  method: "post",
+  path: "/api/payments/{id}/email-receipt",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Send result", content: { "application/json": { schema: z.object({ action: z.string() }) } } },
+    400: { description: "Invalid state", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(emailReceiptRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const paymentId = Number(c.req.valid("param").id);
+  if (!(await assertPaymentInOrganization(actorOrganizationId(c), paymentId))) {
+    return c.json({ error: "Payment not found" }, 404);
+  }
+  const payment = await getPaymentDetail(paymentId);
+  if (!payment) return c.json({ error: "Payment not found" }, 404);
+  const invoice = await getInvoiceById(payment.invoice_id);
+  if (!invoice) return c.json({ error: "Invoice not found" }, 404);
+  const contact = await getCustomerContact(invoice.customer_id);
+  if (!contact) return c.json({ error: "Customer contact not found" }, 400);
+
+  const result = await preparePaymentReceiptEmail(paymentId, () => enqueuePaymentReceipt({
+    invoiceId: invoice.id, invoiceIdentifier: invoice.identifier,
+    customerId: invoice.customer_id, customerName: contact.name, customerEmail: contact.email, customerPhone: contact.phone,
+    paymentId, amountCents: payment.amount_cents,
+  }));
+  return c.json({ action: result.action }, 200);
+});
+
+// ── Phase 13B — Public payment link + provider webhook (Section 11-13, 29-30) ──
+// Same generic-404-for-every-failure discipline as the public Contract
+// signing routes (/api/public/contracts/sign/{token}) — a wrong token, an
+// expired one, and an already-used one are all indistinguishable, so a
+// link can never be used to enumerate/probe invoice state.
+
+const GENERIC_PAY_LINK_ERROR = "This payment link is invalid or has expired";
+
+const PublicPayViewSchema = z.object({
+  invoice_identifier: z.string(),
+  company_name: z.string(),
+  balance_due_cents: z.number().int(),
+  status: z.string(),
+});
+
+const getPublicPayViewRoute = createRoute({
+  method: "get",
+  path: "/api/public/invoices/pay/{token}",
+  request: { params: z.object({ token: z.string() }) },
+  responses: {
+    200: { description: "Payment view", content: { "application/json": { schema: z.object({ view: PublicPayViewSchema }) } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getPublicPayViewRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const view = await getPaymentSessionByToken(token);
+  if (!view) return c.json({ error: GENERIC_PAY_LINK_ERROR }, 404);
+  return c.json({
+    view: {
+      invoice_identifier: view.invoiceIdentifier, company_name: view.companyName,
+      balance_due_cents: view.balanceDueCents, status: view.session.status,
+    },
+  }, 200);
+});
+
+const confirmPublicPayRoute = createRoute({
+  method: "post",
+  path: "/api/public/invoices/pay/{token}/confirm",
+  request: { params: z.object({ token: z.string() }) },
+  responses: {
+    200: { description: "Confirmation result", content: { "application/json": { schema: z.object({ outcome: z.string() }) } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+    503: { description: "Online payment not available", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(confirmPublicPayRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const secret = paymentWebhookSecret(c);
+  if (!secret) return c.json({ error: "Online payment is not available" }, 503);
+  try {
+    const result = await confirmMockPayment(c.env.DB, paymentProvider, secret, token);
+    if (result.outcome === "payment_recorded" && result.invoiceId) {
+      // Section 24 — online payments auto-email the receipt (unlike
+      // manual/on-site payments, which are opt-in only): the customer is
+      // actively completing a self-serve checkout and expects proof of
+      // payment the same way any e-commerce purchase would provide one.
+      await safeEnqueue(async () => {
+        const invoice = await getInvoiceById(result.invoiceId!);
+        if (!invoice) return;
+        const contact = await getCustomerContact(invoice.customer_id);
+        const paymentId = await latestPaymentId(invoice.id);
+        if (!contact || paymentId === null) return;
+        const payment = await getPaymentDetail(paymentId);
+        if (!payment) return;
+        await preparePaymentReceiptEmail(paymentId, () => enqueuePaymentReceipt({
+          invoiceId: invoice.id, invoiceIdentifier: invoice.identifier,
+          customerId: invoice.customer_id, customerName: contact.name, customerEmail: contact.email, customerPhone: contact.phone,
+          paymentId, amountCents: payment.amount_cents,
+        }));
+      });
+    }
+    return c.json({ outcome: result.outcome }, 200);
+  } catch (err) {
+    if (err instanceof FinancialError) return c.json({ error: GENERIC_PAY_LINK_ERROR }, 404);
+    throw err;
+  }
+});
+
+const cancelPublicPayRoute = createRoute({
+  method: "post",
+  path: "/api/public/invoices/pay/{token}/cancel",
+  request: { params: z.object({ token: z.string() }) },
+  responses: {
+    200: { description: "Cancelled", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Already resolved (paid/cancelled by another request)", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(cancelPublicPayRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  try {
+    const result = await cancelPaymentSessionByToken(token);
+    if (result.alreadyResolved) {
+      return c.json({ error: "This payment was already completed or cancelled" }, 400);
+    }
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof FinancialError) return c.json({ error: GENERIC_PAY_LINK_ERROR }, 404);
+    throw err;
+  }
+});
+
+// The "real" provider webhook endpoint (Section 30) — architecturally
+// present and fully functional (signature verification, replay
+// protection via the atomic pending->succeeded claim, amount/session
+// binding) even though the mock "Pay Now" flow above triggers the exact
+// same processPaymentWebhookEvent() in-process rather than over a real
+// HTTP round trip (a local mock provider has no separate external process
+// to call back from — see payment-provider.ts's own header comment).
+app.post("/api/webhooks/payments/mock", async (c) => {
+  const secret = paymentWebhookSecret(c);
+  if (!secret) return c.json({ error: "Not configured" }, 503);
+  const rawBody = await c.req.text();
+  const signature = c.req.header("X-Mock-Signature") ?? null;
+  const result = await processPaymentWebhookEvent(c.env.DB, paymentProvider, secret, rawBody, signature);
+  if (result.outcome === "invalid_signature") return c.json({ error: "Invalid signature" }, 401);
+  if (result.outcome === "session_not_found") return c.json({ error: "Unknown session" }, 404);
+  return c.json({ outcome: result.outcome }, 200);
+});
+
+const paymentsConfigResponseSchema = z.object({ enabled: z.boolean() });
+const getPaymentsConfig = createRoute({
+  method: "get",
+  path: "/api/config/payments",
+  responses: {
+    200: { description: "Online payment config", content: { "application/json": { schema: paymentsConfigResponseSchema } } },
+  },
+});
+
+app.openapi(getPaymentsConfig, async (c) => {
+  return c.json({ enabled: !!paymentWebhookSecret(c) }, 200);
 });
 
 // ── Create invoice from job (idempotent — see financial.ts) ─────────

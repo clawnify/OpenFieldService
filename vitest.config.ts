@@ -44,6 +44,13 @@ export default defineConfig({
             TWILIO_ACCOUNT_SID: "test-twilio-sid",
             TWILIO_AUTH_TOKEN: "test-twilio-token",
             TWILIO_FROM_NUMBER: "+15550100000",
+            // Phase 13B — fixed test-only value for the mock payment
+            // provider's webhook HMAC secret (see payment-provider.ts).
+            // Provider-disabled-mode tests unset this at the D1/env level
+            // is not possible mid-suite, so those tests instead assert
+            // against a request missing the signature header / a tampered
+            // signature, which is configuration-independent.
+            MOCK_PAYMENT_WEBHOOK_SECRET: "test-mock-payment-webhook-secret",
           },
         },
       };

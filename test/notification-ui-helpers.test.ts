@@ -17,6 +17,8 @@ describe("status labels", () => {
   it("maps known event types to business language, and falls back safely for unknown ones", () => {
     expect(eventTypeLabel("job.appointment_confirmation")).toBe("Appointment Confirmation");
     expect(eventTypeLabel("invoice.issued")).toBe("Invoice Issued");
+    expect(eventTypeLabel("invoice.sent")).toBe("Invoice Sent");
+    expect(eventTypeLabel("payment.receipt")).toBe("Receipt Emailed");
     expect(eventTypeLabel("some.unknown.event")).toBe("some.unknown.event");
   });
 

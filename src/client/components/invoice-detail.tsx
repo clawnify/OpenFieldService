@@ -1,11 +1,12 @@
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { useApp } from "../context";
 import { useAuth } from "../auth-context";
+import { api } from "../api";
 import { ConfirmDialog } from "./confirm-dialog";
 import { NotificationHistory } from "./notification-history";
 import { formatCents } from "../money";
 import { ArrowLeft, Trash2, X } from "lucide-preact";
-import type { InvoiceStatus, PayerType, PaymentMethod } from "../types";
+import type { DeliveryStatus, InvoiceStatus, PayerType, Payment, PaymentMethod } from "../types";
 
 const STATUS_COLORS: Record<InvoiceStatus, string> = {
   draft: "#6b7280",
@@ -35,9 +36,29 @@ const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
   credit_card: "Credit Card",
   debit_card: "Debit Card",
   e_transfer: "E-Transfer",
+  bank_transfer: "Bank Transfer",
   financing: "Financing",
   other: "Other",
 };
+
+const PAYMENT_SOURCE_LABELS: Record<string, string> = {
+  manual: "Manual",
+  online_provider: "Online",
+};
+
+// Phase 13B — Receipt PDF View/Download/Print, same route/window.open
+// convention as the Invoice PDF helpers above.
+function viewReceiptPdf(paymentId: number): void {
+  window.open(`/api/payments/${paymentId}/receipt-pdf`, "_blank", "noopener,noreferrer");
+}
+function downloadReceiptPdf(paymentId: number): void {
+  window.open(`/api/payments/${paymentId}/receipt-pdf?mode=download`, "_blank", "noopener,noreferrer");
+}
+function printReceiptPdf(paymentId: number): void {
+  const win = window.open(`/api/payments/${paymentId}/receipt-pdf`, "_blank");
+  if (!win) return;
+  win.addEventListener("load", () => win.print());
+}
 
 // Phase 13A final document hardening — Section 46: View/Download/Print,
 // all backed by the same live-rendered PDF route (see invoice-pdf.ts's
@@ -85,6 +106,7 @@ export function InvoiceDetail() {
   const [showPaymentForm, setShowPaymentForm] = useState(false);
   const [paymentDraft, setPaymentDraft] = useState({
     amount: "", payer_type: "customer" as PayerType, method: "cash" as PaymentMethod, reference: "", notes: "",
+    received_by: "", email_receipt: false,
   });
   const [pendingRecordPayment, setPendingRecordPayment] = useState(false);
   const [recordingPayment, setRecordingPayment] = useState(false);
@@ -92,6 +114,45 @@ export function InvoiceDetail() {
   const [pendingVoidPayment, setPendingVoidPayment] = useState<number | null>(null);
   const [voidPaymentReason, setVoidPaymentReason] = useState("");
   const [voidingPayment, setVoidingPayment] = useState(false);
+
+  // Phase 13B — Invoice Delivery / Online Payment / Receipts state.
+  const [deliveryStatus, setDeliveryStatus] = useState<DeliveryStatus | null>(null);
+  const [sendingInvoice, setSendingInvoice] = useState(false);
+  const [paymentsEnabled, setPaymentsEnabled] = useState(false);
+  const [generatingLink, setGeneratingLink] = useState(false);
+  const [paymentLink, setPaymentLink] = useState<string | null>(null);
+  const [receiptStatuses, setReceiptStatuses] = useState<Record<number, DeliveryStatus>>({});
+  const [emailingReceiptFor, setEmailingReceiptFor] = useState<number | null>(null);
+
+  const loadDeliveryAndConfig = async (invoiceId: number, payments: Payment[]) => {
+    try {
+      const [deliveryRes, configRes] = await Promise.all([
+        api<{ delivery: DeliveryStatus }>("GET", `/api/invoices/${invoiceId}/delivery-status`),
+        api<{ enabled: boolean }>("GET", "/api/config/payments"),
+      ]);
+      setDeliveryStatus(deliveryRes.delivery);
+      setPaymentsEnabled(configRes.enabled);
+    } catch {
+      // best-effort — the page still works fully without this supplementary status
+    }
+    const nonVoided = payments.filter((p) => !p.voided_at);
+    const entries = await Promise.all(nonVoided.map(async (p) => {
+      try {
+        const res = await api<{ delivery: DeliveryStatus }>("GET", `/api/payments/${p.id}/receipt-status`);
+        return [p.id, res.delivery] as const;
+      } catch {
+        return null;
+      }
+    }));
+    setReceiptStatuses(Object.fromEntries(entries.filter((e): e is [number, DeliveryStatus] => e !== null)));
+  };
+
+  useEffect(() => {
+    if (!invoice) return;
+    setPaymentLink(null);
+    void loadDeliveryAndConfig(invoice.id, invoice.payments || []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [invoice?.id, invoice?.payments?.length]);
 
   if (!invoice) return null;
 
@@ -180,14 +241,53 @@ export function InvoiceDetail() {
       await recordPayment(invoice.id, {
         amount_cents: amountCents, payer_type: paymentDraft.payer_type, method: paymentDraft.method,
         reference: paymentDraft.reference, notes: paymentDraft.notes,
+        received_by: paymentDraft.received_by, email_receipt: paymentDraft.email_receipt,
       });
       setShowPaymentForm(false);
       setPendingRecordPayment(false);
-      setPaymentDraft({ amount: "", payer_type: "customer", method: "cash", reference: "", notes: "" });
+      setPaymentDraft({ amount: "", payer_type: "customer", method: "cash", reference: "", notes: "", received_by: "", email_receipt: false });
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setRecordingPayment(false);
+    }
+  };
+
+  const handleSendInvoice = async () => {
+    setSendingInvoice(true);
+    try {
+      await api("POST", `/api/invoices/${invoice.id}/send`, {});
+      const res = await api<{ delivery: DeliveryStatus }>("GET", `/api/invoices/${invoice.id}/delivery-status`);
+      setDeliveryStatus(res.delivery);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSendingInvoice(false);
+    }
+  };
+
+  const handleGeneratePaymentLink = async () => {
+    setGeneratingLink(true);
+    try {
+      const res = await api<{ url: string }>("POST", `/api/invoices/${invoice.id}/payment-link`, {});
+      setPaymentLink(res.url);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setGeneratingLink(false);
+    }
+  };
+
+  const handleEmailReceipt = async (paymentId: number) => {
+    setEmailingReceiptFor(paymentId);
+    try {
+      await api("POST", `/api/payments/${paymentId}/email-receipt`, {});
+      const res = await api<{ delivery: DeliveryStatus }>("GET", `/api/payments/${paymentId}/receipt-status`);
+      setReceiptStatuses((prev) => ({ ...prev, [paymentId]: res.delivery }));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setEmailingReceiptFor(null);
     }
   };
 
@@ -330,25 +430,52 @@ export function InvoiceDetail() {
               ) : (
                 <table class="table">
                   <thead>
-                    <tr><th>Date</th><th>Payer</th><th>Method</th><th>Reference</th><th class="text-right">Amount</th><th></th></tr>
+                    <tr>
+                      <th>Date</th><th>Payer</th><th>Method</th><th>Source</th><th>Reference</th>
+                      <th class="text-right">Amount</th><th>Receipt</th><th></th>
+                    </tr>
                   </thead>
                   <tbody>
-                    {(invoice.payments || []).map((p) => (
-                      <tr key={p.id} class="table-row" style={p.voided_at ? { opacity: 0.5, textDecoration: "line-through" } : undefined}>
-                        <td class="text-muted">{new Date(p.paid_at).toLocaleDateString()}</td>
-                        <td>{PAYER_TYPE_LABELS[p.payer_type] || p.payer_type}</td>
-                        <td class="text-muted">{PAYMENT_METHOD_LABELS[p.method] || p.method}</td>
-                        <td class="text-muted">{p.reference || "—"}</td>
-                        <td class="text-right text-bold">{formatCents(p.amount_cents)}</td>
-                        <td>
-                          {!p.voided_at && (
-                            <button class="btn-icon danger" title="Void payment" onClick={() => setPendingVoidPayment(p.id)}>
-                              <X size={12} />
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                    {(invoice.payments || []).map((p) => {
+                      const receiptStatus = receiptStatuses[p.id];
+                      return (
+                        <tr key={p.id} class="table-row" style={p.voided_at ? { opacity: 0.5, textDecoration: "line-through" } : undefined}>
+                          <td class="text-muted">{new Date(p.paid_at).toLocaleDateString()}</td>
+                          <td>{PAYER_TYPE_LABELS[p.payer_type] || p.payer_type}</td>
+                          <td class="text-muted">{PAYMENT_METHOD_LABELS[p.method] || p.method}</td>
+                          <td class="text-muted">{PAYMENT_SOURCE_LABELS[p.source] || p.source}</td>
+                          <td class="text-muted">{p.reference || "—"}</td>
+                          <td class="text-right text-bold">{formatCents(p.amount_cents)}</td>
+                          <td>
+                            {!p.voided_at && (
+                              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
+                                <button class="btn-icon" title="View Receipt" onClick={() => viewReceiptPdf(p.id)}>View</button>
+                                <button class="btn-icon" title="Download Receipt" onClick={() => downloadReceiptPdf(p.id)}>DL</button>
+                                <button class="btn-icon" title="Print Receipt" onClick={() => printReceiptPdf(p.id)}>Print</button>
+                                <button
+                                  class="btn-icon" title="Email Receipt" disabled={emailingReceiptFor === p.id}
+                                  onClick={() => handleEmailReceipt(p.id)}
+                                >
+                                  {emailingReceiptFor === p.id ? "…" : "Email"}
+                                </button>
+                                {receiptStatus && receiptStatus.total > 0 && (
+                                  <span class="text-muted" style={{ fontSize: 11 }}>
+                                    {receiptStatus.failed > 0 ? "⚠ failed" : receiptStatus.sent > 0 ? "✓ sent" : "pending"}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                          </td>
+                          <td>
+                            {!p.voided_at && (
+                              <button class="btn-icon danger" title="Void payment" onClick={() => setPendingVoidPayment(p.id)}>
+                                <X size={12} />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               )}
@@ -408,6 +535,45 @@ export function InvoiceDetail() {
               <button class="btn btn-sm" onClick={() => printInvoicePdf(invoice.id)}>Print</button>
             </div>
           </div>
+
+          {invoice.status !== "draft" && (
+            <div class="detail-sidebar-section">
+              <h4>Invoice Delivery</h4>
+              <button class="btn btn-sm" disabled={sendingInvoice} onClick={handleSendInvoice}>
+                {sendingInvoice ? "Sending..." : deliveryStatus && deliveryStatus.total > 0 ? "Resend Invoice" : "Send Invoice"}
+              </button>
+              {deliveryStatus && deliveryStatus.total > 0 && (
+                <p class="text-muted" style={{ fontSize: 12, marginTop: 6 }}>
+                  {deliveryStatus.failed > 0
+                    ? `⚠ Delivery failed${deliveryStatus.last_error ? `: ${deliveryStatus.last_error}` : ""}`
+                    : deliveryStatus.sent > 0
+                      ? `✓ Sent${deliveryStatus.last_sent_at ? ` — ${new Date(deliveryStatus.last_sent_at).toLocaleString()}` : ""}`
+                      : "Pending delivery..."}
+                </p>
+              )}
+            </div>
+          )}
+
+          {invoice.status !== "draft" && invoice.status !== "void" && invoice.balance_cents > 0 && (
+            <div class="detail-sidebar-section">
+              <h4>Pay Online</h4>
+              {paymentsEnabled ? (
+                <>
+                  <button class="btn btn-sm" disabled={generatingLink} onClick={handleGeneratePaymentLink}>
+                    {generatingLink ? "Generating..." : "Generate Payment Link"}
+                  </button>
+                  {paymentLink && (
+                    <div style={{ marginTop: 8 }}>
+                      <input type="text" readOnly value={paymentLink} style={{ width: "100%", fontSize: 11 }} onClick={(e) => (e.target as HTMLInputElement).select()} />
+                      <p class="text-muted" style={{ fontSize: 11, marginTop: 4 }}>Share this link with the customer — shown once.</p>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p class="text-muted" style={{ fontSize: 12 }}>Online payment is not configured.</p>
+              )}
+            </div>
+          )}
 
           <div class="detail-sidebar-section">
             <h4>Rebate</h4>
@@ -572,6 +738,26 @@ export function InvoiceDetail() {
                   type="text" value={paymentDraft.notes}
                   onInput={(e) => setPaymentDraft({ ...paymentDraft, notes: (e.target as HTMLInputElement).value })}
                 />
+              </div>
+              <div class="form-group full-width">
+                <label>Received By (optional)</label>
+                <input
+                  type="text" value={paymentDraft.received_by}
+                  onInput={(e) => setPaymentDraft({ ...paymentDraft, received_by: (e.target as HTMLInputElement).value })}
+                  placeholder="Who physically took this payment?"
+                />
+              </div>
+              <div class="form-group full-width">
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 400 }}>
+                  <input
+                    type="checkbox" checked={paymentDraft.email_receipt}
+                    onChange={(e) => setPaymentDraft({ ...paymentDraft, email_receipt: (e.target as HTMLInputElement).checked })}
+                  />
+                  Email the receipt to the customer
+                </label>
+                <p class="text-muted" style={{ fontSize: 12, marginTop: 2 }}>
+                  Optional — the payment is recorded either way. Leave unchecked for an on-site payment with no customer email.
+                </p>
               </div>
             </div>
             <div class="modal-footer">
