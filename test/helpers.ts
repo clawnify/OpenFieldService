@@ -241,6 +241,12 @@ export async function resetDatabase() {
     // other test file's fixtures assume it always exists; any additional
     // organization a test created via createSecondOrganization() is cleaned
     // up here like everything else.
+    // organization_profiles (Phase 13A Company Profile hardening) cascades
+    // from organizations (ON DELETE CASCADE) for any non-default org, but
+    // org id=1 is never deleted above, so a profile a test wrote for the
+    // default org must be cleared explicitly or it would leak into the
+    // next test.
+    "DELETE FROM organization_profiles",
     "DELETE FROM organizations WHERE id != 1",
     "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter', 'quote_counter', 'contract_counter')",
     "DELETE FROM sqlite_sequence",
@@ -476,7 +482,7 @@ export interface NotificationProviderMockState {
   failNextSmsWithStatus: number | null;
   emailDelayMs: number;
   smsDelayMs: number;
-  emailCalls: { to: string; subject: string; idempotencyKey: string | null }[];
+  emailCalls: { to: string; subject: string; idempotencyKey: string | null; attachments: { filename: string; content: string }[] | null }[];
   smsCalls: { to: string; body: string }[];
   nextEmailId: number;
   nextSmsId: number;
@@ -514,9 +520,9 @@ export function mockNotificationProviders(overrides: Partial<NotificationProvide
 
     if (url.startsWith("https://api.resend.com/emails")) {
       if (state.emailDelayMs > 0) await new Promise((r) => setTimeout(r, state.emailDelayMs));
-      const body = (init?.body ? JSON.parse(init.body as string) : {}) as { to: string[]; subject: string };
+      const body = (init?.body ? JSON.parse(init.body as string) : {}) as { to: string[]; subject: string; attachments?: { filename: string; content: string }[] };
       const headers = init?.headers as Record<string, string> | undefined;
-      state.emailCalls.push({ to: body.to[0], subject: body.subject, idempotencyKey: headers?.["Idempotency-Key"] ?? null });
+      state.emailCalls.push({ to: body.to[0], subject: body.subject, idempotencyKey: headers?.["Idempotency-Key"] ?? null, attachments: body.attachments ?? null });
       if (state.failNextEmailWithStatus !== null) {
         const status = state.failNextEmailWithStatus;
         state.failNextEmailWithStatus = null;

@@ -1,0 +1,34 @@
+-- Migration number: 0020 	 2026-08-24T00:00:00.000Z
+--
+-- Phase 13A final document hardening — Company Logo, Draw Signature,
+-- Certificate of Completion, automatic customer signed-copy email,
+-- Invoice PDF.
+--
+-- The ONLY schema change this pass needs. Every other capability reuses
+-- existing infrastructure with zero migration:
+--   - Company Logo: organization_profiles.logo_key already exists
+--     (migration 0019, nullable, unused until now).
+--   - Certificate of Completion / IP / User-Agent evidence: already fully
+--     captured by contract_signature_requests / contract_signature_events
+--     (migration 0018) — this pass only RENDERS it, captures nothing new.
+--   - Automatic signed-copy email: reuses notification_outbox wholesale
+--     (migration 0011) — entity_type/entity_id/dedupe_key are already
+--     generic enough for a new 'contract' entity_type with no changes.
+--   - Invoice PDF: rendered live from existing invoices/invoice_lines/
+--     payments state (migration 0007) — no snapshot/immutability concept
+--     for invoices exists or is introduced here (see docs addendum for
+--     the explicit lifecycle-decision rationale).
+--
+-- `signature_image_key` is a plain nullable TEXT column — no REFERENCES,
+-- so none of migration 0015's documented D1 ALTER-TABLE-ADD-COLUMN
+-- restrictions apply here. Stores the R2 object key for a Draw Signature's
+-- captured PNG (mirroring the exact job-completion signature pattern —
+-- see src/server/storage.ts and the job-signature route in index.ts),
+-- never the raw image bytes inline. Deliberately NOT added to
+-- SIGNATURE_REQUEST_COLUMNS / the general evidence API response — same
+-- object-key-leakage discipline already established for
+-- contract_versions.signed_document_key (Phase 13A hardening): the one
+-- legitimate reader (finalizeSignedDocument, contracts.ts) selects it via
+-- its own narrow query.
+
+ALTER TABLE contract_signature_requests ADD COLUMN signature_image_key TEXT;

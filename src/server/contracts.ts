@@ -1,7 +1,10 @@
 import { get, query, run } from "./db.js";
 import type { Role } from "./auth.js";
 import { transitionContractInternal, type ContractStatus } from "./contract-workflow.js";
-import { putObject, type StorageEnv } from "./storage.js";
+import { StorageError, assertUploadAllowed, getObject, putObject, type StorageEnv } from "./storage.js";
+import { renderContractPdf, type SignatureEventMap, type SignatureImageMap } from "./contract-pdf.js";
+import { getCompanyLogo, getCompanyProfile } from "./company-profile.js";
+import { enqueueContractSignedCopy, safeEnqueue } from "./notifications.js";
 
 /**
  * Phase 13 — Contracts / E-Sign (Core). A Contract is a legally-traceable
@@ -38,7 +41,7 @@ export function canManageContracts(actor: Actor): boolean {
 export const SIGNER_ROLES = ["customer", "co_owner", "company_rep", "guarantor", "other"] as const;
 export type SignerRole = typeof SIGNER_ROLES[number];
 
-export const SIGNATURE_METHODS = ["typed", "click_to_sign"] as const;
+export const SIGNATURE_METHODS = ["typed", "click_to_sign", "drawn"] as const;
 export type SignatureMethod = typeof SIGNATURE_METHODS[number];
 
 /** Section 16 — the ONLY placeholders a template body may resolve. A plain
@@ -50,7 +53,7 @@ const ALLOWED_MERGE_FIELDS = [
 ] as const;
 
 export class ContractError extends Error {
-  code: "not_found" | "invalid_quote" | "not_draft" | "invalid_input" | "referenced" | "conflict" | "invalid_signer" | "invalid_token";
+  code: "not_found" | "invalid_quote" | "not_draft" | "invalid_input" | "referenced" | "conflict" | "invalid_signer" | "invalid_token" | "not_signed" | "hash_mismatch";
   constructor(code: ContractError["code"], message: string) {
     super(message);
     this.name = "ContractError";
@@ -88,14 +91,18 @@ export interface ContractVersion {
   expires_at: string | null;
   document_hash: string | null;
   hash_algorithm: string;
-  signed_document_key: string | null;
   signed_document_hash: string | null;
   signed_at: string | null;
   created_by: number | null;
   created_at: string;
 }
 
-const CONTRACT_VERSION_COLUMNS = "id, contract_id, version_number, title, body, template_version_id, commercial_snapshot, customer_snapshot, company_snapshot, effective_date, expires_at, document_hash, hash_algorithm, signed_document_key, signed_document_hash, signed_at, created_by, created_at";
+// `signed_document_key` is deliberately excluded from this column list — it's
+// the internal R2 storage key path, never something an API response should
+// return (Phase 13A: closes a real, low-severity object-key-leakage gap the
+// original Phase 13 API response had). The one place that legitimately needs
+// it (getSignedDocumentArtifact, below) reads it via its own narrow SELECT.
+const CONTRACT_VERSION_COLUMNS = "id, contract_id, version_number, title, body, template_version_id, commercial_snapshot, customer_snapshot, company_snapshot, effective_date, expires_at, document_hash, hash_algorithm, signed_document_hash, signed_at, created_by, created_at";
 
 export interface ContractSigner {
   id: number;
@@ -212,8 +219,8 @@ function formatCentsForDoc(cents: number): string {
 
 // ── Snapshot builders (Section 32/33) ───────────────────────────────
 
-interface CommercialSnapshotLine { description: string; quantity: number; unit: string; unit_price_cents: number; total_cents: number }
-interface CommercialSnapshot {
+export interface CommercialSnapshotLine { description: string; quantity: number; unit: string; unit_price_cents: number; total_cents: number }
+export interface CommercialSnapshot {
   quote_identifier: string;
   quote_version_number: number;
   line_items: CommercialSnapshotLine[];
@@ -244,22 +251,62 @@ async function buildCommercialSnapshot(quoteId: number, quoteVersionId: number):
   };
 }
 
-interface CustomerSnapshot { name: string; email: string; phone: string; address: string; city: string; state: string; zip: string }
+export interface CustomerSnapshot { name: string; email: string; phone: string; address: string; city: string; state: string; zip: string }
+
+/** Phase 13A hardening: sourced from the real, tenant-specific Company
+ *  Profile (company-profile.ts) — see that module and migration 0019 for
+ *  why it's a dedicated table, not a global_settings key. `name` prefers
+ *  `company_name` (the customer-facing trade name) and falls back to
+ *  `legal_name` if only that was configured (Section 10: deliberate
+ *  fallback order — a contract header should never be blank just because
+ *  an admin only filled in the legal entity name). `address`/`contact` stay
+ *  as pre-joined single-line strings for backward-compat readability with
+ *  any code that only wants a quick display string; the individual typed
+ *  fields (phone/email/website/business_number/tax_number/contract_footer)
+ *  are also captured so contract-pdf.ts can render each on its own line
+ *  rather than parsing them back out of a joined string. */
+export interface CompanySnapshot {
+  name: string;
+  legal_name: string;
+  phone: string;
+  email: string;
+  website: string;
+  address: string;
+  contact: string;
+  business_number: string;
+  tax_number: string;
+  contract_footer: string;
+}
 
 async function buildCustomerSnapshot(customerId: number): Promise<CustomerSnapshot> {
   const c = await get<CustomerSnapshot>("SELECT name, email, phone, address, city, state, zip FROM customers WHERE id = ?", [customerId]);
   return c ?? { name: "", email: "", phone: "", address: "", city: "", state: "", zip: "" };
 }
 
-/** Section 33 — deliberately empty today. No company-profile Global
- *  Setting exists anywhere in this codebase yet (confirmed by audit
- *  before writing this phase) to source a company name/address/contact
- *  from. The column is captured at write time (so it is ready the moment
- *  such a setting exists, with zero schema change) but is honestly blank
- *  now — NOT a silent gap, see migrations/0018's header comment and the
- *  Phase 13 docs addendum. */
-function buildCompanySnapshot(): { name: string; address: string; contact: string } {
-  return { name: "", address: "", contact: "" };
+/** Section 15 (snapshot rule) — reads the CURRENT Company Profile at
+ *  Contract-creation time only; this function is never called again for an
+ *  already-created Contract (createContractRevision copies the SOURCE
+ *  version's already-frozen company_snapshot, it never re-derives a fresh
+ *  one — see that function below). A later Company Profile edit therefore
+ *  can never alter an already-created (let alone already-signed) Contract's
+ *  snapshot, by construction, without needing any extra locking/versioning
+ *  of its own. */
+async function buildCompanySnapshot(organizationId: number): Promise<CompanySnapshot> {
+  const profile = await getCompanyProfile(organizationId);
+  const address = [profile.address_line1, profile.address_line2, profile.city, profile.state, profile.postal_code, profile.country].filter(Boolean).join(", ");
+  const contact = [profile.phone, profile.email].filter(Boolean).join(" · ");
+  return {
+    name: profile.company_name || profile.legal_name || "",
+    legal_name: profile.legal_name,
+    phone: profile.phone,
+    email: profile.email,
+    website: profile.website,
+    address,
+    contact,
+    business_number: profile.business_number,
+    tax_number: profile.tax_number,
+    contract_footer: profile.contract_footer,
+  };
 }
 
 // ── Contract CRUD ────────────────────────────────────────────────────
@@ -314,7 +361,7 @@ export async function createContract(organizationId: number, actorUserId: number
 
   const commercialSnapshot = await buildCommercialSnapshot(input.quote_id, acceptedVersionId);
   const customerSnapshot = await buildCustomerSnapshot(customerId);
-  const companySnapshot = buildCompanySnapshot();
+  const companySnapshot = await buildCompanySnapshot(organizationId);
 
   const mergeFields = {
     customer_name: customerSnapshot.name,
@@ -713,7 +760,7 @@ export async function resendSignatureRequest(db: D1Database, organizationId: num
 
 export interface PublicSigningView {
   request: SignatureRequest;
-  contract: { identifier: string; status: string };
+  contract: { identifier: string; status: string; organization_id: number };
   version: { title: string; body: string; effective_date: string | null; expires_at: string | null; commercial_snapshot: string };
   signer: { name: string; email: string; role: string };
 }
@@ -743,7 +790,7 @@ export async function getSignatureRequestByToken(rawToken: string): Promise<Publ
     reqRow.status = "viewed"; // keep the in-memory row in sync with the write above — the caller reads THIS object, not a fresh SELECT
   }
 
-  const contract = await get<{ identifier: string; status: string }>("SELECT identifier, status FROM contracts WHERE id = ?", [reqRow.contract_id]);
+  const contract = await get<{ identifier: string; status: string; organization_id: number }>("SELECT identifier, status, organization_id FROM contracts WHERE id = ?", [reqRow.contract_id]);
   const version = await get<{ title: string; body: string; effective_date: string | null; expires_at: string | null; commercial_snapshot: string }>(
     "SELECT title, body, effective_date, expires_at, commercial_snapshot FROM contract_versions WHERE id = ?", [reqRow.contract_version_id]
   );
@@ -770,6 +817,33 @@ export async function recordConsent(rawToken: string, consentTextVersion: string
 export interface SubmitSignatureInput {
   signerName: string;
   signatureMethod: string;
+  /** Required when signatureMethod === "drawn" — a base64 PNG data URL
+   *  from the client-side signature canvas (same capture mechanism as the
+   *  existing job-completion signature pad, Section 19: "sanitized raster
+   *  representation... size bounded"). Ignored for every other method. */
+  signatureImageDataUrl?: string;
+}
+
+const SIGNATURE_IMAGE_DATA_URL_RE = /^data:image\/png;base64,([a-zA-Z0-9+/=]+)$/;
+
+/** Decodes and validates a drawn-signature data URL — PNG only (matching
+ *  exactly what the client canvas's toDataURL("image/png") produces; no
+ *  reason to accept a broader format here the way job photos do), reusing
+ *  storage.ts's own size cap. Returns the raw bytes to store, or throws
+ *  ContractError("invalid_input", ...) for anything malformed — this
+ *  keeps the public signing endpoint's error handling uniform with every
+ *  other validation failure in submitSignature(). */
+function decodeSignatureImage(dataUrl: string): Uint8Array {
+  const match = dataUrl.match(SIGNATURE_IMAGE_DATA_URL_RE);
+  if (!match) throw new ContractError("invalid_input", "signatureImageDataUrl must be a base64 PNG data URL");
+  const bytes = Uint8Array.from(atob(match[1]), (ch) => ch.charCodeAt(0));
+  try {
+    assertUploadAllowed(bytes.byteLength, "image/png");
+  } catch (err) {
+    if (err instanceof StorageError) throw new ContractError("invalid_input", err.message);
+    throw err;
+  }
+  return bytes;
 }
 
 /** Idempotent (Section 56): re-submitting against an ALREADY-signed request
@@ -796,10 +870,22 @@ export async function submitSignature(db: D1Database, env: StorageEnv, rawToken:
   if (!SIGNATURE_METHODS.includes(input.signatureMethod as SignatureMethod)) throw new ContractError("invalid_input", "Unsupported signature method");
   if (!input.signerName || !input.signerName.trim()) throw new ContractError("invalid_input", "A typed legal name is required");
 
+  // Draw Signature (Section 19): validate/decode/store the EXACT captured
+  // representation before any state changes — a bad image must fail
+  // cleanly (400), never partially commit a "signed" status with no
+  // usable evidence.
+  let signatureImageKey: string | null = null;
+  if (input.signatureMethod === "drawn") {
+    if (!input.signatureImageDataUrl) throw new ContractError("invalid_input", "A drawn signature is required for this method");
+    const bytes = decodeSignatureImage(input.signatureImageDataUrl);
+    signatureImageKey = `contracts/${view.contract.organization_id}/${view.request.contract_id}/${view.request.id}/signature-${crypto.randomUUID()}.png`;
+    await putObject(env, signatureImageKey, bytes.buffer as ArrayBuffer, "image/png");
+  }
+
   const result = await run(
-    `UPDATE contract_signature_requests SET status = 'signed', signed_at = datetime('now'), signature_method = ?, signer_ip = ?, signer_user_agent = ?, updated_at = datetime('now')
+    `UPDATE contract_signature_requests SET status = 'signed', signed_at = datetime('now'), signature_method = ?, signer_ip = ?, signer_user_agent = ?, signature_image_key = ?, updated_at = datetime('now')
      WHERE token_hash = ? AND status IN ('pending','sent','viewed')`,
-    [input.signatureMethod, ip, userAgent, tokenHash]
+    [input.signatureMethod, ip, userAgent, signatureImageKey, tokenHash]
   );
   if (result.changes === 0) throw new ContractError("conflict", "This signing link was already used or is no longer valid");
 
@@ -857,56 +943,265 @@ async function recalculateContractStatus(db: D1Database, env: StorageEnv, contra
   }
 
   if (nextStatus && nextStatus !== contract.status) {
-    await transitionContractInternal(db, { id: contract.id, status: contract.status, organization_id: contract.organization_id }, nextStatus, null, "Derived from signature request completion");
+    // Phase 13A hardening: finalize the signed artifact BEFORE flipping the
+    // contract's status — not after. PDF generation (contract-pdf.ts) and
+    // the R2 write are real operations that can genuinely fail (unlike the
+    // original Phase 13 plain-text renderer, which essentially couldn't).
+    // If finalizeSignedDocument throws, this whole function throws too and
+    // transitionContractInternal below never runs, so the contract is
+    // never left falsely flagged "signed" with no artifact (Section 28) —
+    // it stays at its prior, honest status and the caller sees a real
+    // error rather than a silently incomplete success.
     if (nextStatus === "signed") {
       await finalizeSignedDocument(env, contract.organization_id, contractId, contract.current_version_id);
+    }
+    await transitionContractInternal(db, { id: contract.id, status: contract.status, organization_id: contract.organization_id }, nextStatus, null, "Derived from signature request completion");
+
+    // Section 31: automatic customer signed-copy delivery — only once the
+    // artifact is persisted AND the "signed" status has actually
+    // committed (both lines above already ran and did not throw). One
+    // email per signer, best-effort (never rolls back a valid signature
+    // over an email problem — see safeEnqueue's own doc comment) and
+    // idempotent (notification_outbox's dedupe_key, keyed on each
+    // signature request's own id, makes a theoretical duplicate call here
+    // a safe no-op — Section 39).
+    if (nextStatus === "signed") {
+      const requests = await query<{ id: number; signer_id: number }>(
+        "SELECT id, signer_id FROM contract_signature_requests WHERE contract_version_id = ? AND status = 'signed'",
+        [contract.current_version_id]
+      );
+      const signers = await listContractSigners(contractId);
+      const signerById = new Map(signers.map((s) => [s.id, s]));
+      for (const req of requests) {
+        const signer = signerById.get(req.signer_id);
+        if (!signer) continue;
+        await safeEnqueue(() => enqueueContractSignedCopy({
+          contractId, customerId: contract.customer_id, signatureRequestId: req.id,
+          signerName: signer.name, signerEmail: signer.email, contractIdentifier: contract.identifier,
+        }));
+      }
     }
   }
 }
 
-function renderSignedDocumentText(version: ContractVersion, requests: SignatureRequest[], signers: ContractSigner[]): string {
-  const signerById = new Map(signers.map((s) => [s.id, s]));
-  const lines = [
-    `CONTRACT (signed rendering — not a formatted PDF; see Phase 13 docs)`,
-    `Title: ${version.title}`,
-    `Effective Date: ${version.effective_date ?? "N/A"}`,
-    "",
-    version.body,
-    "",
-    "--- Commercial Terms (snapshotted at contract creation) ---",
-    version.commercial_snapshot,
-    "",
-    "--- Signatures ---",
-  ];
-  for (const req of requests) {
-    const signer = signerById.get(req.signer_id);
-    lines.push(`${signer?.name ?? "Unknown"} <${signer?.email ?? ""}> (${signer?.role ?? ""}) — signed ${req.signed_at} via ${req.signature_method}, consent v${req.consent_text_version} at ${req.consent_at}, IP ${req.signer_ip}`);
-  }
-  return lines.join("\n");
+async function sha256HexBytes(bytes: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** Section 30/42 — writes the final, immutable signed artifact to R2
- *  (server-side only, tenant-safe key, never overwritten — a fresh UUID
- *  every time this function runs, which happens at most once per version
- *  since it's only invoked from the signed-derivation above) and records
- *  its hash on the version row. NOT a real PDF — a plain-text rendering of
- *  the legal body + commercial terms + every signer's evidence, honestly
- *  disclosed as such (Section 31: "do not add a heavy PDF dependency
- *  without review" — none was added this phase). */
+/** Section 30/42, hardened in Phase 13A: writes the final, immutable
+ *  signed artifact to R2 (server-side only, tenant-safe key, never
+ *  overwritten — a fresh UUID every time this function runs, which
+ *  happens at most once per version since it's only invoked from the
+ *  signed-derivation above) and records its hash on the version row. A
+ *  real, professional PDF (contract-pdf.ts) — generated exactly once,
+ *  here, from the immutable Contract Version + the exact accepted Quote
+ *  Version's commercial snapshot + signer/signature-request evidence. If
+ *  PDF generation itself fails, this throws and the caller's status
+ *  transition is never committed (Section 28 — no "signed" status without
+ *  a persisted final artifact; see recalculateContractStatus's call site,
+ *  which awaits this before returning). */
 async function finalizeSignedDocument(env: StorageEnv, organizationId: number, contractId: number, versionId: number): Promise<void> {
   const version = (await get<ContractVersion>(`SELECT ${CONTRACT_VERSION_COLUMNS} FROM contract_versions WHERE id = ?`, [versionId]))!;
   const requests = await query<SignatureRequest>(`SELECT ${SIGNATURE_REQUEST_COLUMNS} FROM contract_signature_requests WHERE contract_version_id = ?`, [versionId]);
   const signers = await listContractSigners(contractId);
+  const commercial: CommercialSnapshot = JSON.parse(version.commercial_snapshot);
+  const customer: CustomerSnapshot = JSON.parse(version.customer_snapshot);
+  const company: CompanySnapshot = JSON.parse(version.company_snapshot);
 
-  const documentText = renderSignedDocumentText(version, requests, signers);
-  const documentHash = await sha256Hex(documentText);
-  const key = `contracts/${organizationId}/${contractId}/${versionId}/signed-${crypto.randomUUID()}.txt`;
+  // Company Profile logo, if configured — read fresh at finalization time
+  // (the same moment company/customer/commercial snapshots are captured),
+  // so it becomes part of the immutable artifact exactly like every other
+  // branding field, and a later logo change never touches an already-
+  // signed PDF (Section 11).
+  const logo = await getCompanyLogo(env, organizationId);
 
-  await putObject(env, key, new TextEncoder().encode(documentText).buffer as ArrayBuffer, "text/plain");
+  // Draw Signature images + the append-only event ledger — both keyed by
+  // signature_request.id, fetched here (never exposed through the general
+  // SIGNATURE_REQUEST_COLUMNS/evidence API — see this file's own object-
+  // key-leakage precedent for signed_document_key) and handed to the
+  // renderer as plain in-memory maps.
+  const signatureImages: SignatureImageMap = new Map();
+  const imageRows = await query<{ id: number; signature_image_key: string }>(
+    "SELECT id, signature_image_key FROM contract_signature_requests WHERE contract_version_id = ? AND signature_image_key IS NOT NULL",
+    [versionId]
+  );
+  for (const row of imageRows) {
+    const obj = await getObject(env, row.signature_image_key);
+    if (obj) signatureImages.set(row.id, new Uint8Array(await obj.arrayBuffer()));
+  }
+  const signatureEvents: SignatureEventMap = new Map();
+  for (const req of requests) {
+    signatureEvents.set(req.id, await getSignatureEvents(req.id));
+  }
+
+  const rawPdfBytes = await renderContractPdf({
+    contractIdentifier: (await get<{ identifier: string }>("SELECT identifier FROM contracts WHERE id = ?", [contractId]))!.identifier,
+    version, commercial, customer, company, signers, requests,
+    logo: logo ? { bytes: logo.bytes, format: logo.contentType === "image/jpeg" ? "jpeg" : "png" } : null,
+    signatureImages, signatureEvents,
+  });
+  // .slice() (no args) always returns a freshly-allocated, exactly-sized
+  // copy — safer than reading `.buffer` directly off the returned
+  // Uint8Array, which would silently include out-of-range bytes if
+  // pdf-lib's internals ever returned a byteOffset-shifted view instead of
+  // a tightly-sized array (not true today, but this makes the hash and
+  // the stored object correct-by-construction rather than by that
+  // implementation detail holding).
+  const pdfBytes = rawPdfBytes.slice().buffer as ArrayBuffer;
+  const documentHash = await sha256HexBytes(pdfBytes);
+  const key = `contracts/${organizationId}/${contractId}/${versionId}/signed-${crypto.randomUUID()}.pdf`;
+
+  await putObject(env, key, pdfBytes, "application/pdf");
   await run("UPDATE contract_versions SET signed_document_key = ?, signed_document_hash = ?, signed_at = datetime('now') WHERE id = ?", [key, documentHash, versionId]);
 }
 
+// ── Signed-document access (Phase 13A) ──────────────────────────────
+
+export interface SignedDocumentArtifact {
+  /** e.g. "CONTRACT-1-Signed.txt" — never a raw R2 key. */
+  filename: string;
+  contentType: string;
+  bytes: ArrayBuffer;
+}
+
+/** The sole read path for the actual signed-artifact bytes — always the
+ *  exact immutable object `finalizeSignedDocument` wrote, never a live
+ *  re-render from the (mutable) current Contract/Quote/Customer state.
+ *  Re-hashes the retrieved bytes (raw, binary — not a text round-trip, so
+ *  this is correct for both a real PDF and, for backward compatibility,
+ *  any pre-existing plain-text artifact signed before this hardening pass:
+ *  hashing the exact bytes R2 returns is byte-identical to the original
+ *  `sha256Hex(text)` scheme for those old objects, since they were written
+ *  as `TextEncoder().encode(documentText)` in the first place) and
+ *  compares against the hash recorded at signing time (Section 10/31 —
+ *  "hash mismatch must never silently succeed"): a mismatch throws rather
+ *  than serving anything. Content type and filename both come from what
+ *  was actually stored (`obj.httpMetadata.contentType`), so an old
+ *  text/plain fixture is honestly served as .txt and a new signed
+ *  contract is honestly served as .pdf — never a false PDF claim on
+ *  content that isn't one (Section 45). Organization-scoped throughout —
+ *  the caller must always pass the ACTOR's own organizationId, never a
+ *  client-supplied one. */
+export async function getSignedDocumentArtifact(env: StorageEnv, organizationId: number, contractId: number): Promise<SignedDocumentArtifact> {
+  const contract = await getContract(organizationId, contractId);
+  if (!contract) throw new ContractError("not_found", "Contract not found");
+  if (contract.current_version_id === null) throw new ContractError("not_signed", "This contract has no signed document yet");
+
+  const version = await get<{ signed_document_key: string | null; signed_document_hash: string | null }>(
+    "SELECT signed_document_key, signed_document_hash FROM contract_versions WHERE id = ? AND contract_id = ?",
+    [contract.current_version_id, contractId]
+  );
+  if (!version || !version.signed_document_key || !version.signed_document_hash) {
+    throw new ContractError("not_signed", "This contract has no signed document yet");
+  }
+
+  const obj = await getObject(env, version.signed_document_key);
+  if (!obj) throw new ContractError("not_found", "The signed document could not be found in storage");
+
+  const bytes = await obj.arrayBuffer();
+  const actualHash = await sha256HexBytes(bytes);
+  if (actualHash !== version.signed_document_hash) {
+    throw new ContractError("hash_mismatch", "The signed document failed integrity verification");
+  }
+
+  const contentType = obj.httpMetadata?.contentType || "application/octet-stream";
+  const ext = contentType.includes("pdf") ? "pdf" : contentType.includes("text/plain") ? "txt" : "bin";
+
+  return {
+    filename: `${contract.identifier}-Signed.${ext}`,
+    contentType,
+    bytes,
+  };
+}
+
 export { sha256Hex };
+
+// ── Delivery (Phase 13A final document hardening — Section 26-41) ──────
+
+/** System-trusted variant of getSignedDocumentArtifact() for the
+ *  notification dispatcher (notification-dispatcher.ts#dispatchOne) —
+ *  no organizationId/ownership check, because the dispatcher is a system-
+ *  internal Cron process with no "actor," exactly the same trust model
+ *  resolveRecipientCustomerId() already uses for entity_id lookups.
+ *  Never reachable from any HTTP route. Returns null (never throws) for
+ *  anything not cleanly resolvable — a missing/mismatched artifact must
+ *  make the email attempt fail cleanly (dispatchOne treats null as a
+ *  retryable failure) rather than silently attaching nothing. */
+export async function getSignedDocumentBytesForDelivery(
+  env: StorageEnv, contractId: number
+): Promise<SignedDocumentArtifact | null> {
+  const contract = await get<{ identifier: string; current_version_id: number | null }>(
+    "SELECT identifier, current_version_id FROM contracts WHERE id = ?", [contractId]
+  );
+  if (!contract || contract.current_version_id === null) return null;
+  const version = await get<{ signed_document_key: string | null; signed_document_hash: string | null }>(
+    "SELECT signed_document_key, signed_document_hash FROM contract_versions WHERE id = ?", [contract.current_version_id]
+  );
+  if (!version?.signed_document_key || !version.signed_document_hash) return null;
+
+  const obj = await getObject(env, version.signed_document_key);
+  if (!obj) return null;
+  const bytes = await obj.arrayBuffer();
+  const actualHash = await sha256HexBytes(bytes);
+  if (actualHash !== version.signed_document_hash) return null; // never attach bytes that fail integrity verification
+
+  const contentType = obj.httpMetadata?.contentType || "application/octet-stream";
+  const ext = contentType.includes("pdf") ? "pdf" : "txt";
+  return { filename: `${contract.identifier}-Signed.${ext}`, contentType, bytes };
+}
+
+export interface DeliveryStatus {
+  total: number;
+  sent: number;
+  failed: number;
+  pending: number;
+  cancelled: number;
+  last_sent_at: string | null;
+  last_error: string | null;
+}
+
+/** Aggregate customer-copy delivery status across every signer's
+ *  notification_outbox row for this Contract (Section 37 — the Contract
+ *  Detail UI's "Customer Copy: Sent/Failed/Pending" indicator). */
+export async function getContractDeliveryStatus(organizationId: number, contractId: number): Promise<DeliveryStatus | null> {
+  const contract = await getContract(organizationId, contractId);
+  if (!contract) return null;
+  const rows = await query<{ status: string; sent_at: string | null; last_error: string }>(
+    "SELECT status, sent_at, last_error FROM notification_outbox WHERE entity_type = 'contract' AND entity_id = ? AND event_type = 'contract.signed_copy'",
+    [contractId]
+  );
+  const sent = rows.filter((r) => r.status === "sent");
+  const failed = rows.filter((r) => r.status === "failed");
+  return {
+    total: rows.length,
+    sent: sent.length,
+    failed: failed.length,
+    pending: rows.filter((r) => r.status === "pending" || r.status === "sending").length,
+    cancelled: rows.filter((r) => r.status === "cancelled").length,
+    last_sent_at: sent.map((r) => r.sent_at).filter(Boolean).sort().pop() ?? null,
+    last_error: failed.map((r) => r.last_error).filter(Boolean).pop() ?? null,
+  };
+}
+
+/** Section 38 — retry a failed customer-copy delivery. Reuses the exact
+ *  same outbox row (never creates a new notification, never touches
+ *  Contract evidence or the signed artifact) — just resets it to
+ *  `pending` with a fresh attempt budget and clears the prior error, so
+ *  the next dispatcher tick picks it up. A no-op (0 rows affected) if
+ *  nothing is currently `failed`, which makes repeated retry calls safely
+ *  idempotent (Section 38: "idempotent/safely deduplicated"). */
+export async function resendSignedCopy(organizationId: number, contractId: number): Promise<{ retried: number }> {
+  const contract = await getContract(organizationId, contractId);
+  if (!contract) throw new ContractError("not_found", "Contract not found");
+  const result = await run(
+    `UPDATE notification_outbox
+     SET status = 'pending', attempts = 0, last_error = '', scheduled_for = datetime('now'), updated_at = datetime('now')
+     WHERE entity_type = 'contract' AND entity_id = ? AND event_type = 'contract.signed_copy' AND status = 'failed'`,
+    [contractId]
+  );
+  return { retried: result.changes };
+}
 
 // ── Evidence (Section 41/42) ─────────────────────────────────────────
 

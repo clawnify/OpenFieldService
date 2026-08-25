@@ -39,6 +39,22 @@ const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
   other: "Other",
 };
 
+// Phase 13A final document hardening — Section 46: View/Download/Print,
+// all backed by the same live-rendered PDF route (see invoice-pdf.ts's
+// own header comment for why this one is rendered fresh on every request
+// rather than a stored immutable artifact like the signed Contract PDF).
+function viewInvoicePdf(invoiceId: number): void {
+  window.open(`/api/invoices/${invoiceId}/pdf`, "_blank", "noopener,noreferrer");
+}
+function downloadInvoicePdf(invoiceId: number): void {
+  window.open(`/api/invoices/${invoiceId}/pdf?mode=download`, "_blank", "noopener,noreferrer");
+}
+function printInvoicePdf(invoiceId: number): void {
+  const win = window.open(`/api/invoices/${invoiceId}/pdf`, "_blank");
+  if (!win) return;
+  win.addEventListener("load", () => win.print());
+}
+
 export function InvoiceDetail() {
   const {
     selectedInvoice: invoice, navigate, updateInvoice, deleteInvoice,
@@ -381,6 +397,15 @@ export function InvoiceDetail() {
                 <button class="status-btn" onClick={() => setShowVoidInvoice(true)}>Void Invoice</button>
               )}
               {!canVoid && <p class="text-muted" style={{ fontSize: 12 }}>This invoice is void.</p>}
+            </div>
+          </div>
+
+          <div class="detail-sidebar-section">
+            <h4>Invoice PDF</h4>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button class="btn btn-sm" onClick={() => viewInvoicePdf(invoice.id)}>View</button>
+              <button class="btn btn-sm" onClick={() => downloadInvoicePdf(invoice.id)}>Download</button>
+              <button class="btn btn-sm" onClick={() => printInvoicePdf(invoice.id)}>Print</button>
             </div>
           </div>
 

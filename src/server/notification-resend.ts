@@ -1,6 +1,19 @@
 import { ProviderError, sanitizeErrorMessage, statusToErrorCode } from "./notification-providers.js";
 import type { EmailProvider, EmailSendInput, ProviderSendResult } from "./notification-providers.js";
 
+/** `String.fromCharCode(...bytes)` blows the call stack on anything larger
+ *  than a few tens of KB (V8's argument-spread limit) — a multi-page
+ *  signed Contract PDF attachment is comfortably past that, so this
+ *  chunks the conversion instead of spreading the whole array at once. */
+function bytesToBase64(bytes: Uint8Array): string {
+  const CHUNK = 8192;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
 /**
  * Resend adapter — send only. No retry logic here (the dispatcher owns
  * retry/backoff); this function's only job is "make one real API call, map
@@ -29,6 +42,14 @@ export function createResendEmailProvider(apiKey: string, fromAddress: string): 
             subject: input.subject,
             html: input.html,
             text: input.text,
+            // Resend expects base64-encoded content per attachment — see
+            // https://resend.com/docs/api-reference/emails/send-email.
+            ...(input.attachments && input.attachments.length > 0 ? {
+              attachments: input.attachments.map((a) => ({
+                filename: a.filename,
+                content: bytesToBase64(a.content),
+              })),
+            } : {}),
           }),
         });
       } catch {

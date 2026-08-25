@@ -383,6 +383,38 @@ export async function enqueueInvoiceIssued(
   });
 }
 
+/** Phase 13A final document hardening — Section 31/33: fires once per
+ *  signer the moment a Contract's full signature completion is finalized
+ *  (called from contracts.ts#recalculateContractStatus, AFTER
+ *  finalizeSignedDocument's PDF/R2 write and the "signed" status
+ *  transition have both already committed — never before, so an email can
+ *  never claim a copy exists if the artifact doesn't). `email` is the
+ *  actual SIGNER's address from the signature request — deliberately NOT
+ *  `customer.email`, which could differ (Section 33: "do not arbitrarily
+ *  use a mutable current Customer email if the request targeted a
+ *  different signer email") — while `recipientId` still resolves to the
+ *  Contract's own Customer for preference-eligibility purposes (an
+ *  opted-out customer's signers still shouldn't receive mail). The
+ *  discriminator is the signature request's own id — stable, and a
+ *  Contract can have several signers, each getting their own copy, each
+ *  independently deduplicated (Section 39). `payload` carries only
+ *  {contract_id}, deliberately NOT the PDF bytes or any snapshot of
+ *  Contract content — see notification-dispatcher.ts's dispatchOne() for
+ *  where the attachment is actually resolved, at send time, from the
+ *  already-immutable signed artifact. */
+export async function enqueueContractSignedCopy(input: {
+  contractId: number; customerId: number; signatureRequestId: number;
+  signerName: string; signerEmail: string; contractIdentifier: string;
+}): Promise<EnqueueResult> {
+  return enqueueChannel({
+    eventType: "contract.signed_copy", entityType: "contract", entityId: input.contractId,
+    channel: "email", recipientType: "customer", recipientId: input.customerId, recipientContact: input.signerEmail,
+    templateKey: "contract_signed_copy_v1",
+    payload: { signer_name: input.signerName, contract_identifier: input.contractIdentifier, contract_id: input.contractId },
+    discriminator: input.signatureRequestId,
+  });
+}
+
 /** Multiple payments can exist per invoice — the discriminator MUST be the
  *  specific payment's own id, not invoice.id (which would collapse every
  *  payment on the same invoice into one dedupe key). entityType is

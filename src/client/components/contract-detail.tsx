@@ -4,7 +4,7 @@ import { formatCents } from "../money";
 import { CONTRACT_STATUS_LABELS, SIGNER_ROLES, SIGNER_ROLE_LABELS } from "../contract-status";
 import { ConfirmDialog } from "./confirm-dialog";
 import { ArrowLeft, Trash2, Plus, X, Copy } from "lucide-preact";
-import type { Contract, ContractVersion, ContractSigner, SignatureRequest, ContractStatusHistoryRow, EvidencePackage, SignerRole } from "../types";
+import type { Contract, ContractVersion, ContractSigner, SignatureRequest, ContractStatusHistoryRow, EvidencePackage, SignerRole, ContractDeliveryStatus } from "../types";
 
 const STATUS_COLORS: Record<string, string> = {
   draft: "#6b7280", sent: "#3b82f6", partially_signed: "#ca8a04", signed: "#16a34a",
@@ -12,6 +12,37 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 const emptySignerDraft = { name: "", email: "", phone: "", role: "customer" as SignerRole };
+
+/** Phase 13A — Signed Contract Document Access. All three actions hit the
+ *  same server route (`GET /api/contracts/{id}/signed-document`), which
+ *  always serves the exact immutable signed artifact — never a live
+ *  re-render of the current Contract/Quote/Customer state. A plain
+ *  `window.open` (not `api()`) is deliberate: this is a binary/file
+ *  response, not JSON, and the browser sends the session cookie
+ *  automatically on a same-origin navigation. */
+function openSignedDocument(contractId: number): void {
+  window.open(`/api/contracts/${contractId}/signed-document`, "_blank", "noopener,noreferrer");
+}
+
+function downloadSignedDocument(contractId: number): void {
+  window.open(`/api/contracts/${contractId}/signed-document?mode=download`, "_blank", "noopener,noreferrer");
+}
+
+/** Opens the exact same signed artifact (inline mode, so it renders instead
+ *  of triggering a save dialog) in a new tab and asks that tab's browser to
+ *  print it — no separate "print version" with different content is ever
+ *  generated. Deliberately omits `noopener` here (unlike the two helpers
+ *  above): `win.print()` below needs a live reference to the opened window,
+ *  which `noopener` would sever. Safe without it for the same reason View/
+ *  Download are safe with it — same-origin URL built only from a numeric
+ *  contract ID, fixed non-attacker-influenced content type, and a
+ *  `sandbox` CSP on the opened document that blocks it from running any
+ *  script at all, so it can never abuse `window.opener` regardless. */
+function printSignedDocument(contractId: number): void {
+  const win = window.open(`/api/contracts/${contractId}/signed-document`, "_blank");
+  if (!win) return;
+  win.addEventListener("load", () => win.print());
+}
 
 /**
  * Phase 13 — Contract detail. Self-contained (own fetch, not AppContext) —
@@ -64,16 +95,20 @@ export function ContractDetail({ id, navigate }: { id: number; navigate: (to: st
   const [evidence, setEvidence] = useState<EvidencePackage | null>(null);
   const [showEvidence, setShowEvidence] = useState(false);
 
+  const [deliveryStatus, setDeliveryStatus] = useState<ContractDeliveryStatus | null>(null);
+  const [resendingCopy, setResendingCopy] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     try {
-      const [detail, signersRes, requestsRes, transitions, historyRes] = await Promise.all([
+      const [detail, signersRes, requestsRes, transitions, historyRes, deliveryRes] = await Promise.all([
         api<{ contract: Contract; version: ContractVersion | null }>("GET", `/api/contracts/${id}`),
         api<{ signers: ContractSigner[] }>("GET", `/api/contracts/${id}/signers`),
         api<{ requests: SignatureRequest[] }>("GET", `/api/contracts/${id}/signature-requests`),
         api<{ allowed: string[]; can_create_revision: boolean }>("GET", `/api/contracts/${id}/transitions`),
         api<{ history: ContractStatusHistoryRow[] }>("GET", `/api/contracts/${id}/status-history`),
+        api<{ delivery: ContractDeliveryStatus }>("GET", `/api/contracts/${id}/delivery-status`),
       ]);
       setContract(detail.contract);
       setVersion(detail.version);
@@ -82,6 +117,7 @@ export function ContractDetail({ id, navigate }: { id: number; navigate: (to: st
       setAllowed(transitions.allowed);
       setCanCreateRevision(transitions.can_create_revision);
       setHistory(historyRes.history);
+      setDeliveryStatus(deliveryRes.delivery);
     } catch (err) {
       setLoadError((err as Error).message);
     } finally {
@@ -250,6 +286,19 @@ export function ContractDetail({ id, navigate }: { id: number; navigate: (to: st
       setEvidence(res.evidence);
     } catch (err) {
       setActionError((err as Error).message);
+    }
+  };
+
+  const retrySignedCopy = async () => {
+    setResendingCopy(true);
+    try {
+      await api("POST", `/api/contracts/${id}/resend-signed-copy`, {});
+      const res = await api<{ delivery: ContractDeliveryStatus }>("GET", `/api/contracts/${id}/delivery-status`);
+      setDeliveryStatus(res.delivery);
+    } catch (err) {
+      setActionError((err as Error).message);
+    } finally {
+      setResendingCopy(false);
     }
   };
 
@@ -494,6 +543,44 @@ export function ContractDetail({ id, navigate }: { id: number; navigate: (to: st
               </div>
             )}
           </div>
+
+          {version?.signed_document_hash && (
+            <div class="detail-section">
+              <h3>Signed Document</h3>
+              <div class="card" style={{ padding: 12 }}>
+                <p class="text-muted" style={{ fontSize: 12, marginBottom: 10 }}>
+                  Verification ID: <code>{version.signed_document_hash.slice(0, 12)}</code>
+                </p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button class="btn btn-sm" onClick={() => openSignedDocument(id)}>View Signed Document</button>
+                  <button class="btn btn-sm" onClick={() => downloadSignedDocument(id)}>Download Signed Contract</button>
+                  <button class="btn btn-sm" onClick={() => printSignedDocument(id)}>Print Signed Contract</button>
+                </div>
+              </div>
+              {deliveryStatus && deliveryStatus.total > 0 && (
+                <div class="card" style={{ padding: 12, marginTop: 10 }}>
+                  <p class="text-bold" style={{ fontSize: 13, marginBottom: 4 }}>Customer Copy</p>
+                  {deliveryStatus.failed > 0 ? (
+                    <>
+                      <p class="text-muted" style={{ fontSize: 12 }}>
+                        ⚠ Delivery failed{deliveryStatus.last_error ? `: ${deliveryStatus.last_error}` : ""}
+                      </p>
+                      <button class="btn btn-sm" style={{ marginTop: 6 }} disabled={resendingCopy} onClick={retrySignedCopy}>
+                        {resendingCopy ? "Retrying..." : "Retry Email"}
+                      </button>
+                    </>
+                  ) : deliveryStatus.sent > 0 ? (
+                    <p class="text-muted" style={{ fontSize: 12 }}>
+                      ✓ Sent to {deliveryStatus.sent} of {deliveryStatus.total} signer(s)
+                      {deliveryStatus.last_sent_at ? ` — ${new Date(deliveryStatus.last_sent_at).toLocaleString()}` : ""}
+                    </p>
+                  ) : (
+                    <p class="text-muted" style={{ fontSize: 12 }}>Pending delivery...</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           <div class="detail-section">
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>

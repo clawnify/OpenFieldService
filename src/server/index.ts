@@ -24,6 +24,14 @@ import {
 } from "./settings.js";
 import { BUSINESS_TIMEZONE_SETTING_KEY, isValidIanaTimezone } from "./business-timezone.js";
 import {
+  CompanyProfileValidationError,
+  getCompanyLogo,
+  getCompanyProfile,
+  removeCompanyLogo,
+  setCompanyLogo,
+  upsertCompanyProfile,
+} from "./company-profile.js";
+import {
   ACTIVE_STATUSES,
   JOB_TYPES,
   PRE_WORK_STATUSES,
@@ -101,9 +109,11 @@ import {
   deleteContract,
   deleteContractSigner,
   getContract,
+  getContractDeliveryStatus,
   getContractVersion,
   getEvidencePackage,
   getSignatureRequestByToken,
+  getSignedDocumentArtifact,
   listContractSigners,
   listContractTemplates,
   listContractVersions,
@@ -111,6 +121,7 @@ import {
   listSignatureRequests,
   recordConsent,
   resendSignatureRequest,
+  resendSignedCopy,
   sendContractForSignature,
   submitSignature,
   updateContractVersion,
@@ -211,6 +222,7 @@ import {
   type PayerType,
   type PaymentMethod,
 } from "./financial.js";
+import { renderInvoicePdf } from "./invoice-pdf.js";
 
 type GoogleBindings = {
   GOOGLE_CLIENT_ID?: string;
@@ -4335,7 +4347,6 @@ const ContractVersionSchema = z.object({
   expires_at: z.string().nullable(),
   document_hash: z.string().nullable(),
   hash_algorithm: z.string(),
-  signed_document_key: z.string().nullable(),
   signed_document_hash: z.string().nullable(),
   signed_at: z.string().nullable(),
   created_by: z.number().int().nullable(),
@@ -4472,9 +4483,18 @@ const ConsentInputSchema = z.object({
   consent_text_version: z.string().min(1).max(50),
 }).strict();
 
+// 2,900,000 chars comfortably covers the 2MB decoded-PNG cap
+// (assertUploadAllowed) after base64's ~4/3 inflation plus the
+// "data:image/png;base64," prefix, with headroom — and, critically,
+// rejects a wildly oversized payload via cheap zod validation BEFORE
+// decodeSignatureImage() ever calls atob() on the whole string (P2 found
+// by independent security review: atob() ran on the full attacker-
+// controlled payload before the size check, on the PUBLIC unauthenticated
+// signing endpoint, with no other body-size limit in front of it).
 const SubmitSignatureInputSchema = z.object({
   signer_name: z.string().min(1).max(200),
   signature_method: z.enum(SIGNATURE_METHODS as unknown as [string, ...string[]]),
+  signature_image_data_url: z.string().max(2_900_000).optional(),
 }).strict();
 
 const DeclineSignatureInputSchema = z.object({
@@ -5033,6 +5053,71 @@ app.openapi(getEvidencePackageRoute, async (c) => {
   return c.json({ evidence }, 200);
 });
 
+// Phase 13A — Signed Contract Document Access. Plain app.get (not
+// app.openapi/createRoute), matching the existing job-photo file-serving
+// precedent (GET /api/jobs/:id/photos/:photoId/file) — a binary/file
+// response isn't a JSON contract. Still sits under the ordinary /api/*
+// auth middleware (path-pattern matched, not registration-style matched).
+// `?mode=download` forces a save-as; the default (no param, or any other
+// value) serves inline for the "View" action — same route backs View,
+// Download, and Print (the client opens this URL and calls print() on the
+// resulting tab), since all three must show the exact same immutable bytes.
+app.get("/api/contracts/:id/signed-document", async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Contract not found" }, 404);
+
+  try {
+    const artifact = await getSignedDocumentArtifact(c.env, actorOrganizationId(c), id);
+    const disposition = c.req.query("mode") === "download" ? "attachment" : "inline";
+    return new Response(artifact.bytes, {
+      headers: {
+        "Content-Type": artifact.contentType,
+        "Content-Disposition": `${disposition}; filename="${artifact.filename}"`,
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "private, no-store",
+      },
+    });
+  } catch (err) {
+    if (err instanceof ContractError) {
+      if (err.code === "not_found") return c.json({ error: "Contract not found" }, 404);
+      if (err.code === "not_signed") return c.json({ error: "This contract has no signed document yet" }, 409);
+      if (err.code === "hash_mismatch") return c.json({ error: "The signed document failed integrity verification" }, 500);
+      return c.json({ error: "Unable to retrieve the signed document" }, 400);
+    }
+    throw err;
+  }
+});
+
+// Phase 13A final document hardening — Section 37/38: aggregate customer
+// signed-copy delivery status, and a manual retry for a failed one.
+app.get("/api/contracts/:id/delivery-status", async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Contract not found" }, 404);
+  const status = await getContractDeliveryStatus(actorOrganizationId(c), id);
+  if (!status) return c.json({ error: "Contract not found" }, 404);
+  return c.json({ delivery: status }, 200);
+});
+
+app.post("/api/contracts/:id/resend-signed-copy", async (c) => {
+  const me = currentUser(c);
+  if (!canManageContracts({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Contract not found" }, 404);
+  try {
+    const result = await resendSignedCopy(actorOrganizationId(c), id);
+    return c.json(result, 200);
+  } catch (err) {
+    if (err instanceof ContractError && err.code === "not_found") return c.json({ error: "Contract not found" }, 404);
+    throw err;
+  }
+});
+
 const listContractTemplatesRoute = createRoute({
   method: "get",
   path: "/api/contract-templates",
@@ -5191,12 +5276,16 @@ const submitSignatureRoute = createRoute({
 
 app.openapi(submitSignatureRoute, async (c) => {
   const { token } = c.req.valid("param");
-  const { signer_name, signature_method } = c.req.valid("json");
+  const { signer_name, signature_method, signature_image_data_url } = c.req.valid("json");
   try {
     // No organization_id is known or needed here — submitSignature()
     // resolves the exact contract/version/signer entirely from the token
     // itself (see its own doc comment in contracts.ts) before any write.
-    await submitSignature(c.env.DB, c.env, token, { signerName: signer_name, signatureMethod: signature_method }, clientIp(c), clientUserAgent(c));
+    await submitSignature(
+      c.env.DB, c.env, token,
+      { signerName: signer_name, signatureMethod: signature_method, signatureImageDataUrl: signature_image_data_url },
+      clientIp(c), clientUserAgent(c)
+    );
     return c.json({ ok: true }, 200);
   } catch (err) {
     if (err instanceof ContractError) {
@@ -5863,6 +5952,73 @@ app.openapi(listInvoices, async (c) => {
     };
   });
   return c.json({ invoices, total: countRow?.count || 0 }, 200);
+});
+
+// Phase 13A final document hardening — Section 42-49: professional
+// Invoice PDF, View/Download/Print via one route (same `?mode=download`
+// convention as the signed Contract document route). Rendered LIVE on
+// every request — see invoice-pdf.ts's own header comment for the
+// explicit lifecycle decision (no snapshot/immutability concept for
+// invoices, unlike signed Contracts). Same admin/dispatcher RBAC and
+// tenant-ownership guard as every other invoice route.
+app.get("/api/invoices/:id/pdf", async (c) => {
+  const me = currentUser(c);
+  if (!canManageFinancials({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invoice not found" }, 404);
+  const organizationId = actorOrganizationId(c);
+  if (!(await assertInvoiceInOrganization(organizationId, id))) return c.json({ error: "Invoice not found" }, 404);
+
+  const invoice = await get<Record<string, unknown>>(
+    `SELECT i.*, c.name as customer_name, c.email as customer_email, c.phone as customer_phone,
+            c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
+            j.identifier as job_identifier
+     FROM invoices i
+     LEFT JOIN customers c ON i.customer_id = c.id
+     LEFT JOIN jobs j ON i.job_id = j.id
+     WHERE i.id = ?`, [id]
+  );
+  if (!invoice) return c.json({ error: "Invoice not found" }, 404);
+  const lines = await query<{ description: string; quantity: number; unit_price_cents: number; total_cents: number }>(
+    "SELECT description, quantity, unit_price_cents, total_cents FROM invoice_lines WHERE invoice_id = ? ORDER BY id ASC", [id]
+  );
+  const payments = await query<{ amount_cents: number; method: string; paid_at: string; reference: string; voided_at: string | null }>(
+    "SELECT amount_cents, method, paid_at, reference, voided_at FROM payments WHERE invoice_id = ? ORDER BY paid_at ASC, id ASC", [id]
+  );
+  const financials = await getInvoiceFinancials(invoice as unknown as Parameters<typeof getInvoiceFinancials>[0], invoice.due_date as string);
+  const company = await getCompanyProfile(organizationId);
+  const logo = await getCompanyLogo(c.env, organizationId);
+
+  const bytes = await renderInvoicePdf({
+    identifier: invoice.identifier as string,
+    status: invoice.status as string,
+    issuedAt: invoice.issued_at as string | null,
+    dueDate: invoice.due_date as string,
+    notes: invoice.notes as string,
+    jobIdentifier: invoice.job_identifier as string | null,
+    customer: {
+      name: (invoice.customer_name as string) || "", email: (invoice.customer_email as string) || "",
+      phone: (invoice.customer_phone as string) || "", address: (invoice.customer_address as string) || "",
+      city: (invoice.customer_city as string) || "", state: (invoice.customer_state as string) || "", zip: (invoice.customer_zip as string) || "",
+    },
+    lines,
+    taxRate: invoice.tax_rate as number,
+    financials,
+    payments: payments.filter((p) => !p.voided_at),
+    company,
+    logo: logo ? { bytes: logo.bytes, format: logo.contentType === "image/jpeg" ? "jpeg" : "png" } : null,
+  });
+
+  const disposition = c.req.query("mode") === "download" ? "attachment" : "inline";
+  return new Response(bytes.slice().buffer as ArrayBuffer, {
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `${disposition}; filename="Invoice-${invoice.identifier}.pdf"`,
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'; sandbox",
+      "Cache-Control": "private, no-store",
+    },
+  });
 });
 
 const getInvoice = createRoute({
@@ -6870,6 +7026,140 @@ app.openapi(retireSettingRoute, async (c) => {
   const retired = await retireSetting(actorOrganizationId(c), key, me.id);
   if (!retired) return c.json({ error: "No active version for this key" }, 404);
   return c.json({ ok: true }, 200);
+});
+
+// ── Company Profile ──────────────────────────────────────────────────
+// Tenant business identity (name, contact, address, business/tax IDs, a
+// default Contract footer) — see migrations/0019 and company-profile.ts
+// for the full rationale. Admin-only both directions: no operational
+// read need for dispatchers/technicians beyond the finished Contract
+// documents they already access through Contract permissions, and this
+// matches the existing Global Settings nav item's adminOnly gate.
+
+const CompanyProfileSchema = z.object({
+  organization_id: z.number().int(),
+  company_name: z.string(),
+  legal_name: z.string(),
+  phone: z.string(),
+  email: z.string(),
+  website: z.string(),
+  address_line1: z.string(),
+  address_line2: z.string(),
+  city: z.string(),
+  state: z.string(),
+  postal_code: z.string(),
+  country: z.string(),
+  business_number: z.string(),
+  tax_number: z.string(),
+  contract_footer: z.string(),
+  logo_key: z.string().nullable(),
+  updated_by: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).openapi("CompanyProfile");
+
+const getCompanyProfileRoute = createRoute({
+  method: "get",
+  path: "/api/company-profile",
+  responses: {
+    200: { description: "Current company profile", content: { "application/json": { schema: z.object({ profile: CompanyProfileSchema }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getCompanyProfileRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const profile = await getCompanyProfile(actorOrganizationId(c));
+  return c.json({ profile }, 200);
+});
+
+const updateCompanyProfileRoute = createRoute({
+  method: "put",
+  path: "/api/company-profile",
+  request: {
+    body: {
+      content: { "application/json": { schema: z.object({
+        company_name: z.string().optional(),
+        legal_name: z.string().optional(),
+        phone: z.string().optional(),
+        email: z.string().optional(),
+        website: z.string().optional(),
+        address_line1: z.string().optional(),
+        address_line2: z.string().optional(),
+        city: z.string().optional(),
+        state: z.string().optional(),
+        postal_code: z.string().optional(),
+        country: z.string().optional(),
+        business_number: z.string().optional(),
+        tax_number: z.string().optional(),
+        contract_footer: z.string().optional(),
+      }) } },
+    },
+  },
+  responses: {
+    200: { description: "Updated company profile", content: { "application/json": { schema: z.object({ profile: CompanyProfileSchema }) } } },
+    400: { description: "Invalid value", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(updateCompanyProfileRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const data = c.req.valid("json");
+  try {
+    const profile = await upsertCompanyProfile(actorOrganizationId(c), data, me.id);
+    return c.json({ profile }, 200);
+  } catch (err) {
+    if (err instanceof CompanyProfileValidationError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+// ── Company Logo (Phase 13A final document hardening, Section 6-11) ────
+// Plain (non-openapi) multipart routes, matching the exact convention
+// already used for job photo uploads — a real <input type="file"> upload,
+// not a JSON data-url, since a logo can be a few hundred KB. Admin-only,
+// same gate as the rest of Company Profile.
+
+app.post("/api/company-profile/logo", async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const body = await c.req.parseBody();
+  const file = body["file"];
+  if (!(file instanceof File)) return c.json({ error: "A file is required" }, 400);
+  try {
+    const profile = await setCompanyLogo(c.env, actorOrganizationId(c), new Uint8Array(await file.arrayBuffer()), file.type, me.id);
+    return c.json({ profile }, 200);
+  } catch (err) {
+    if (err instanceof StorageError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+app.delete("/api/company-profile/logo", async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const profile = await removeCompanyLogo(c.env, actorOrganizationId(c), me.id);
+  return c.json({ profile }, 200);
+});
+
+/** Inline preview for the Global Settings UI — admin-only, same as every
+ *  other Company Profile route (no logo bytes are ever public). */
+app.get("/api/company-profile/logo", async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const logo = await getCompanyLogo(c.env, actorOrganizationId(c));
+  if (!logo) return c.json({ error: "No logo configured" }, 404);
+  return new Response(logo.bytes.slice().buffer as ArrayBuffer, {
+    headers: {
+      "content-type": logo.contentType,
+      "content-disposition": "inline",
+      "cache-control": "private, no-store",
+      "x-content-type-options": "nosniff",
+    },
+  });
 });
 
 // ── Google Calendar Integration ─────────────────────────────────────

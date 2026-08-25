@@ -8,6 +8,7 @@ import {
   buildProviders, businessDateOffset, enqueueDayBeforeReminders, getBusinessTimezone, runDispatchCycle,
 } from "../src/server/notification-dispatcher.js";
 import { renderEmail, renderSms } from "../src/server/notification-templates.js";
+import type { StorageEnv } from "../src/server/storage.js";
 
 // Phase 9.2 — provider adapters + Cron dispatcher + delivery engine. Every
 // test here uses mockNotificationProviders() (see test/helpers.ts) — no
@@ -677,5 +678,93 @@ describe("Google Calendar isolation", () => {
     // dedicated google mock isn't installed in this file at all, so any
     // accidental real network call would fail the test via an unhandled
     // rejection/timeout rather than silently passing.
+  });
+});
+
+// ── Contract signed-copy attachment resolution (Phase 13A final document
+// hardening, Section 26/29/32) ─────────────────────────────────────────────
+
+function storageEnv(): StorageEnv {
+  return env as unknown as StorageEnv;
+}
+
+/** Creates and fully signs a one-signer Contract via the real HTTP API,
+ *  mirroring contracts.test.ts's own fixture helpers (not reused directly
+ *  since they're file-scoped there) — returns the contract id and the
+ *  signer's email (the notification recipient, per Section 33). */
+async function signedContractFixture(signerEmail = "dispatch-signer@example.test") {
+  const auth = await authHeaders();
+  const customer = await post<{ id: number }>("/api/customers", { name: "Dispatcher Fixture Customer", email: "cust@example.test", phone: "555-0100" }, auth);
+  const quote = await post<{ quote: { id: number } }>("/api/quotes", { customer_id: customer.body.id, line_items: [{ description: "Install", quantity: 1, unit_price_cents: 100000 }] }, auth);
+  await post(`/api/quotes/${quote.body.quote.id}/transition`, { to_status: "sent" }, auth);
+  await post(`/api/quotes/${quote.body.quote.id}/transition`, { to_status: "accepted" }, auth);
+  const contract = await post<{ contract: { id: number } }>("/api/contracts", { quote_id: quote.body.quote.id, title: "Dispatcher Fixture Agreement" }, auth);
+  await post(`/api/contracts/${contract.body.contract.id}/signers`, { name: "Dispatch Signer", email: signerEmail, role: "customer" }, auth);
+  const send = await post<{ signing_links: { token: string }[] }>(`/api/contracts/${contract.body.contract.id}/send`, {}, auth);
+  const token = send.body.signing_links[0].token;
+  await post(`/api/public/contracts/sign/${token}/consent`, { consent_text_version: "v1" });
+  await post(`/api/public/contracts/sign/${token}/sign`, { signer_name: "Dispatch Signer", signature_method: "typed" });
+  return { contractId: contract.body.contract.id, signerEmail };
+}
+
+async function signedCopyOutboxId(contractId: number): Promise<number> {
+  const rows = await queryDb<{ id: number }>(
+    "SELECT id FROM notification_outbox WHERE entity_type = 'contract' AND entity_id = ? AND event_type = 'contract.signed_copy'", [contractId]
+  );
+  return rows[0].id;
+}
+
+describe("Contract signed-copy attachment resolution", () => {
+  it("attaches the exact signed PDF bytes when env (StorageEnv) is supplied", async () => {
+    const mock = mockNotificationProviders();
+    const { contractId, signerEmail } = await signedContractFixture();
+    const result = await runDispatchCycle(providers(), storageEnv());
+    expect(result.sent).toBe(1);
+    expect(mock.state.emailCalls).toHaveLength(1);
+    const call = mock.state.emailCalls[0];
+    expect(call.to).toBe(signerEmail);
+    expect(call.attachments).not.toBeNull();
+    expect(call.attachments).toHaveLength(1);
+    expect(call.attachments![0].filename).toMatch(/-Signed\.pdf$/);
+    // Decode the base64 attachment and confirm it's a real PDF, and that
+    // it hashes to exactly the same value as the contract's own recorded
+    // signed_document_hash — the "email attachment === R2 artifact"
+    // invariant (Section 29/32), not just "some bytes were attached."
+    const attachedBytes = Uint8Array.from(atob(call.attachments![0].content), (ch) => ch.charCodeAt(0));
+    expect(new TextDecoder().decode(attachedBytes.slice(0, 5))).toBe("%PDF-");
+    const digest = await crypto.subtle.digest("SHA-256", attachedBytes.buffer as ArrayBuffer);
+    const attachedHash = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+    const versionRows = await queryDb<{ signed_document_hash: string }>(
+      "SELECT cv.signed_document_hash FROM contract_versions cv JOIN contracts c ON c.current_version_id = cv.id WHERE c.id = ?", [contractId]
+    );
+    expect(attachedHash).toBe(versionRows[0].signed_document_hash);
+    mock.restore();
+  });
+
+  it("fails cleanly (retryable) rather than silently sending without an attachment when env is not supplied", async () => {
+    const mock = mockNotificationProviders();
+    await signedContractFixture();
+    const result = await runDispatchCycle(providers()); // no env passed — mirrors every pre-existing call site in this file
+    expect(result.sent).toBe(0);
+    expect(result.retried).toBe(1);
+    expect(mock.state.emailCalls).toHaveLength(0); // never called the provider without a real attachment
+    mock.restore();
+  });
+
+  it("fails cleanly (retryable) if the signed document cannot be resolved from storage", async () => {
+    const mock = mockNotificationProviders();
+    const { contractId } = await signedContractFixture();
+    // Corrupt the recorded hash so getSignedDocumentBytesForDelivery's own
+    // integrity check fails — must never attach bytes that don't match.
+    await queryDb(
+      "UPDATE contract_versions SET signed_document_hash = 'deadbeef' WHERE contract_id = ?", [contractId]
+    );
+    const result = await runDispatchCycle(providers(), storageEnv());
+    expect(result.sent).toBe(0);
+    expect(result.retried).toBe(1);
+    expect(mock.state.emailCalls).toHaveLength(0);
+    const attempts = await attemptsFor(await signedCopyOutboxId(contractId));
+    expect(attempts[0].error_code).toBe("attachment_unavailable");
+    mock.restore();
   });
 });

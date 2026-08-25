@@ -125,6 +125,15 @@ const EMAIL_TEMPLATES: Record<string, (p: Payload) => EmailContent> = {
     const { text, html } = emailWrap(`Hi ${name},`, [`Reminder: your appointment (${job}) is tomorrow, ${date} at ${time}.`]);
     return { subject: `Reminder: appointment tomorrow — ${date}`, text, html };
   },
+  contract_signed_copy_v1: (p) => {
+    const name = str(p, "signer_name", "there");
+    const contract = str(p, "contract_identifier");
+    const { text, html } = emailWrap(`Hi ${name},`, [
+      `Thank you for signing Contract ${contract}. A copy of the fully signed agreement is attached for your records.`,
+      "If you have any questions, please contact us.",
+    ]);
+    return { subject: `Your signed contract — ${contract}`, text, html };
+  },
 };
 
 const SMS_TEMPLATES: Record<string, (p: Payload) => SmsContent> = {

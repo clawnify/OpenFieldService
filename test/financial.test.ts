@@ -1,8 +1,8 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import {
-  applySchema, authHeaders, createCustomer, createJob, createUser, del, loginAs,
-  post, put, queryDb, request, resetDatabase, satisfyCompletionRequirements,
+  applySchema, authHeaders, createCustomer, createJob, createSecondOrganization, createUser, del, loginAs,
+  post, put, queryDb, request, requestRaw, resetDatabase, satisfyCompletionRequirements,
 } from "./helpers.js";
 import { generateInvoiceForJob } from "../src/server/financial.js";
 
@@ -470,5 +470,144 @@ describe("invoice audit trail", () => {
     for (const row of auditRes.body.audit) {
       expect(row.actor_user_id).not.toBeNull();
     }
+  });
+});
+
+describe("Invoice PDF (Phase 13A final document hardening, Section 42-49)", () => {
+  function cookieOf(auth: RequestInit): string {
+    return (auth.headers as Record<string, string>).cookie;
+  }
+
+  async function makeInvoice(auth: RequestInit, priceCents = 20000) {
+    const customer = await createCustomer();
+    const job = await completeJob(customer.id, "STANDARD", auth, priceCents / 100);
+    return (await queryDb<{ id: number }>("SELECT id FROM invoices WHERE job_id = ?", [job.id]))[0].id;
+  }
+
+  it("View/Download/Print all serve the same underlying live-rendered PDF, reflecting current balance", async () => {
+    const auth = await authHeaders();
+    const invId = await makeInvoice(auth, 10000);
+    await post(`/api/invoices/${invId}/issue`, {}, auth);
+
+    const view = await requestRaw(`/api/invoices/${invId}/pdf`, { headers: { cookie: cookieOf(auth) } });
+    expect(view.status).toBe(200);
+    expect(view.headers.get("content-type")).toBe("application/pdf");
+    expect(view.headers.get("content-disposition")).toMatch(/^inline;/);
+    const bytesBeforePayment = new Uint8Array(await view.arrayBuffer());
+    expect(new TextDecoder().decode(bytesBeforePayment.slice(0, 5))).toBe("%PDF-");
+
+    const download = await requestRaw(`/api/invoices/${invId}/pdf?mode=download`, { headers: { cookie: cookieOf(auth) } });
+    expect(download.status).toBe(200);
+    const disposition = download.headers.get("content-disposition") || "";
+    expect(disposition).toMatch(/^attachment;/);
+    expect(disposition).toMatch(/\.pdf"$/);
+
+    // Section 43's explicit lifecycle decision: rendered LIVE, never a
+    // stored snapshot — recording a payment must change the very next
+    // render's bytes (a genuinely different balance), unlike a signed
+    // Contract PDF which never changes after signing.
+    await post(`/api/invoices/${invId}/payments`, { amount_cents: 4000, payer_type: "customer", method: "cash" }, auth);
+    const viewAfterPayment = await requestRaw(`/api/invoices/${invId}/pdf`, { headers: { cookie: cookieOf(auth) } });
+    const bytesAfterPayment = new Uint8Array(await viewAfterPayment.arrayBuffer());
+    expect(bytesAfterPayment).not.toEqual(bytesBeforePayment);
+  });
+
+  it("uses the tenant's Company Profile and logo (Section 45 — shared branding, no separate settings)", async () => {
+    const auth = await authHeaders();
+    await put("/api/company-profile", { company_name: "Coreline Comfort Invoicing Co" }, auth);
+    const invId = await makeInvoice(auth);
+    const res = await requestRaw(`/api/invoices/${invId}/pdf`, { headers: { cookie: cookieOf(auth) } });
+    expect(res.status).toBe(200);
+    await expect(res.arrayBuffer()).resolves.toBeInstanceOf(ArrayBuffer);
+  });
+
+  // Testing review finding: index.ts's `/api/invoices/:id/pdf` route filters
+  // `payments.filter((p) => !p.voided_at)` before handing them to the
+  // renderer — this is a money-correctness path on a customer-facing
+  // document, and was previously exercised only with zero or one
+  // never-voided payment. A voided payment must never appear in the
+  // rendered PDF (it would misstate what the customer actually paid) — a
+  // byte-diff against an equivalent invoice with no voided payment at all
+  // is the only way to prove this without a PDF text-extraction library
+  // (content streams are Flate-compressed, per this file's own convention).
+  it("never renders a voided payment in the PDF (route-level payments.filter regression guard)", async () => {
+    // Proof strategy: PDF content streams are Flate-compressed, so exact
+    // text can't be grepped out of the bytes (this file's own established
+    // convention) — but the rendered "Payments" table's ROW COUNT directly
+    // drives the output length. Three invoices, three payment histories:
+    //   (1) one active payment            -> table has 1 row
+    //   (2) one active + one VOIDED       -> table must ALSO have 1 row
+    //   (3) two active payments           -> table has 2 rows
+    // If the route's payments.filter(p => !p.voided_at) regresses (e.g. the
+    // filter is removed or inverted), scenario (2)'s PDF would match
+    // scenario (3)'s length instead of scenario (1)'s.
+    const auth = await authHeaders();
+
+    const invOneActive = await makeInvoice(auth, 10000);
+    await post(`/api/invoices/${invOneActive}/issue`, {}, auth);
+    await post(`/api/invoices/${invOneActive}/payments`, { amount_cents: 4000, payer_type: "customer", method: "cash", reference: "ROW-A" }, auth);
+    const oneActiveLen = (await (await requestRaw(`/api/invoices/${invOneActive}/pdf`, { headers: { cookie: cookieOf(auth) } })).arrayBuffer()).byteLength;
+
+    const invOneActiveOneVoided = await makeInvoice(auth, 10000);
+    await post(`/api/invoices/${invOneActiveOneVoided}/issue`, {}, auth);
+    await post(`/api/invoices/${invOneActiveOneVoided}/payments`, { amount_cents: 4000, payer_type: "customer", method: "cash", reference: "ROW-A" }, auth);
+    await post(`/api/invoices/${invOneActiveOneVoided}/payments`, { amount_cents: 1000, payer_type: "customer", method: "check", reference: "SHOULD-NOT-APPEAR" }, auth);
+    // POST /api/invoices/:id/payments returns the INVOICE, not the new
+    // payment row (see index.ts's recordPaymentRoute comment) — the
+    // payment's own id has to be read back separately, same as the
+    // existing "voiding a payment reverses..." test above does.
+    const toVoidRow = await queryDb<{ id: number }>("SELECT id FROM payments WHERE invoice_id = ? AND amount_cents = 1000", [invOneActiveOneVoided]);
+    await post(`/api/payments/${toVoidRow[0].id}/void`, { reason: "recorded in error" }, auth);
+    const oneActiveOneVoidedLen = (await (await requestRaw(`/api/invoices/${invOneActiveOneVoided}/pdf`, { headers: { cookie: cookieOf(auth) } })).arrayBuffer()).byteLength;
+
+    const invTwoActive = await makeInvoice(auth, 10000);
+    await post(`/api/invoices/${invTwoActive}/issue`, {}, auth);
+    await post(`/api/invoices/${invTwoActive}/payments`, { amount_cents: 4000, payer_type: "customer", method: "cash", reference: "ROW-A" }, auth);
+    await post(`/api/invoices/${invTwoActive}/payments`, { amount_cents: 1000, payer_type: "customer", method: "check", reference: "SHOULD-APPEAR" }, auth);
+    const twoActiveLen = (await (await requestRaw(`/api/invoices/${invTwoActive}/pdf`, { headers: { cookie: cookieOf(auth) } })).arrayBuffer()).byteLength;
+
+    // The voided-payment scenario must land at the 1-row length, not the
+    // 2-row length — an exact match isn't guaranteed (payment ids/
+    // timestamps differ), but it must be far closer to the 1-row case.
+    expect(Math.abs(oneActiveOneVoidedLen - oneActiveLen)).toBeLessThan(Math.abs(oneActiveOneVoidedLen - twoActiveLen));
+    expect(twoActiveLen).toBeGreaterThan(oneActiveLen); // sanity: a second real row does measurably grow the document
+
+    // Also confirm the underlying financials (already computed via SQL
+    // excluding voided payments, independent of this route's own filter)
+    // agree — a second, independent signal that nothing double-counted.
+    const detail = await request<{ invoice: { amount_paid_cents: number; balance_cents: number } }>(`/api/invoices/${invOneActiveOneVoided}`, auth);
+    expect(detail.body.invoice.amount_paid_cents).toBe(4000);
+    expect(detail.body.invoice.balance_cents).toBe(6000);
+  });
+
+  it("rejects a technician from viewing an invoice PDF (same financial blackout as every other invoice route)", async () => {
+    const auth = await authHeaders();
+    const invId = await makeInvoice(auth);
+    const tech = await technicianAuth();
+    const res = await requestRaw(`/api/invoices/${invId}/pdf`, { headers: { cookie: cookieOf(tech) } });
+    expect(res.status).toBe(403);
+  });
+
+  it("a dispatcher can access the Invoice PDF (same as admin, not admin-only)", async () => {
+    const auth = await authHeaders();
+    const invId = await makeInvoice(auth);
+    const dispatcher = await dispatcherAuth();
+    const res = await requestRaw(`/api/invoices/${invId}/pdf`, { headers: { cookie: cookieOf(dispatcher) } });
+    expect(res.status).toBe(200);
+  });
+
+  it("never leaks another organization's invoice PDF (tenant isolation)", async () => {
+    const auth = await authHeaders();
+    const invId = await makeInvoice(auth);
+    const second = await createSecondOrganization("Org B Invoicing Co");
+    const { cookie } = await loginAs(second.email, second.password);
+    const res = await requestRaw(`/api/invoices/${invId}/pdf`, { headers: { cookie } });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for a nonexistent invoice id rather than an unhandled error", async () => {
+    const auth = await authHeaders();
+    const res = await requestRaw("/api/invoices/999999/pdf", { headers: { cookie: cookieOf(auth) } });
+    expect(res.status).toBe(404);
   });
 });

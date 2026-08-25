@@ -470,6 +470,32 @@ export interface GlobalSetting {
   updated_at: string;
 }
 
+// Phase 13A hardening — Company Profile: tenant business identity used by
+// the Contract PDF header/footer (contract-pdf.ts). Admin-only read/write
+// (server/index.ts's /api/company-profile routes) — see
+// src/server/company-profile.ts for the full persistence-model rationale.
+export interface CompanyProfile {
+  organization_id: number;
+  company_name: string;
+  legal_name: string;
+  phone: string;
+  email: string;
+  website: string;
+  address_line1: string;
+  address_line2: string;
+  city: string;
+  state: string;
+  postal_code: string;
+  country: string;
+  business_number: string;
+  tax_number: string;
+  contract_footer: string;
+  logo_key: string | null;
+  updated_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 // Phase 8.4 — Lead Management UI, backed by the Phase 8.2 API + Phase 8.3
 // conversion endpoint. Field-for-field against the actual server response
 // (src/server/index.ts's LeadSchema) — a single `name` field, no
@@ -567,7 +593,6 @@ export interface ContractVersion {
   expires_at: string | null;
   document_hash: string | null;
   hash_algorithm: string;
-  signed_document_key: string | null;
   signed_document_hash: string | null;
   signed_at: string | null;
   created_by: number | null;
@@ -645,6 +670,18 @@ export interface ContractTemplateVersion {
   body: string;
   created_by: number | null;
   created_at: string;
+}
+
+// Phase 13A final document hardening — aggregate customer signed-copy
+// delivery status across every signer's notification (Section 37).
+export interface ContractDeliveryStatus {
+  total: number;
+  sent: number;
+  failed: number;
+  pending: number;
+  cancelled: number;
+  last_sent_at: string | null;
+  last_error: string | null;
 }
 
 export interface EvidencePackage {

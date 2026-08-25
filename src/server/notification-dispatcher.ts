@@ -6,6 +6,8 @@ import { createResendEmailProvider } from "./notification-resend.js";
 import { createTwilioSmsProvider } from "./notification-twilio.js";
 import { ProviderError, sanitizeErrorMessage, safeCode } from "./notification-providers.js";
 import type { EmailProvider, SmsProvider } from "./notification-providers.js";
+import { getSignedDocumentBytesForDelivery } from "./contracts.js";
+import type { StorageEnv } from "./storage.js";
 
 /**
  * Phase 9.2 — the dispatcher. Everything from "find a due row" through
@@ -147,6 +149,9 @@ async function resolveRecipientCustomerId(entityType: string, entityId: number):
       "SELECT i.customer_id as customer_id FROM payments p JOIN invoices i ON i.id = p.invoice_id WHERE p.id = ?", [entityId]
     );
     customerId = row?.customer_id ?? null;
+  } else if (entityType === "contract") {
+    const row = await get<{ customer_id: number }>("SELECT customer_id FROM contracts WHERE id = ?", [entityId]);
+    customerId = row?.customer_id ?? null;
   }
   if (customerId === null) return null;
   const customer = await get<{ id: number }>("SELECT id FROM customers WHERE id = ?", [customerId]);
@@ -229,8 +234,13 @@ async function recordFailure(id: number, attempts: number, errorCode: string, er
 export type DispatchOutcome = "sent" | "retry" | "failed" | "cancelled" | "skipped";
 
 /** The per-row pipeline. Caller MUST have already won `claimNotification()`
- *  for this id (status is 'sending') — this function does not claim. */
-export async function dispatchOne(id: number, providers: Providers): Promise<DispatchOutcome> {
+ *  for this id (status is 'sending') — this function does not claim.
+ *  `env` is optional and only ever consulted for a template that actually
+ *  needs an attachment (currently: `contract_signed_copy_v1`) — every
+ *  pre-existing call site across ~50 test cases and the real Cron path
+ *  keeps working unchanged whether or not it's supplied, since no other
+ *  template reaches the attachment-resolution branch below. */
+export async function dispatchOne(id: number, providers: Providers, env?: StorageEnv): Promise<DispatchOutcome> {
   const row = await get<OutboxRow>(
     `SELECT id, event_type, entity_type, entity_id, channel, recipient, template_key, payload, attempts, dedupe_key
      FROM notification_outbox WHERE id = ? AND status = 'sending'`,
@@ -287,8 +297,19 @@ export async function dispatchOne(id: number, providers: Providers): Promise<Dis
     if (row.channel === "email") {
       if (!providers.email) throw new ProviderError("provider_not_configured", "Email provider is not configured");
       const content = renderEmail(row.template_key, payload);
+      // Section 29/32: the customer-copy email's attachment must be the
+      // EXACT immutable artifact already stored in R2 — resolved here, at
+      // send time, never regenerated and never carried in the outbox
+      // payload (see EmailSendInput.attachments's own doc comment).
+      let attachments: { filename: string; contentType: string; content: Uint8Array }[] | undefined;
+      if (row.template_key === "contract_signed_copy_v1") {
+        if (!env) throw new ProviderError("attachment_unavailable", "Storage binding unavailable for signed-copy attachment");
+        const doc = await getSignedDocumentBytesForDelivery(env, row.entity_id);
+        if (!doc) throw new ProviderError("attachment_unavailable", "Signed document could not be loaded for attachment");
+        attachments = [{ filename: doc.filename, contentType: doc.contentType, content: new Uint8Array(doc.bytes) }];
+      }
       const result = await providers.email.send({
-        to: row.recipient, subject: content.subject, html: content.html, text: content.text, idempotencyKey: row.dedupe_key,
+        to: row.recipient, subject: content.subject, html: content.html, text: content.text, idempotencyKey: row.dedupe_key, attachments,
       });
       providerMessageId = result.providerMessageId;
     } else {
@@ -340,7 +361,7 @@ export interface DispatchCycleResult {
  *  unexpected exception from ONE row (e.g. a transient D1 error outside
  *  dispatchOne()'s own try/catch) no longer aborts the rest of this
  *  cycle's due rows; it did before this fix. */
-export async function runDispatchCycle(providers: Providers, limit = DISPATCH_BATCH_SIZE): Promise<DispatchCycleResult> {
+export async function runDispatchCycle(providers: Providers, env?: StorageEnv, limit = DISPATCH_BATCH_SIZE): Promise<DispatchCycleResult> {
   const result: DispatchCycleResult = { reclaimed: 0, claimed: 0, sent: 0, retried: 0, failed: 0, cancelled: 0, skipped: 0, errored: 0 };
   result.reclaimed = await reclaimStaleSendingRows();
 
@@ -350,7 +371,7 @@ export async function runDispatchCycle(providers: Providers, limit = DISPATCH_BA
     if (!claimed) continue; // another dispatcher already won this row
     result.claimed++;
     try {
-      const outcome = await dispatchOne(id, providers);
+      const outcome = await dispatchOne(id, providers, env);
       if (outcome === "sent") result.sent++;
       else if (outcome === "retry") result.retried++;
       else if (outcome === "failed") result.failed++;
@@ -467,8 +488,8 @@ export interface CronCycleResult {
  *  what makes the reminder scan's "only current schedule governs" guarantee
  *  hold without any supersede logic (see `enqueueAppointmentReminder()`'s
  *  doc comment). */
-export async function runCronCycle(env: NotificationProviderBindings): Promise<CronCycleResult> {
+export async function runCronCycle(env: NotificationProviderBindings & StorageEnv): Promise<CronCycleResult> {
   const reminders = await enqueueDayBeforeReminders();
-  const dispatch = await runDispatchCycle(buildProviders(env));
+  const dispatch = await runDispatchCycle(buildProviders(env), env);
   return { reminders, dispatch };
 }

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "preact/hooks";
 import { useApp } from "../context";
 import { api } from "../api";
 import { ConfirmDialog } from "./confirm-dialog";
+import { CompanyProfileSettings } from "./company-profile";
 import {
   SETTINGS_CATALOG, getSettingMeta, formatSettingValue, formatSettingDate,
   type SettingCatalogEntry,
@@ -312,6 +313,8 @@ export function GlobalSettings() {
         Changing a value here takes effect immediately going forward — jobs
         already evaluated keep the rule that applied to them at the time.
       </p>
+
+      <CompanyProfileSettings />
 
       {loading ? (
         <div class="empty-state"><p>Loading...</p></div>

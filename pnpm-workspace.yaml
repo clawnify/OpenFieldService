@@ -5,3 +5,13 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - '@clawnify/app@0.1.0'
   - '@clawnify/routes@0.2.1'
+# pdf-lib (Phase 13A hardening) depends on pako ^1.0.11, whose CJS entry
+# point does extension-less deep relative requires (`require('./lib/utils/
+# common')`) that @cloudflare/vitest-pool-workers' module resolution can't
+# follow (real `wrangler dev`/deploy bundling handles it fine — this is a
+# test-harness-specific gap). pako 2.x ships a proper `exports` map with a
+# self-contained ESM bundle that resolves cleanly everywhere. pdf-lib only
+# ever calls the stable `pako.deflate(bytes)` form, unchanged across the
+# 1.x/2.x major bump, so forcing 2.x here is safe.
+overrides:
+  pako: ^2.2.0

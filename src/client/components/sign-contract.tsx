@@ -1,6 +1,7 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { formatCents } from "../money";
 import { CheckCircle2, FileX, ShieldCheck } from "lucide-preact";
+import { scalePointerPosition } from "../signature-geometry";
 
 interface SigningView {
   contract_identifier: string;
@@ -39,7 +40,11 @@ export function SignContract({ token }: { token: string }) {
   const [consentChecked, setConsentChecked] = useState(false);
   const [submittingConsent, setSubmittingConsent] = useState(false);
   const [signerName, setSignerName] = useState("");
+  const [signMethod, setSignMethod] = useState<"typed" | "drawn">("typed");
   const [submittingSign, setSubmittingSign] = useState(false);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const drawing = useRef(false);
+  const hasDrawn = useRef(false);
   const [showDecline, setShowDecline] = useState(false);
   const [declineReason, setDeclineReason] = useState("");
   const [submittingDecline, setSubmittingDecline] = useState(false);
@@ -81,16 +86,57 @@ export function SignContract({ token }: { token: string }) {
     }
   };
 
+  // Draw Signature — a dependency-free canvas pad, same pointer-event/
+  // scaling logic as the existing job-completion signature pad
+  // (job-compliance.tsx), reused via signature-geometry.ts rather than
+  // re-invented here.
+  const getPos = (e: PointerEvent, canvas: HTMLCanvasElement) =>
+    scalePointerPosition(e.clientX, e.clientY, canvas.getBoundingClientRect(), canvas);
+  const startDraw = (e: PointerEvent) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    drawing.current = true;
+    hasDrawn.current = true;
+    const ctx = canvas.getContext("2d")!;
+    const { x, y } = getPos(e, canvas);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+  };
+  const moveDraw = (e: PointerEvent) => {
+    if (!drawing.current) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+    const { x, y } = getPos(e, canvas);
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "#111827";
+    ctx.lineTo(x, y);
+    ctx.stroke();
+  };
+  const endDraw = () => { drawing.current = false; };
+  const clearDraw = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.getContext("2d")!.clearRect(0, 0, canvas.width, canvas.height);
+    hasDrawn.current = false;
+  };
+
   const submitSign = async () => {
     if (!signerName.trim()) { setError("Type your full legal name to sign"); return; }
+    if (signMethod === "drawn" && !hasDrawn.current) { setError("Please sign in the box before continuing"); return; }
     setSubmittingSign(true);
     setError(null);
     try {
+      const body: Record<string, string> = { signer_name: signerName.trim(), signature_method: signMethod };
+      if (signMethod === "drawn" && canvasRef.current) {
+        body.signature_image_data_url = canvasRef.current.toDataURL("image/png");
+      }
       const r = await fetch(`/api/public/contracts/sign/${encodeURIComponent(token)}/sign`, {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ signer_name: signerName.trim(), signature_method: "typed" }),
+        body: JSON.stringify(body),
       });
-      if (!r.ok) { const body = await r.json() as { error: string }; throw new Error(body.error); }
+      if (!r.ok) { const body2 = await r.json() as { error: string }; throw new Error(body2.error); }
       setOutcome("signed");
     } catch (err) {
       setError((err as Error).message);
@@ -212,6 +258,34 @@ export function SignContract({ token }: { token: string }) {
               <label>Type your full legal name to sign</label>
               <input type="text" value={signerName} onInput={(e) => setSignerName((e.target as HTMLInputElement).value)} placeholder="Full name" autoFocus />
             </div>
+            <div class="form-group">
+              <label>Signature Method</label>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  type="button" class="btn btn-sm" style={signMethod === "typed" ? { fontWeight: 700 } : undefined}
+                  onClick={() => setSignMethod("typed")}
+                >
+                  Type Signature
+                </button>
+                <button
+                  type="button" class="btn btn-sm" style={signMethod === "drawn" ? { fontWeight: 700 } : undefined}
+                  onClick={() => setSignMethod("drawn")}
+                >
+                  Draw Signature
+                </button>
+              </div>
+            </div>
+            {signMethod === "drawn" && (
+              <div class="form-group">
+                <p class="text-muted" style={{ fontSize: 12 }}>Sign in the box below with your finger, stylus, or mouse.</p>
+                <canvas
+                  ref={canvasRef} width={400} height={160} class="signature-canvas"
+                  aria-label="Signature drawing area"
+                  onPointerDown={startDraw} onPointerMove={moveDraw} onPointerUp={endDraw} onPointerLeave={endDraw}
+                />
+                <button type="button" class="btn btn-sm" style={{ marginTop: 6 }} onClick={clearDraw}>Clear</button>
+              </div>
+            )}
             <button type="button" class="btn btn-primary btn-block" disabled={submittingSign} onClick={submitSign}>
               {submittingSign ? "Signing..." : "Sign Contract"}
             </button>

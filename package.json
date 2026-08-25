@@ -18,6 +18,7 @@
     "@hono/zod-openapi": "^0.18.0",
     "hono": "^4.6.0",
     "lucide-preact": "^0.575.0",
+    "pdf-lib": "^1.17.1",
     "preact": "^10.25.0",
     "zod": "^3.24.0"
   },

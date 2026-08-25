@@ -22,6 +22,17 @@ export interface EmailSendInput {
    *  the exact confidence level; a harmless no-op if the provider ignores
    *  the header. */
   idempotencyKey: string;
+  /** Phase 13A final document hardening — the signed Contract PDF copy is
+   *  the only current use, but this is deliberately generic (not
+   *  Contract-specific) at the provider-interface layer. `content` is raw
+   *  bytes; each adapter is responsible for whatever encoding its own
+   *  provider API expects (Resend wants base64 — see
+   *  notification-resend.ts). Never populated from
+   *  notification_outbox.payload (that column stays a minimal rendered-
+   *  template context only, per this file's own established discipline) —
+   *  the dispatcher resolves attachment bytes at send time, from whatever
+   *  already-immutable artifact the template_key implies. */
+  attachments?: { filename: string; contentType: string; content: Uint8Array }[];
 }
 
 export interface SmsSendInput {
