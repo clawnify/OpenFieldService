@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
-  authHeaders, del, loginAs, post, put, queryDb, request, resetDatabase, applySchema, createUser,
+  authHeaders, createSecondOrganization, del, loginAs, post, put, queryDb, request, resetDatabase, applySchema, createUser,
 } from "./helpers.js";
 
 beforeAll(async () => {
@@ -125,6 +125,153 @@ describe("global settings", () => {
 
     const retireAgain = await del("/api/settings/R", auth);
     expect(retireAgain.response.status).toBe(404);
+  });
+});
+
+describe("global settings RBAC (Phase 13C)", () => {
+  it("rejects a dispatcher and a technician from reading the unscoped settings list", async () => {
+    const dispatcher = await createUser({ email: "d13c@example.test", password: "DispatchPass1", role: "dispatcher" });
+    const dispatcherAuth = { headers: { cookie: (await loginAs(dispatcher.email, "DispatchPass1")).cookie } };
+    const technician = await createUser({ email: "t13c@example.test", password: "TechPass123", role: "technician" });
+    const technicianAuth = { headers: { cookie: (await loginAs(technician.email, "TechPass123")).cookie } };
+
+    expect((await request("/api/settings", dispatcherAuth)).response.status).toBe(403);
+    expect((await request("/api/settings", technicianAuth)).response.status).toBe(403);
+  });
+
+  it("rejects a dispatcher and a technician from reading any non-reference_data category", async () => {
+    const auth = await authHeaders();
+    await post("/api/settings", { key: "CLEANBC_TEST_KEY", value: "1", data_type: "number", category: "cleanbc" }, auth);
+
+    const dispatcher = await createUser({ email: "d13c2@example.test", password: "DispatchPass1", role: "dispatcher" });
+    const dispatcherAuth = { headers: { cookie: (await loginAs(dispatcher.email, "DispatchPass1")).cookie } };
+    expect((await request("/api/settings?category=cleanbc", dispatcherAuth)).response.status).toBe(403);
+  });
+
+  it("still allows a dispatcher and a technician to read the reference_data category (dropdown option lists)", async () => {
+    const dispatcher = await createUser({ email: "d13c3@example.test", password: "DispatchPass1", role: "dispatcher" });
+    const dispatcherAuth = { headers: { cookie: (await loginAs(dispatcher.email, "DispatchPass1")).cookie } };
+    const technician = await createUser({ email: "t13c3@example.test", password: "TechPass123", role: "technician" });
+    const technicianAuth = { headers: { cookie: (await loginAs(technician.email, "TechPass123")).cookie } };
+
+    const dispatcherRes = await request<{ settings: unknown[] }>("/api/settings?category=reference_data", dispatcherAuth);
+    expect(dispatcherRes.response.status).toBe(200);
+    const technicianRes = await request<{ settings: unknown[] }>("/api/settings?category=reference_data", technicianAuth);
+    expect(technicianRes.response.status).toBe(200);
+  });
+
+  it("rejects an unauthenticated request", async () => {
+    expect((await request("/api/settings")).response.status).toBe(401);
+  });
+
+  it("an admin still reads the unscoped list and any category (regression guard)", async () => {
+    const auth = await authHeaders();
+    expect((await request("/api/settings", auth)).response.status).toBe(200);
+    expect((await request("/api/settings?category=reference_data", auth)).response.status).toBe(200);
+  });
+
+  it("rejects a technician from creating, publishing, or retiring settings (write-gate parity with the existing dispatcher coverage above)", async () => {
+    const technician = await createUser({ email: "t13c5@example.test", password: "TechPass123", role: "technician" });
+    const technicianAuth = { headers: { cookie: (await loginAs(technician.email, "TechPass123")).cookie } };
+
+    const create = await post("/api/settings", { key: "TECH_WRITE_TEST", value: "1", data_type: "number" }, technicianAuth);
+    expect(create.response.status).toBe(403);
+
+    const auth = await authHeaders();
+    await post("/api/settings", { key: "TECH_WRITE_TEST", value: "1", data_type: "number" }, auth);
+    const retire = await del("/api/settings/TECH_WRITE_TEST", technicianAuth);
+    expect(retire.response.status).toBe(403);
+  });
+
+  it("the reference_data carve-out is an exact category match — a dispatcher cannot smuggle a sibling category's settings out via a prefix/near-miss category value", async () => {
+    const auth = await authHeaders();
+    await post("/api/settings", {
+      key: "REFERRAL_SOURCE_OPTIONS", value: '["Word of Mouth"]', data_type: "json", category: "reference_data",
+    }, auth);
+    await post("/api/settings", {
+      key: "CLEANBC_SECRET_THRESHOLD", value: "999", data_type: "number", category: "reference_data_extra",
+    }, auth);
+
+    const dispatcher = await createUser({ email: "d13c6@example.test", password: "DispatchPass1", role: "dispatcher" });
+    const dispatcherAuth = { headers: { cookie: (await loginAs(dispatcher.email, "DispatchPass1")).cookie } };
+
+    // The carve-out category returns only the exact "reference_data" rows —
+    // never a sibling category whose name merely starts with the same string.
+    const res = await request<{ settings: { key: string }[] }>("/api/settings?category=reference_data", dispatcherAuth);
+    expect(res.response.status).toBe(200);
+    const keys = res.body.settings.map((s) => s.key);
+    expect(keys).toContain("REFERRAL_SOURCE_OPTIONS");
+    expect(keys).not.toContain("CLEANBC_SECRET_THRESHOLD");
+
+    // And the near-miss category name itself is not a backdoor — it still
+    // requires admin, same as any other non-reference_data category.
+    expect((await request("/api/settings?category=reference_data_extra", dispatcherAuth)).response.status).toBe(403);
+  });
+
+  it("the reference_data carve-out stays tenant-scoped for a non-admin reader — a dispatcher never sees another organization's reference_data settings", async () => {
+    const auth = await authHeaders();
+    await post("/api/settings", {
+      key: "REFERRAL_SOURCE_OPTIONS", value: '["Org A Source"]', data_type: "json", category: "reference_data",
+    }, auth);
+
+    const second = await createSecondOrganization("RefData Org B");
+    const secondAdminAuth = { headers: { cookie: (await loginAs(second.email, second.password)).cookie } };
+    await post("/api/settings", {
+      key: "REFERRAL_SOURCE_OPTIONS", value: '["Org B Source"]', data_type: "json", category: "reference_data",
+    }, secondAdminAuth);
+
+    // A dispatcher created inside Org B (via Org B's own admin session — the
+    // same underlying create-path createSecondOrganization's own doc comment
+    // relies on) must only ever see Org B's reference_data, never Org A's.
+    const dispatcherB = await post<{ user: { id: number } }>("/api/users", {
+      name: "Org B Dispatcher", email: "dispatcher-b@example.test", password: "DispatchPass1", role: "dispatcher",
+    }, secondAdminAuth);
+    expect(dispatcherB.response.status).toBe(201);
+    const dispatcherBAuth = { headers: { cookie: (await loginAs("dispatcher-b@example.test", "DispatchPass1")).cookie } };
+
+    const res = await request<{ settings: { key: string; value: string }[] }>("/api/settings?category=reference_data", dispatcherBAuth);
+    expect(res.response.status).toBe(200);
+    expect(res.body.settings.find((s) => s.key === "REFERRAL_SOURCE_OPTIONS")?.value).toBe('["Org B Source"]');
+  });
+});
+
+describe("GET /api/config/business-timezone (Phase 13C — narrow operational read)", () => {
+  it("is readable by admin, dispatcher, and technician alike", async () => {
+    const auth = await authHeaders();
+    const adminRes = await request<{ timezone: string }>("/api/config/business-timezone", auth);
+    expect(adminRes.response.status).toBe(200);
+    expect(typeof adminRes.body.timezone).toBe("string");
+    expect(adminRes.body.timezone.length).toBeGreaterThan(0);
+
+    const dispatcher = await createUser({ email: "d13c4@example.test", password: "DispatchPass1", role: "dispatcher" });
+    const dispatcherAuth = { headers: { cookie: (await loginAs(dispatcher.email, "DispatchPass1")).cookie } };
+    expect((await request("/api/config/business-timezone", dispatcherAuth)).response.status).toBe(200);
+
+    const technician = await createUser({ email: "t13c4@example.test", password: "TechPass123", role: "technician" });
+    const technicianAuth = { headers: { cookie: (await loginAs(technician.email, "TechPass123")).cookie } };
+    expect((await request("/api/config/business-timezone", technicianAuth)).response.status).toBe(200);
+  });
+
+  it("rejects an unauthenticated request", async () => {
+    expect((await request("/api/config/business-timezone")).response.status).toBe(401);
+  });
+
+  it("is tenant-scoped — a second organization's own configured timezone doesn't leak into or from the default org", async () => {
+    const auth = await authHeaders();
+    await post("/api/settings", {
+      key: "BUSINESS_TIMEZONE", value: "America/Toronto", data_type: "string", category: "business_operations",
+    }, auth);
+
+    const second = await createSecondOrganization("Timezone Test Org");
+    const secondAuth = { headers: { cookie: (await loginAs(second.email, second.password)).cookie } };
+    await post("/api/settings", {
+      key: "BUSINESS_TIMEZONE", value: "America/Halifax", data_type: "string", category: "business_operations",
+    }, secondAuth);
+
+    const defaultOrgTz = await request<{ timezone: string }>("/api/config/business-timezone", auth);
+    expect(defaultOrgTz.body.timezone).toBe("America/Toronto");
+    const secondOrgTz = await request<{ timezone: string }>("/api/config/business-timezone", secondAuth);
+    expect(secondOrgTz.body.timezone).toBe("America/Halifax");
   });
 });
 

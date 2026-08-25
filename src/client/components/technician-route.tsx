@@ -81,19 +81,18 @@ export function TechnicianRoute() {
   const markersRef = useRef<Map<number, google.maps.Marker>>(new Map());
   const infoWindowRef = useRef<google.maps.InfoWindow | null>(null);
 
-  // Resolve BUSINESS_TIMEZONE once — GET /api/settings is unrestricted to
-  // any authenticated role (see mem:architecture/auth) — then default
-  // routeDate to "today" in that zone, never the browser's local zone and
-  // never a hardcoded city.
+  // Resolve BUSINESS_TIMEZONE once via the narrow, non-sensitive config read
+  // (Phase 13C — GET /api/settings is now admin-only, since it's the actual
+  // Settings management surface) — then default routeDate to "today" in
+  // that zone, never the browser's local zone and never a hardcoded city.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await api<{ settings: { key: string; value: string }[] }>("GET", "/api/settings");
+        const res = await api<{ timezone: string }>("GET", "/api/config/business-timezone");
         if (cancelled) return;
-        const tz = res.settings.find((s) => s.key === "BUSINESS_TIMEZONE")?.value ?? null;
-        setBusinessTimezone(tz);
-        setRouteDate(todayInBusinessTimezone(tz));
+        setBusinessTimezone(res.timezone);
+        setRouteDate(todayInBusinessTimezone(res.timezone));
       } catch {
         if (!cancelled) setRouteDate(todayInBusinessTimezone(null));
       }

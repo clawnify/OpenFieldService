@@ -28,6 +28,9 @@ const navItems: { view: View; path: string; label: string; icon: typeof LayoutDa
   { view: "services", path: "/services", label: "Service Types", icon: Settings },
   { view: "eligibility", path: "/eligibility", label: "Eligibility Tracker", icon: BadgeCheck, hideFromTechnician: true },
   { view: "users", path: "/users", label: "User Management", icon: UserCog, adminOnly: true },
+  // Per-user personal Google Calendar connection, not an org-level
+  // Integrations management surface — deliberately visible to every role.
+  // See app.tsx's matching comment on the "integrations" route case.
   { view: "integrations", path: "/integrations", label: "Google Calendar", icon: CalendarSync },
   { view: "settings", path: "/settings", label: "Global Settings", icon: SlidersHorizontal, adminOnly: true },
 ];

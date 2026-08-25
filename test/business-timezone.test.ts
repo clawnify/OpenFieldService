@@ -110,15 +110,19 @@ describe("Global Settings: BUSINESS_TIMEZONE", () => {
     expect(await getBusinessTimezone(DEFAULT_ORGANIZATION_ID)).toBe("America/New_York");
   });
 
-  it("a dispatcher CAN read the current settings list (read-only), matching existing settings RBAC", async () => {
+  it("Phase 13C: a dispatcher can no longer read the unscoped settings list (superseded by GET /api/config/business-timezone — see test/settings.test.ts)", async () => {
     const auth = await authHeaders();
     await post("/api/settings", { key: "BUSINESS_TIMEZONE", value: "America/Denver", data_type: "string" }, auth);
     await createUser({ email: "dispatch-tz-read@example.test", password: "DispatchPass1", role: "dispatcher" });
     const dispatcher = await loginAs("dispatch-tz-read@example.test", "DispatchPass1");
 
     const list = await request<{ settings: { key: string; value: string }[] }>("/api/settings", { headers: { cookie: dispatcher.cookie } });
-    expect(list.response.status).toBe(200);
-    expect(list.body.settings.find((s) => s.key === "BUSINESS_TIMEZONE")?.value).toBe("America/Denver");
+    expect(list.response.status).toBe(403);
+
+    // The narrow replacement read still resolves the same current value.
+    const config = await request<{ timezone: string }>("/api/config/business-timezone", { headers: { cookie: dispatcher.cookie } });
+    expect(config.response.status).toBe(200);
+    expect(config.body.timezone).toBe("America/Denver");
   });
 
   it("rejects an unauthenticated update attempt", async () => {

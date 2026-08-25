@@ -22,7 +22,7 @@ import {
   publishSetting,
   retireSetting,
 } from "./settings.js";
-import { BUSINESS_TIMEZONE_SETTING_KEY, isValidIanaTimezone } from "./business-timezone.js";
+import { BUSINESS_TIMEZONE_SETTING_KEY, getBusinessTimezone, isValidIanaTimezone } from "./business-timezone.js";
 import {
   CompanyProfileValidationError,
   getCompanyLogo,
@@ -5543,6 +5543,30 @@ app.openapi(getMapsConfig, async (c) => {
   return c.json({ enabled: !!key, browserApiKey: key }, 200);
 });
 
+// Phase 13C — a narrow, non-sensitive operational read for Technician
+// Route View's date-defaulting logic, which used to piggyback on the
+// (now admin-only) full `GET /api/settings` list. Same "config, not the
+// management surface" shape as /api/config/maps above — a single IANA
+// timezone string is not administrative configuration data, it's the same
+// kind of display/operational value the reference_data settings category
+// remains open for. Open to every authenticated role.
+const businessTimezoneConfigResponseSchema = z.object({
+  timezone: z.string(),
+}).openapi("BusinessTimezoneConfig");
+
+const getBusinessTimezoneConfig = createRoute({
+  method: "get",
+  path: "/api/config/business-timezone",
+  responses: {
+    200: { description: "Business timezone", content: { "application/json": { schema: businessTimezoneConfigResponseSchema } } },
+  },
+});
+
+app.openapi(getBusinessTimezoneConfig, async (c) => {
+  const timezone = await getBusinessTimezone(actorOrganizationId(c));
+  return c.json({ timezone }, 200);
+});
+
 // Phase 10.4 — Routing/Travel-Time. The ONE paid-request trigger in this
 // codebase (see mem:phase10/maps-routing-architecture-audit) — deliberately
 // separate from GET /api/schedule (which stays free/local, no Routes call)
@@ -7258,9 +7282,24 @@ app.openapi(deleteUser, async (c) => {
 // program rules, etc.) so government-defined numbers never require a code deploy
 // to change, and jobs whose eligibility was already evaluated keep resolving the
 // rule that applied to them at the time. See src/server/settings.ts for the
-// version-history mechanics. Reads are open to any authenticated user (workflow/
-// eligibility logic and dispatcher UI both need to resolve current values);
-// writes are admin-only, same gate as /api/users.
+// version-history mechanics.
+//
+// Phase 13C RBAC hardening: the Settings *management* surface (this list
+// route with no/any-other category, history, publish, retire) is admin-only
+// in both directions — a dispatcher/technician has no legitimate reason to
+// see rebate-program thresholds/amounts, business timezone, or any other
+// administrative configuration value. The ONE deliberate exception is
+// `?category=reference_data` (REFERRAL_SOURCE_OPTIONS/HEATING_SOURCE_OPTIONS/
+// LEAD_LOST_REASON_OPTIONS) — plain UI dropdown option lists with no
+// financial/threshold content, consumed by `useReferenceData()` across
+// Customer/Lead/Asset forms that dispatcher AND technician both use; locking
+// that down would silently empty those dropdowns for every non-admin role,
+// which is a real regression this phase does not intend. Narrower
+// operational reads that used to piggyback on the unrestricted full list
+// (e.g. Technician Route's business-timezone lookup) now use a dedicated,
+// non-sensitive `/api/config/*`-pattern route instead — see
+// `GET /api/config/business-timezone` below. Writes remain admin-only, same
+// gate as /api/users (unchanged by this phase).
 
 const GlobalSettingSchema = z.object({
   id: z.number().int(),
@@ -7283,11 +7322,14 @@ const listSettings = createRoute({
   request: { query: z.object({ category: z.string().optional() }) },
   responses: {
     200: { description: "Current settings", content: { "application/json": { schema: z.object({ settings: z.array(GlobalSettingSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
 app.openapi(listSettings, async (c) => {
   const { category } = c.req.valid("query");
+  const me = currentUser(c);
+  if (category !== "reference_data" && me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
   const settings = await listCurrentSettings(actorOrganizationId(c), category);
   return c.json({ settings }, 200);
 });

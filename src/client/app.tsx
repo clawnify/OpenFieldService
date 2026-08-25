@@ -92,6 +92,15 @@ export function App() {
       case "materials": return <MaterialList />;
       case "invoices": return user?.role !== "technician" ? <InvoiceList /> : <TechnicianHome />;
       case "users": return user?.role === "admin" ? <UserManagement /> : <Dashboard />;
+      // Phase 13C RBAC audit: deliberately NOT role-gated. This route is
+      // per-user Google Calendar connection (each user links their own
+      // account, server-scoped by user_id — see src/server/index.ts's
+      // Google Calendar Integration routes), not an organization-level
+      // Integrations *management* surface like Global Settings/Company
+      // Profile. There is no other Integrations UI in this codebase —
+      // provider config (Maps/Payments/Email/SMS) has no UI at all, env/
+      // secret-only. Restricting this route would break a working,
+      // intentional per-role feature with no product requirement to do so.
       case "integrations": return <Integrations />;
       case "settings": return user?.role === "admin" ? <GlobalSettings /> : <Dashboard />;
       case "eligibility": return user?.role !== "technician" ? <EligibilityTracker /> : <Dashboard />;
