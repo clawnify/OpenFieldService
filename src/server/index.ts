@@ -28,6 +28,24 @@ import {
   TaxJurisdictionError, CA_REGIONS, CA_PRESETS, type TaxComponentInput,
 } from "./tax-jurisdiction.js";
 import {
+  PhoneOperationsError,
+  canManagePhoneOperations, canViewPhoneOperationsCalls,
+  resolvePhoneOperationsSettings, getPhoneOperationsSettingsHistory, savePhoneOperationsSettings,
+  getVoiceEngineCredentialSummary, saveVoiceEngineCredential, getDecryptedTwilioAuthToken,
+  issueVoiceEngineServiceCredential, listVoiceEngineServiceCredentials, revokeVoiceEngineServiceCredential, resolveVoiceEngineServiceCredential,
+  listCurrentVoiceAgents, getVoiceAgentHistory, saveVoiceAgent,
+  listPhoneNumbers, createPhoneNumber, updatePhoneNumber, resolveOrganizationByPhoneNumber,
+  createInboundCall, createOutboundCall as createOutboundPhoneCall, markCallFailedToPlace, getCall, getCallByProviderSid, listCalls,
+  recordCallEvent, listCallEvents, issueCallSession, resolveCallSession, markCallSessionConnected, markCallSessionDisconnected,
+  appendTranscript, listTranscript, recordCallOutcome, getCallOutcome,
+  requestCallTransfer, listCallTransfers, recordPhoneOperationsAudit,
+  type CallStatus,
+} from "./phone-operations.js";
+import {
+  verifyTwilioSignature, buildInboundStreamTwiML, buildRejectedCallTwiML,
+  createOutboundCall as placeTwilioOutboundCall, mapTwilioCallStatus,
+} from "./twilio-provider.js";
+import {
   CompanyProfileValidationError,
   getCompanyLogo,
   getCompanyProfile,
@@ -263,7 +281,17 @@ type MapsBrowserBindings = { GOOGLE_MAPS_BROWSER_API_KEY?: string };
 // own doc comment further down this file.
 type PaymentBindings = { MOCK_PAYMENT_WEBHOOK_SECRET?: string };
 
-type Env = { Bindings: { DB: D1Database } & GoogleBindings & StorageEnv & NotificationProviderBindings & GoogleGeocodingBindings & MapsBrowserBindings & RoutingBindings & PaymentBindings; Variables: { user: PublicUser; organizationId: number } };
+// Phase 15 — the base wss:// origin of the separate Voice Engine runtime
+// (out of this repository, see docs/PHASE14-ANSWERMACHINE-INTEGRATION-AUDIT.md).
+// Non-secret (it's a public WebSocket endpoint, authorized per-call by the
+// short-lived session token in the URL, not by the URL's secrecy) — lives
+// in wrangler.toml's [vars]. Its absence is the deliberate "runtime not yet
+// deployed" gate: the inbound webhook responds with a graceful TwiML
+// rejection (see buildRejectedCallTwiML) rather than pointing Twilio at a
+// URL that doesn't exist.
+type VoiceEngineBindings = { VOICE_ENGINE_STREAM_BASE_URL?: string };
+
+type Env = { Bindings: { DB: D1Database } & GoogleBindings & StorageEnv & NotificationProviderBindings & GoogleGeocodingBindings & MapsBrowserBindings & RoutingBindings & PaymentBindings & VoiceEngineBindings; Variables: { user: PublicUser; organizationId: number } };
 
 function googleEnv(c: Context<Env>): GoogleOAuthEnv & CalendarSyncEnv {
   const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, TOKEN_ENCRYPTION_KEY } = c.env;
@@ -309,7 +337,17 @@ app.use("/api/*", async (c, next) => {
   // getSignatureRequestByToken(), the sole entry point every one of these
   // routes goes through. Never trust any organization_id/customer_id from
   // the request itself on this path — only what the token resolves to.
-  if (PUBLIC_API_PATHS.has(c.req.path) || c.req.path.startsWith("/api/public/")) {
+  // Phase 15 — two more prefix-based public exemptions, same shape as
+  // /api/public/ above: neither Twilio's webhooks nor the separate Voice
+  // Engine runtime carry a Field Scheduler session cookie. Each has its own
+  // strict authentication inside its own handler (Twilio request-signature
+  // verification; a per-organization bearer service credential resolved
+  // server-side, never a client-asserted organization id) — see
+  // phone-operations.ts and the route handlers below.
+  if (
+    PUBLIC_API_PATHS.has(c.req.path) || c.req.path.startsWith("/api/public/") ||
+    c.req.path.startsWith("/api/phone-operations/twilio/") || c.req.path.startsWith("/api/phone-operations/runtime/")
+  ) {
     await next();
     return;
   }
@@ -7505,6 +7543,706 @@ app.openapi(saveTaxProfileRoute, async (c) => {
     if (err instanceof TaxJurisdictionError) return c.json({ error: err.message }, 400);
     throw err;
   }
+});
+
+// ── Phone Operations (Phase 15 — foundation) ────────────────────────────
+// Config surfaces (settings/credentials/agents/numbers) are admin-only in
+// both directions, same discipline as Tax & Jurisdiction above. Call
+// operational data is admin+dispatcher (canViewPhoneOperationsCalls);
+// technician is blocked from everything under this section — see
+// phone-operations.ts's own header comment for the full rationale.
+
+const phoneOperationsSettingsSchema = z.object({
+  id: z.number().int(),
+  organization_id: z.number().int(),
+  operating_mode: z.string(),
+  inbound_enabled: z.boolean(),
+  outbound_enabled: z.boolean(),
+  max_concurrent_calls: z.number().int(),
+  daily_call_cap: z.number().int(),
+  effective_from: z.string(),
+  effective_until: z.string().nullable(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+  configured: z.boolean(),
+}).openapi("PhoneOperationsSettings");
+
+const getPhoneOperationsSettingsRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/settings",
+  responses: {
+    200: { description: "Current settings (safe DISABLED default if never configured)", content: { "application/json": { schema: z.object({ settings: phoneOperationsSettingsSchema }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getPhoneOperationsSettingsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const settings = await resolvePhoneOperationsSettings(actorOrganizationId(c));
+  return c.json({ settings }, 200);
+});
+
+const getPhoneOperationsSettingsHistoryRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/settings/history",
+  responses: {
+    200: { description: "Every settings version, newest first", content: { "application/json": { schema: z.object({ history: z.array(phoneOperationsSettingsSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getPhoneOperationsSettingsHistoryRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const history = await getPhoneOperationsSettingsHistory(actorOrganizationId(c));
+  return c.json({ history }, 200);
+});
+
+const savePhoneOperationsSettingsRoute = createRoute({
+  method: "post",
+  path: "/api/phone-operations/settings",
+  request: {
+    body: { content: { "application/json": { schema: z.object({
+      operating_mode: z.enum(["ACTIVE", "PAUSED", "MAINTENANCE", "DISABLED", "EMERGENCY_STOP"]),
+      inbound_enabled: z.boolean(),
+      outbound_enabled: z.boolean(),
+      max_concurrent_calls: z.number().int().min(1),
+      daily_call_cap: z.number().int().min(0),
+    }) } } },
+  },
+  responses: {
+    201: { description: "New settings version published", content: { "application/json": { schema: z.object({ settings: phoneOperationsSettingsSchema }) } } },
+    400: { description: "Invalid configuration", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(savePhoneOperationsSettingsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const data = c.req.valid("json");
+  try {
+    const settings = await savePhoneOperationsSettings({ organizationId: actorOrganizationId(c), ...data, actorId: me.id });
+    await recordPhoneOperationsAudit({ organizationId: actorOrganizationId(c), eventType: "settings_saved", entityType: "phone_operations_settings", entityId: settings.id, actorType: "user", actorUserId: me.id, details: { operating_mode: settings.operating_mode } });
+    return c.json({ settings }, 201);
+  } catch (err) {
+    if (err instanceof PhoneOperationsError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+// ── Voice Engine (Twilio) account credential ────────────────────────────
+
+const getVoiceEngineCredentialRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/credentials/twilio",
+  responses: {
+    200: { description: "Credential summary — account_sid only, never the auth token", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getVoiceEngineCredentialRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const summary = await getVoiceEngineCredentialSummary(actorOrganizationId(c));
+  return c.json({ credential: summary }, 200);
+});
+
+const saveVoiceEngineCredentialRoute = createRoute({
+  method: "post",
+  path: "/api/phone-operations/credentials/twilio",
+  request: { body: { content: { "application/json": { schema: z.object({ account_sid: z.string().min(1), auth_token: z.string().min(1) }) } } } },
+  responses: {
+    201: { description: "Credential saved (encrypted at rest)", content: { "application/json": { schema: z.any() } } },
+    400: { description: "Invalid input / not configured", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(saveVoiceEngineCredentialRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const data = c.req.valid("json");
+  try {
+    const summary = await saveVoiceEngineCredential({ organizationId: actorOrganizationId(c), accountSid: data.account_sid, authToken: data.auth_token, actorId: me.id }, c.env.TOKEN_ENCRYPTION_KEY);
+    await recordPhoneOperationsAudit({ organizationId: actorOrganizationId(c), eventType: "twilio_credential_saved", entityType: "voice_engine_credential", actorType: "user", actorUserId: me.id, details: { account_sid: data.account_sid } });
+    return c.json({ credential: summary }, 201);
+  } catch (err) {
+    if (err instanceof PhoneOperationsError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+// ── Voice Engine SERVICE credentials (runtime auth into OFS) ────────────
+
+const listServiceCredentialsRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/service-credentials",
+  responses: {
+    200: { description: "Issued service credentials — never the raw token", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listServiceCredentialsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const credentials = await listVoiceEngineServiceCredentials(actorOrganizationId(c));
+  return c.json({ credentials }, 200);
+});
+
+const issueServiceCredentialRoute = createRoute({
+  method: "post",
+  path: "/api/phone-operations/service-credentials",
+  request: { body: { content: { "application/json": { schema: z.object({ label: z.string().max(200).default("") }) } } } },
+  responses: {
+    201: { description: "The raw token is returned exactly once — it cannot be recovered afterward", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(issueServiceCredentialRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const data = c.req.valid("json");
+  const issued = await issueVoiceEngineServiceCredential(actorOrganizationId(c), data.label, me.id);
+  await recordPhoneOperationsAudit({ organizationId: actorOrganizationId(c), eventType: "service_credential_issued", entityType: "voice_engine_service_credential", entityId: issued.id, actorType: "user", actorUserId: me.id });
+  return c.json({ id: issued.id, token: issued.token }, 201);
+});
+
+const revokeServiceCredentialRoute = createRoute({
+  method: "post",
+  path: "/api/phone-operations/service-credentials/{id}/revoke",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Revoked", content: { "application/json": { schema: OkSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(revokeServiceCredentialRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const revoked = await revokeVoiceEngineServiceCredential(actorOrganizationId(c), Number(id));
+  if (!revoked) return c.json({ error: "Not found" }, 404);
+  await recordPhoneOperationsAudit({ organizationId: actorOrganizationId(c), eventType: "service_credential_revoked", entityType: "voice_engine_service_credential", entityId: Number(id), actorType: "user", actorUserId: me.id });
+  return c.json({ ok: true }, 200);
+});
+
+// ── Voice Agents ─────────────────────────────────────────────────────
+
+const listVoiceAgentsRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/agents",
+  responses: {
+    200: { description: "Every agent's current version", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listVoiceAgentsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const agents = await listCurrentVoiceAgents(actorOrganizationId(c));
+  return c.json({ agents }, 200);
+});
+
+const getVoiceAgentHistoryRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/agents/{name}/history",
+  request: { params: z.object({ name: z.string() }) },
+  responses: {
+    200: { description: "Every version of this agent, newest first", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getVoiceAgentHistoryRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { name } = c.req.valid("param");
+  const history = await getVoiceAgentHistory(actorOrganizationId(c), name);
+  return c.json({ history }, 200);
+});
+
+const saveVoiceAgentRoute = createRoute({
+  method: "post",
+  path: "/api/phone-operations/agents",
+  request: { body: { content: { "application/json": { schema: z.object({
+    name: z.string().min(1).max(200),
+    language: z.string().min(1).max(20),
+    voice: z.string().max(100),
+    model: z.string().max(200),
+    instructions: z.string().max(20000),
+    is_default: z.boolean(),
+    status: z.enum(["draft", "active", "archived"]),
+  }) } } } },
+  responses: {
+    201: { description: "New agent version published", content: { "application/json": { schema: z.any() } } },
+    400: { description: "Invalid configuration", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(saveVoiceAgentRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const data = c.req.valid("json");
+  try {
+    const agent = await saveVoiceAgent({ organizationId: actorOrganizationId(c), ...data, actorId: me.id });
+    await recordPhoneOperationsAudit({ organizationId: actorOrganizationId(c), eventType: "agent_saved", entityType: "voice_agent", entityId: agent.id, actorType: "user", actorUserId: me.id, details: { name: agent.name, is_default: agent.is_default } });
+    return c.json({ agent }, 201);
+  } catch (err) {
+    if (err instanceof PhoneOperationsError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+// ── Phone Numbers ────────────────────────────────────────────────────
+
+const listPhoneNumbersRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/numbers",
+  responses: {
+    200: { description: "Every provisioned number for this organization", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listPhoneNumbersRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const numbers = await listPhoneNumbers(actorOrganizationId(c));
+  return c.json({ numbers }, 200);
+});
+
+const createPhoneNumberRoute = createRoute({
+  method: "post",
+  path: "/api/phone-operations/numbers",
+  request: { body: { content: { "application/json": { schema: z.object({ e164_number: z.string().min(1), voice_agent_id: z.number().int().nullable().default(null) }) } } } },
+  responses: {
+    201: { description: "Number provisioned", content: { "application/json": { schema: z.any() } } },
+    400: { description: "Invalid or duplicate number", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(createPhoneNumberRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const data = c.req.valid("json");
+  try {
+    const number = await createPhoneNumber({ organizationId: actorOrganizationId(c), e164Number: data.e164_number, voiceAgentId: data.voice_agent_id, actorId: me.id });
+    await recordPhoneOperationsAudit({ organizationId: actorOrganizationId(c), eventType: "number_created", entityType: "phone_number", entityId: number.id, actorType: "user", actorUserId: me.id, details: { e164_number: number.e164_number } });
+    return c.json({ number }, 201);
+  } catch (err) {
+    if (err instanceof PhoneOperationsError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+const updatePhoneNumberRoute = createRoute({
+  method: "put",
+  path: "/api/phone-operations/numbers/{id}",
+  request: {
+    params: IdParam,
+    body: { content: { "application/json": { schema: z.object({
+      voice_agent_id: z.number().int().nullable().optional(),
+      inbound_enabled: z.boolean().optional(),
+      outbound_enabled: z.boolean().optional(),
+      status: z.enum(["active", "disabled"]).optional(),
+    }) } } },
+  },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(updatePhoneNumberRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePhoneOperations(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const data = c.req.valid("json");
+  const number = await updatePhoneNumber(actorOrganizationId(c), Number(id), { voiceAgentId: data.voice_agent_id, inboundEnabled: data.inbound_enabled, outboundEnabled: data.outbound_enabled, status: data.status });
+  if (!number) return c.json({ error: "Not found" }, 404);
+  await recordPhoneOperationsAudit({ organizationId: actorOrganizationId(c), eventType: "number_updated", entityType: "phone_number", entityId: number.id, actorType: "user", actorUserId: me.id, details: data });
+  return c.json({ number }, 200);
+});
+
+// ── Calls (operational — admin + dispatcher) ────────────────────────────
+
+const listCallsQuery = z.object({ page: z.string().optional(), limit: z.string().optional(), status: z.string().optional(), direction: z.string().optional() });
+const listCallsRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/calls",
+  request: { query: listCallsQuery },
+  responses: {
+    200: { description: "Paginated call list, newest first", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listCallsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const q = c.req.valid("query");
+  const { limit, offset } = parseHistoryPagination(q);
+  const result = await listCalls(actorOrganizationId(c), { limit, offset, status: q.status, direction: q.direction });
+  return c.json(result, 200);
+});
+
+const getCallRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/calls/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Call detail", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getCallRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const call = await getCall(actorOrganizationId(c), Number(id));
+  if (!call) return c.json({ error: "Not found" }, 404);
+  return c.json({ call }, 200);
+});
+
+async function loadOwnedCall(c: Context<Env>, id: string): Promise<{ id: number } | null> {
+  return getCall(actorOrganizationId(c), Number(id));
+}
+
+const getCallEventsRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/calls/{id}/events",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Append-only FSM event log", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getCallEventsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const call = await loadOwnedCall(c, id);
+  if (!call) return c.json({ error: "Not found" }, 404);
+  const events = await listCallEvents(actorOrganizationId(c), call.id);
+  return c.json({ events }, 200);
+});
+
+const getCallTranscriptRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/calls/{id}/transcript",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Transcript, in speaking order", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getCallTranscriptRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const call = await loadOwnedCall(c, id);
+  if (!call) return c.json({ error: "Not found" }, 404);
+  const transcript = await listTranscript(actorOrganizationId(c), call.id);
+  return c.json({ transcript }, 200);
+});
+
+const getCallOutcomeRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/calls/{id}/outcome",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "AI-produced structured outcome, for human review only — never auto-applied to any Customer/Lead/Job record", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getCallOutcomeRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const call = await loadOwnedCall(c, id);
+  if (!call) return c.json({ error: "Not found" }, 404);
+  const outcome = await getCallOutcome(actorOrganizationId(c), call.id);
+  return c.json({ outcome }, 200);
+});
+
+const getCallTransfersRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/calls/{id}/transfers",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Transfer requests recorded for this call", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getCallTransfersRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const call = await loadOwnedCall(c, id);
+  if (!call) return c.json({ error: "Not found" }, 404);
+  const transfers = await listCallTransfers(actorOrganizationId(c), call.id);
+  return c.json({ transfers }, 200);
+});
+
+const requestCallTransferRoute = createRoute({
+  method: "post",
+  path: "/api/phone-operations/calls/{id}/transfer-request",
+  request: {
+    params: IdParam,
+    body: { content: { "application/json": { schema: z.object({ target_user_id: z.number().int().nullable().default(null), target_phone_number: z.string().max(30).default("") }) } } },
+  },
+  responses: {
+    201: { description: "Transfer requested (foundation only — this Worker records intent, it does not execute a live PSTN transfer)", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(requestCallTransferRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const call = await loadOwnedCall(c, id);
+  if (!call) return c.json({ error: "Not found" }, 404);
+  const data = c.req.valid("json");
+  const transfer = await requestCallTransfer(actorOrganizationId(c), call.id, { requestedBy: "user", targetUserId: data.target_user_id, targetPhoneNumber: data.target_phone_number });
+  await recordPhoneOperationsAudit({ organizationId: actorOrganizationId(c), eventType: "transfer_requested", entityType: "call", entityId: call.id, actorType: "user", actorUserId: me.id });
+  return c.json({ transfer }, 201);
+});
+
+const createOutboundCallRoute = createRoute({
+  method: "post",
+  path: "/api/phone-operations/calls",
+  request: { body: { content: { "application/json": { schema: z.object({ phone_number_id: z.number().int(), to_number: z.string().min(1) }) } } } },
+  responses: {
+    201: { description: "Outbound call placed", content: { "application/json": { schema: z.any() } } },
+    400: { description: "Not allowed (operating mode / caps / not configured)", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Number not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(createOutboundCallRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const organizationId = actorOrganizationId(c);
+  const data = c.req.valid("json");
+  const numbers = await listPhoneNumbers(organizationId);
+  const fromNumber = numbers.find((n) => n.id === data.phone_number_id && n.status === "active" && n.outbound_enabled);
+  if (!fromNumber) return c.json({ error: "Number not found or not outbound-enabled" }, 404);
+  const creds = await getDecryptedTwilioAuthToken(organizationId, c.env.TOKEN_ENCRYPTION_KEY);
+  if (!creds) return c.json({ error: "Twilio credential is not configured for this organization" }, 400);
+
+  let call: Awaited<ReturnType<typeof createOutboundPhoneCall>>;
+  try {
+    call = await createOutboundPhoneCall({ organizationId, phoneNumberId: fromNumber.id, voiceAgentId: fromNumber.voice_agent_id, fromNumber: fromNumber.e164_number, toNumber: data.to_number, initiatedByUserId: me.id });
+  } catch (err) {
+    if (err instanceof PhoneOperationsError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+  // From here on the call row already exists (counts toward the org's
+  // concurrency/daily-cap budget) — a failure placing the real Twilio call
+  // must mark it `failed` rather than leaving it `queued` forever, which
+  // would permanently consume that budget slot (independent Architecture
+  // and Security review finding).
+  try {
+    const twimlUrl = `${new URL(c.req.url).origin}/api/phone-operations/twilio/voice`;
+    const statusUrl = `${new URL(c.req.url).origin}/api/phone-operations/twilio/status`;
+    const placed = await placeTwilioOutboundCall(creds, { to: data.to_number, from: fromNumber.e164_number, twimlUrl, statusCallbackUrl: statusUrl });
+    await run("UPDATE calls SET provider_call_sid = ? WHERE id = ?", [placed.providerCallSid, call.id]);
+    await recordPhoneOperationsAudit({ organizationId, eventType: "outbound_call_placed", entityType: "call", entityId: call.id, actorType: "user", actorUserId: me.id, details: { to_number: data.to_number } });
+    return c.json({ call: { ...call, provider_call_sid: placed.providerCallSid } }, 201);
+  } catch (err) {
+    await markCallFailedToPlace(organizationId, call.id, err instanceof Error ? err.message : "unknown error");
+    // The real Twilio REST error text is provider-internal detail, not
+    // something to surface verbatim to the client (independent Security
+    // review finding) — log it server-side via the audit trail instead.
+    await recordPhoneOperationsAudit({ organizationId, eventType: "outbound_call_placement_failed", entityType: "call", entityId: call.id, actorType: "user", actorUserId: me.id, details: { to_number: data.to_number, error: err instanceof Error ? err.message : String(err) } });
+    return c.json({ error: "Failed to place call" }, 400);
+  }
+});
+
+// ── Twilio webhooks (public prefix — signature-authenticated, not
+// session-authenticated; see the /api/* middleware exemption above). The
+// organization is ALWAYS resolved server-side from the dialed `To` number
+// (resolveOrganizationByPhoneNumber) or from the call's own stored
+// organization_id (status callback) — never from anything the request
+// itself claims about tenancy. ──────────────────────────────────────────
+
+app.post("/api/phone-operations/twilio/voice", async (c) => {
+  const rawBody = await c.req.text();
+  const params = Object.fromEntries(new URLSearchParams(rawBody));
+  const to = String(params.To || "");
+  const from = String(params.From || "");
+  const callSid = String(params.CallSid || "");
+  const numberOwner = to ? await resolveOrganizationByPhoneNumber(to) : null;
+  if (!numberOwner) return c.body(buildRejectedCallTwiML(), 200, { "Content-Type": "text/xml" });
+
+  // Independent Security/Architecture review finding: an unconfigured-
+  // credential number used to return 200 while a configured-but-bad-
+  // signature number returned 401, letting an unauthenticated caller
+  // fingerprint which numbers are live/funded Phone Operations numbers
+  // purely from the response code. Both "no credential" and "signature
+  // doesn't verify" are now the same 401 — only "number not provisioned
+  // in OFS at all" (the least sensitive case — true of nearly every E.164
+  // number) still returns the softer 200/reject-TwiML.
+  const creds = await getDecryptedTwilioAuthToken(numberOwner.organization_id, c.env.TOKEN_ENCRYPTION_KEY);
+  if (!creds) return c.text("Invalid signature", 401);
+  const signature = c.req.header("X-Twilio-Signature") ?? null;
+  const valid = await verifyTwilioSignature(creds.authToken, c.req.url, params, signature);
+  if (!valid) return c.text("Invalid signature", 401);
+
+  if (!numberOwner.inbound_enabled) return c.body(buildRejectedCallTwiML(), 200, { "Content-Type": "text/xml" });
+  try {
+    const call = await createInboundCall({ organizationId: numberOwner.organization_id, phoneNumberId: numberOwner.phone_number_id, voiceAgentId: numberOwner.voice_agent_id, fromNumber: from, toNumber: to, providerCallSid: callSid });
+    if (!c.env.VOICE_ENGINE_STREAM_BASE_URL) return c.body(buildRejectedCallTwiML(), 200, { "Content-Type": "text/xml" });
+    const session = await issueCallSession(call.id);
+    const streamUrl = `${c.env.VOICE_ENGINE_STREAM_BASE_URL}?session=${encodeURIComponent(session.token)}`;
+    return c.body(buildInboundStreamTwiML(streamUrl), 200, { "Content-Type": "text/xml" });
+  } catch (err) {
+    if (err instanceof PhoneOperationsError) return c.body(buildRejectedCallTwiML(), 200, { "Content-Type": "text/xml" });
+    throw err;
+  }
+});
+
+app.post("/api/phone-operations/twilio/status", async (c) => {
+  const rawBody = await c.req.text();
+  const params = Object.fromEntries(new URLSearchParams(rawBody));
+  const callSid = String(params.CallSid || "");
+  const twilioStatus = String(params.CallStatus || "");
+  const call = callSid ? await getCallByProviderSid(callSid) : null;
+  if (!call) return c.json({ ok: true }, 200); // unknown/foreign call — nothing to update, never an error a retrying webhook would treat as failed
+
+  const creds = await getDecryptedTwilioAuthToken(call.organization_id, c.env.TOKEN_ENCRYPTION_KEY);
+  if (!creds) return c.json({ ok: true }, 200);
+  const signature = c.req.header("X-Twilio-Signature") ?? null;
+  const valid = await verifyTwilioSignature(creds.authToken, c.req.url, params, signature);
+  if (!valid) return c.text("Invalid signature", 401);
+
+  const mapped = mapTwilioCallStatus(twilioStatus);
+  if (mapped) {
+    try {
+      await recordCallEvent(call.organization_id, call.id, { eventType: `twilio_status_${twilioStatus}`, toStatus: mapped as CallStatus, actorType: "twilio", idempotencyKey: `${callSid}:${twilioStatus}` });
+    } catch (err) {
+      if (!(err instanceof PhoneOperationsError && err.code === "invalid_transition")) throw err;
+      // An out-of-order/duplicate-delivery status webhook that would rewind
+      // a call is correctly refused (ALLOWED_TRANSITIONS has no edge out of
+      // a terminal state) — but silently swallowing it left no audit trace
+      // of what Twilio actually sent (independent Architecture review
+      // finding). Record the rejection itself, without a `toStatus`, so it
+      // never affects `calls.status` but still shows up in the event log.
+      await recordCallEvent(call.organization_id, call.id, { eventType: `twilio_status_${twilioStatus}_rejected`, actorType: "twilio", details: { attempted_status: mapped } });
+    }
+  }
+  return c.json({ ok: true }, 200);
+});
+
+// ── Voice Engine runtime API (public prefix — bearer service-credential
+// authenticated). Every handler resolves `organization_id` from the
+// credential itself via resolveVoiceEngineServiceCredential — a request
+// body is NEVER trusted for tenancy, and every call/session id looked up
+// below is re-checked against that resolved organization_id before any
+// data is read or written, closing the cross-tenant IDOR risk both the
+// independent Architecture and Security reviews flagged in Phase 14. ────
+
+async function runtimeAuth(c: Context<Env>): Promise<{ organization_id: number } | null> {
+  const auth = c.req.header("Authorization") ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!token) return null;
+  return resolveVoiceEngineServiceCredential(token);
+}
+
+app.post("/api/phone-operations/runtime/sessions/resolve", async (c) => {
+  const runtime = await runtimeAuth(c);
+  if (!runtime) return c.json({ error: "Unauthorized" }, 401);
+  const body = await c.req.json().catch(() => ({}));
+  const sessionToken = typeof body.session_token === "string" ? body.session_token : "";
+  const session = sessionToken ? await resolveCallSession(sessionToken) : null;
+  if (!session || session.organization_id !== runtime.organization_id) return c.json({ error: "Not found" }, 404);
+  const call = await getCall(runtime.organization_id, session.call_id);
+  if (!call) return c.json({ error: "Not found" }, 404);
+  await markCallSessionConnected(session.id);
+  const profile = await getCompanyProfile(runtime.organization_id);
+  const timezone = await getBusinessTimezone(runtime.organization_id);
+  return c.json({
+    call_id: call.id,
+    direction: call.direction,
+    from_number: call.from_number,
+    to_number: call.to_number,
+    agent: call.voice_agent_snapshot,
+    company: { name: profile?.company_name ?? "", phone: profile?.phone ?? "", email: profile?.email ?? "" },
+    timezone,
+  }, 200);
+});
+
+app.post("/api/phone-operations/runtime/calls/:id/events", async (c) => {
+  const runtime = await runtimeAuth(c);
+  if (!runtime) return c.json({ error: "Unauthorized" }, 401);
+  const call = await getCall(runtime.organization_id, Number(c.req.param("id")));
+  if (!call) return c.json({ error: "Not found" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    const result = await recordCallEvent(runtime.organization_id, call.id, {
+      eventType: String(body.event_type || "voice_engine_event"),
+      toStatus: body.to_status as CallStatus | undefined,
+      actorType: "voice_engine",
+      idempotencyKey: typeof body.idempotency_key === "string" ? body.idempotency_key : null,
+      details: typeof body.details === "object" && body.details !== null ? body.details : {},
+    });
+    return c.json(result, 200);
+  } catch (err) {
+    if (err instanceof PhoneOperationsError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+app.post("/api/phone-operations/runtime/calls/:id/transcript", async (c) => {
+  const runtime = await runtimeAuth(c);
+  if (!runtime) return c.json({ error: "Unauthorized" }, 401);
+  const call = await getCall(runtime.organization_id, Number(c.req.param("id")));
+  if (!call) return c.json({ error: "Not found" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const sequence = Number(body.sequence);
+  const speaker = body.speaker === "agent" || body.speaker === "caller" ? body.speaker : null;
+  const text = typeof body.text === "string" ? body.text : "";
+  if (!Number.isInteger(sequence) || !speaker || !text) return c.json({ error: "sequence, speaker (agent|caller), and text are required" }, 400);
+  const result = await appendTranscript(runtime.organization_id, call.id, { sequence, speaker, text, confidence: typeof body.confidence === "number" ? body.confidence : null });
+  return c.json(result, 200);
+});
+
+app.post("/api/phone-operations/runtime/calls/:id/outcome", async (c) => {
+  const runtime = await runtimeAuth(c);
+  if (!runtime) return c.json({ error: "Unauthorized" }, 401);
+  const call = await getCall(runtime.organization_id, Number(c.req.param("id")));
+  if (!call) return c.json({ error: "Not found" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const outcomeType = typeof body.outcome_type === "string" ? body.outcome_type : "";
+  if (!outcomeType) return c.json({ error: "outcome_type is required" }, 400);
+  const result = await recordCallOutcome(runtime.organization_id, call.id, {
+    outcomeType,
+    summary: typeof body.summary === "string" ? body.summary : "",
+    structuredData: typeof body.structured_data === "object" && body.structured_data !== null ? body.structured_data : {},
+    confidence: typeof body.confidence === "number" ? body.confidence : null,
+  });
+  return c.json(result, 200);
+});
+
+app.post("/api/phone-operations/runtime/calls/:id/transfer", async (c) => {
+  const runtime = await runtimeAuth(c);
+  if (!runtime) return c.json({ error: "Unauthorized" }, 401);
+  const call = await getCall(runtime.organization_id, Number(c.req.param("id")));
+  if (!call) return c.json({ error: "Not found" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const transfer = await requestCallTransfer(runtime.organization_id, call.id, { requestedBy: "voice_engine", targetPhoneNumber: typeof body.target_phone_number === "string" ? body.target_phone_number : "" });
+  return c.json({ transfer }, 201);
+});
+
+app.post("/api/phone-operations/runtime/sessions/:id/disconnected", async (c) => {
+  const runtime = await runtimeAuth(c);
+  if (!runtime) return c.json({ error: "Unauthorized" }, 401);
+  const body = await c.req.json().catch(() => ({}));
+  const found = await markCallSessionDisconnected(runtime.organization_id, Number(c.req.param("id")), typeof body.reason === "string" ? body.reason : "");
+  if (!found) return c.json({ error: "Not found" }, 404);
+  return c.json({ ok: true }, 200);
 });
 
 const publishSettingRoute = createRoute({

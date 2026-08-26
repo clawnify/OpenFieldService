@@ -1,4 +1,4 @@
-export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "quotes" | "contracts" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility";
+export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "quotes" | "contracts" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility" | "phone-operations";
 
 export type Role = "admin" | "dispatcher" | "technician";
 

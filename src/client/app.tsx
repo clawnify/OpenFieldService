@@ -17,6 +17,7 @@ import { QuoteList } from "./components/quote-list";
 import { QuoteDetail } from "./components/quote-detail";
 import { ContractList } from "./components/contract-list";
 import { ContractDetail } from "./components/contract-detail";
+import { PhoneOperations } from "./components/phone-operations";
 import { TechnicianList } from "./components/technician-list";
 import { ServiceTypeList } from "./components/service-type-list";
 import { MaterialList } from "./components/material-list";
@@ -87,6 +88,7 @@ export function App() {
       case "leads": return user?.role !== "technician" ? <LeadList navigate={navigate} /> : <TechnicianHome />;
       case "quotes": return user?.role !== "technician" ? <QuoteList navigate={navigate} /> : <TechnicianHome />;
       case "contracts": return user?.role !== "technician" ? <ContractList navigate={navigate} /> : <TechnicianHome />;
+      case "phone-operations": return user?.role !== "technician" ? <PhoneOperations /> : <TechnicianHome />;
       case "technicians": return <TechnicianList />;
       case "services": return <ServiceTypeList />;
       case "materials": return <MaterialList />;

@@ -258,6 +258,21 @@ export async function resetDatabase() {
     "DELETE FROM tax_profiles",
     "DELETE FROM tax_snapshot_components",
     "DELETE FROM tax_snapshots",
+    // Phone Operations (Phase 15) — same reasoning: org id=1 is never
+    // deleted, so every one of these must be cleared explicitly or leak
+    // into the next test.
+    "DELETE FROM call_transcripts",
+    "DELETE FROM call_events",
+    "DELETE FROM call_outcomes",
+    "DELETE FROM call_transfers",
+    "DELETE FROM call_sessions",
+    "DELETE FROM calls",
+    "DELETE FROM phone_numbers",
+    "DELETE FROM voice_agents",
+    "DELETE FROM voice_engine_service_credentials",
+    "DELETE FROM voice_engine_credentials",
+    "DELETE FROM phone_operations_settings",
+    "DELETE FROM phone_operations_audit",
     "DELETE FROM organizations WHERE id != 1",
     "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter', 'quote_counter', 'contract_counter')",
     "DELETE FROM sqlite_sequence",

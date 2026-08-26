@@ -5,7 +5,7 @@ import { ROLE_LABELS } from "../role-labels";
 import { ChangeMyPassword } from "./change-my-password";
 import {
   CalendarClock, LayoutDashboard, Briefcase, Users, Wrench, Settings, CalendarDays,
-  FileText, Package, UserCog, KeyRound, LogOut, CalendarSync, SlidersHorizontal, BadgeCheck, Target, Calculator, FileSignature,
+  FileText, Package, UserCog, KeyRound, LogOut, CalendarSync, SlidersHorizontal, BadgeCheck, Target, Calculator, FileSignature, Phone,
 } from "lucide-preact";
 import type { View } from "../types";
 
@@ -22,6 +22,7 @@ const navItems: { view: View; path: string; label: string; icon: typeof LayoutDa
   { view: "customers", path: "/customers", label: "Customers", icon: Users },
   { view: "quotes", path: "/quotes", label: "Quotes", icon: Calculator, hideFromTechnician: true },
   { view: "contracts", path: "/contracts", label: "Contracts", icon: FileSignature, hideFromTechnician: true },
+  { view: "phone-operations", path: "/phone-operations", label: "Phone Operations", icon: Phone, hideFromTechnician: true },
   { view: "technicians", path: "/technicians", label: "Technicians", icon: Wrench },
   { view: "invoices", path: "/invoices", label: "Invoices", icon: FileText, hideFromTechnician: true },
   { view: "materials", path: "/materials", label: "Materials", icon: Package },
