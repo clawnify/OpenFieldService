@@ -24,6 +24,10 @@ import {
 } from "./settings.js";
 import { BUSINESS_TIMEZONE_SETTING_KEY, getBusinessTimezone, isValidIanaTimezone } from "./business-timezone.js";
 import {
+  resolveTaxProfile, getTaxProfileHistory, saveTaxProfile, getTaxSnapshot,
+  TaxJurisdictionError, CA_REGIONS, CA_PRESETS, type TaxComponentInput,
+} from "./tax-jurisdiction.js";
+import {
   CompanyProfileValidationError,
   getCompanyLogo,
   getCompanyProfile,
@@ -3824,6 +3828,7 @@ const QuoteLineItemSchema = z.object({
   total_cents: z.number().int(),
   sort_order: z.number().int(),
   asset_id: z.number().int().nullable(),
+  taxable: z.number().int(),
 }).openapi("QuoteLineItem");
 
 const QuoteVersionSchema = z.object({
@@ -3884,19 +3889,24 @@ const LineItemInputSchema = z.object({
   unit_price_cents: z.number().int().min(0).optional(),
   sort_order: z.number().int().optional(),
   asset_id: z.number().int().nullable().optional(),
+  // Phase 13D (Section 8): explicit per-line taxability only. Omitted
+  // means "use the organization's default taxability."
+  taxable: z.boolean().optional(),
 }).strict();
 
 /** organization_id, every totals field, version_number, accepted_by/
  *  accepted_at, and the audit actor are all deliberately absent from this
  *  schema — mass-assignment protection (Section 28), matching the
- *  established Asset/Job convention exactly. */
+ *  established Asset/Job convention exactly. Phase 13D: tax_rate is ALSO
+ *  absent — tax is server-resolved from the organization's Tax Profile,
+ *  never client-suppliable (Section 18); a client may only mark individual
+ *  lines taxable/non-taxable via LineItemInputSchema#taxable. */
 const CreateQuoteInputSchema = z.object({
   customer_id: z.number().int(),
   lead_id: z.number().int().nullable().optional(),
   discount_type: z.enum(DISCOUNT_TYPES as unknown as [string, ...string[]]).optional(),
   discount_percent: z.number().min(0).max(100).optional(),
   discount_cents: z.number().int().min(0).optional(),
-  tax_rate: z.number().min(0).max(100).optional(),
   notes: z.string().max(2000).optional(),
   expires_at: z.string().nullable().optional(),
   line_items: z.array(LineItemInputSchema).optional(),
@@ -3906,7 +3916,6 @@ const UpdateVersionInputSchema = z.object({
   discount_type: z.enum(DISCOUNT_TYPES as unknown as [string, ...string[]]).optional(),
   discount_percent: z.number().min(0).max(100).optional(),
   discount_cents: z.number().int().min(0).optional(),
-  tax_rate: z.number().min(0).max(100).optional(),
   notes: z.string().max(2000).optional(),
   expires_at: z.string().nullable().optional(),
 }).strict();
@@ -5928,7 +5937,12 @@ async function attachFinancials(invoice: Record<string, unknown>): Promise<Recor
   const financials = await getInvoiceFinancials(
     invoice as unknown as Parameters<typeof getInvoiceFinancials>[0], invoice.due_date as string
   );
-  return { ...invoice, ...financials };
+  // Phase 13D: the persisted tax breakdown for THIS invoice — never
+  // re-derived from the organization's current Tax Profile, so a settings
+  // change after issuance can never alter what an already-issued invoice
+  // displays. null for a pre-Phase-13D invoice with no snapshot row.
+  const tax_snapshot = await getTaxSnapshot("invoice", invoice.id as number);
+  return { ...invoice, ...financials, tax_snapshot };
 }
 
 /** Phase 11.5 — a lightweight ownership guard used by every single-invoice
@@ -6203,6 +6217,10 @@ const InvoiceLineInputSchema = z.object({
   description: z.string(),
   quantity: z.number().positive(),
   unit_price_cents: z.number().int(),
+  // Phase 13D: explicit per-line taxability only — never a client-supplied
+  // rate/amount/total. Omitted means "use the organization's default
+  // taxability", resolved server-side.
+  taxable: z.boolean().optional(),
 });
 
 const createInvoice = createRoute({
@@ -6212,7 +6230,6 @@ const createInvoice = createRoute({
     body: { content: { "application/json": { schema: z.object({
       customer_id: z.number().int(),
       job_id: z.number().int().nullable().optional(),
-      tax_rate: z.number().optional(),
       notes: z.string().optional(),
       due_date: z.string().optional(),
       lines: z.array(InvoiceLineInputSchema).min(1),
@@ -6250,10 +6267,9 @@ app.openapi(createInvoice, async (c) => {
       organizationId,
       customerId: data.customer_id,
       jobId: data.job_id ?? null,
-      taxRatePercent: data.tax_rate ?? 0,
       notes: data.notes ?? "",
       dueDate: data.due_date ?? "",
-      lines: data.lines.map((l) => ({ description: l.description, quantity: l.quantity, unitPriceCents: l.unit_price_cents })),
+      lines: data.lines.map((l) => ({ description: l.description, quantity: l.quantity, unitPriceCents: l.unit_price_cents, taxable: l.taxable })),
     }, me.id);
     const result = await get<Record<string, unknown>>(
       `SELECT i.*, c.name as customer_name FROM invoices i
@@ -7350,6 +7366,145 @@ app.openapi(getSettingHistoryRoute, async (c) => {
   const { key } = c.req.valid("param");
   const history = await getSettingHistory(actorOrganizationId(c), key);
   return c.json({ history }, 200);
+});
+
+// ── Tax & Jurisdiction (Phase 13D) ──────────────────────────────────────
+// A dedicated, admin-only management surface, deliberately NOT modeled as
+// global_settings key/value rows — a Tax Profile is inherently structured
+// (0..N components, several typed flags), and settings.ts's generic
+// key/value shape has no clean way to express "N rows belong to one
+// version" without smuggling a second layer of versioning inside a JSON
+// string. See tax-jurisdiction.ts for the full versioning/snapshot design.
+// Every route below is admin-only in both directions (read and write) —
+// stricter than canManageFinancials (admin+dispatcher), matching Section
+// 17/18's explicit instruction that dispatcher/technician get NO UI and NO
+// direct API access, not even read-only.
+
+const TaxComponentSchema = z.object({
+  code: z.string().min(1),
+  name: z.string().min(1),
+  rate_percent: z.number(),
+}).openapi("TaxComponentInput");
+
+const TaxProfileResponseSchema = z.object({
+  id: z.number().int(),
+  organization_id: z.number().int(),
+  tax_enabled: z.boolean(),
+  country_code: z.string(),
+  region_code: z.string(),
+  currency: z.string(),
+  prices_include_tax: z.boolean(),
+  default_taxable: z.boolean(),
+  effective_from: z.string(),
+  effective_until: z.string().nullable(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+  components: z.array(TaxComponentSchema.extend({ id: z.number().int() })),
+}).openapi("TaxProfile");
+
+const getTaxProfileRoute = createRoute({
+  method: "get",
+  path: "/api/tax-profile",
+  responses: {
+    200: { description: "Current tax profile (null if never configured)", content: { "application/json": { schema: z.object({ profile: TaxProfileResponseSchema.nullable() }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getTaxProfileRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const profile = await resolveTaxProfile(actorOrganizationId(c));
+  return c.json({ profile }, 200);
+});
+
+const getTaxProfileHistoryRoute = createRoute({
+  method: "get",
+  path: "/api/tax-profile/history",
+  responses: {
+    200: { description: "Every tax profile version, newest first", content: { "application/json": { schema: z.object({ history: z.array(TaxProfileResponseSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getTaxProfileHistoryRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const history = await getTaxProfileHistory(actorOrganizationId(c));
+  return c.json({ history }, 200);
+});
+
+const getTaxJurisdictionOptionsRoute = createRoute({
+  method: "get",
+  path: "/api/tax-profile/options",
+  responses: {
+    200: {
+      description: "Canadian region list and editable preset component sets — not legal advice, not auto-applied",
+      content: { "application/json": { schema: z.object({
+        ca_regions: z.array(z.object({ code: z.string(), name: z.string() })),
+        ca_presets: z.record(z.string(), z.array(TaxComponentSchema)),
+      }) } },
+    },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getTaxJurisdictionOptionsRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  return c.json({ ca_regions: CA_REGIONS, ca_presets: CA_PRESETS }, 200);
+});
+
+const saveTaxProfileRoute = createRoute({
+  method: "post",
+  path: "/api/tax-profile",
+  request: {
+    body: { content: { "application/json": { schema: z.object({
+      tax_enabled: z.boolean(),
+      country_code: z.string(),
+      region_code: z.string(),
+      currency: z.string(),
+      prices_include_tax: z.boolean(),
+      default_taxable: z.boolean(),
+      components: z.array(TaxComponentSchema).max(20),
+      // Hardening (independent Security review, Phase 13D): saveTaxProfile()
+      // orders versions by plain string comparison of effective_from
+      // (matching settings.ts#publishSetting's established pattern) — a
+      // malformed value would otherwise become the new "latest" version and
+      // could never be superseded by a real ISO date. Validated as a real
+      // datetime here so that can't happen for this route.
+      effective_from: z.string().datetime().optional(),
+    }) } } },
+  },
+  responses: {
+    201: { description: "New tax profile version published", content: { "application/json": { schema: z.object({ profile: TaxProfileResponseSchema }) } } },
+    400: { description: "Invalid configuration", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(saveTaxProfileRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const data = c.req.valid("json");
+  try {
+    const profile = await saveTaxProfile({
+      organizationId: actorOrganizationId(c),
+      tax_enabled: data.tax_enabled,
+      country_code: data.country_code,
+      region_code: data.region_code,
+      currency: data.currency,
+      prices_include_tax: data.prices_include_tax,
+      default_taxable: data.default_taxable,
+      components: data.components as TaxComponentInput[],
+      effectiveFrom: data.effective_from,
+      actorId: me.id,
+    });
+    return c.json({ profile }, 201);
+  } catch (err) {
+    if (err instanceof TaxJurisdictionError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
 });
 
 const publishSettingRoute = createRoute({

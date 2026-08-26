@@ -1,5 +1,7 @@
 import { get, query, run } from "./db.js";
 import type { Role } from "./auth.js";
+import { resolveTaxProfile, calculateTaxes, createTaxSnapshot, getTaxSnapshot, type TaxProfile, type TaxComponentResult } from "./tax-jurisdiction.js";
+import { getCompanyProfile } from "./company-profile.js";
 
 /**
  * Phase 12 — Quotes / Estimates (Core). A Quote is a commercial proposal to
@@ -96,6 +98,7 @@ export interface QuoteLineItem {
   total_cents: number;
   sort_order: number;
   asset_id: number | null;
+  taxable: number;
 }
 
 export interface LineItemInput {
@@ -106,6 +109,7 @@ export interface LineItemInput {
   unit_price_cents?: number;
   sort_order?: number;
   asset_id?: number | null;
+  taxable?: boolean;
 }
 
 export interface ComputedQuoteTotals {
@@ -113,6 +117,9 @@ export interface ComputedQuoteTotals {
   discountCents: number;
   taxAmountCents: number;
   totalCents: number;
+  effectiveTaxRatePercent: number;
+  taxComponents: TaxComponentResult[];
+  taxableBaseCents: number;
 }
 
 /** Deterministic, side-effect-free totals computation — the ONLY place a
@@ -126,15 +133,19 @@ export interface ComputedQuoteTotals {
  *  the safe zero, never a fabricated number" way computeRebateAmountCents
  *  already does. */
 export function computeQuoteTotals(
-  lineItems: { quantity: number; unit_price_cents: number }[],
+  lineItems: { quantity: number; unit_price_cents: number; taxable?: boolean }[],
   discountType: string,
   discountPercent: number,
   discountCentsInput: number,
-  taxRatePercent: number
+  profile: TaxProfile | null
 ): ComputedQuoteTotals {
   let subtotalCents = 0;
+  let taxableGrossCents = 0;
+  let nonTaxableGrossCents = 0;
   for (const line of lineItems) {
-    subtotalCents += Math.round(line.quantity * line.unit_price_cents);
+    const lineTotal = Math.round(line.quantity * line.unit_price_cents);
+    subtotalCents += lineTotal;
+    if (line.taxable ?? true) taxableGrossCents += lineTotal; else nonTaxableGrossCents += lineTotal;
   }
 
   let discountCents = 0;
@@ -148,11 +159,53 @@ export function computeQuoteTotals(
   // discount exceed its subtotal regardless of how it was resolved.
   discountCents = Math.min(discountCents, subtotalCents);
 
-  const discountedSubtotal = subtotalCents - discountCents;
-  const taxAmountCents = Math.round(discountedSubtotal * (Math.max(taxRatePercent, 0) / 100));
-  const totalCents = discountedSubtotal + taxAmountCents;
+  // A discount is a single whole-quote figure (Section 13's existing
+  // design, unchanged) but tax (Phase 13D) only applies to taxable lines —
+  // so the discount is allocated pro-rata across the taxable/non-taxable
+  // gross split before tax sees a discounted taxable base. The remainder
+  // (not a second independent rounding) goes to the non-taxable share, so
+  // the two allocated pieces always sum to exactly discountCents.
+  const discountOnTaxable = taxableGrossCents > 0 && subtotalCents > 0
+    ? Math.round(discountCents * (taxableGrossCents / subtotalCents))
+    : 0;
+  const discountOnNonTaxable = discountCents - discountOnTaxable;
+  const discountedTaxableCents = taxableGrossCents - discountOnTaxable;
+  const discountedNonTaxableCents = nonTaxableGrossCents - discountOnNonTaxable;
 
-  return { subtotalCents, discountCents, taxAmountCents, totalCents };
+  const calc = calculateTaxes(profile, [
+    { amountCents: discountedTaxableCents, taxable: true },
+    { amountCents: discountedNonTaxableCents, taxable: false },
+  ]);
+  const effectiveTaxRatePercent = calc.taxableBaseCents > 0 ? Math.round((calc.totalTaxCents / calc.taxableBaseCents) * 10000) / 100 : 0;
+
+  // Displayed Subtotal (hardening — independent Architecture review,
+  // Phase 13D): under exclusive pricing `subtotalCents` (raw, pre-discount
+  // gross) already reconciles as Subtotal − Discount + Tax = Total, since
+  // Tax is genuinely added on top. Under INCLUSIVE pricing that identity
+  // breaks if the raw gross is shown as-is, because `calc.totalTaxCents`
+  // is the tax embedded in the DISCOUNTED total, not the raw one — showing
+  // raw gross next to a discounted-basis tax figure silently fails to sum
+  // to Total on screen (Financial.ts's Invoice never hits this: it has no
+  // discount step at all). Subtracting the embedded tax from the raw gross
+  // here restores the identity in both modes — verified: (subtotalCents −
+  // discountCents + taxAmountCents) === totalCents always, not just when
+  // prices_include_tax is false.
+  const displaySubtotalCents = profile?.prices_include_tax ? subtotalCents - calc.totalTaxCents : subtotalCents;
+
+  return {
+    subtotalCents: displaySubtotalCents,
+    discountCents,
+    taxAmountCents: calc.totalTaxCents,
+    // calc.totalCents already handles both pricing modes correctly: in
+    // exclusive mode it's the discounted lines plus tax added on top; in
+    // inclusive mode tax was already embedded in the discounted lines, so
+    // it's just their sum, unchanged — computing `subtotal - discount +
+    // tax` here directly would double-count an already-embedded tax.
+    totalCents: calc.totalCents,
+    effectiveTaxRatePercent,
+    taxComponents: calc.components,
+    taxableBaseCents: calc.taxableBaseCents,
+  };
 }
 
 async function nextQuoteIdentifier(): Promise<string> {
@@ -187,7 +240,7 @@ async function assertAssetBelongsToCustomer(organizationId: number, customerId: 
   if (!row) throw new QuoteError("invalid_asset", "This asset does not belong to the quote's customer");
 }
 
-function normalizeLineItem(input: LineItemInput, sortOrder: number): { description: string; category: LineItemCategory; quantity: number; unit: string; unit_price_cents: number; sort_order: number; asset_id: number | null } {
+function normalizeLineItem(input: LineItemInput, sortOrder: number, defaultTaxable: boolean): { description: string; category: LineItemCategory; quantity: number; unit: string; unit_price_cents: number; sort_order: number; asset_id: number | null; taxable: boolean } {
   const category = LINE_ITEM_CATEGORIES.includes((input.category ?? "other") as LineItemCategory)
     ? (input.category as LineItemCategory) ?? "other"
     : "other";
@@ -199,6 +252,7 @@ function normalizeLineItem(input: LineItemInput, sortOrder: number): { descripti
     unit_price_cents: input.unit_price_cents ?? 0,
     sort_order: input.sort_order ?? sortOrder,
     asset_id: input.asset_id ?? null,
+    taxable: input.taxable ?? defaultTaxable,
   };
 }
 
@@ -222,25 +276,43 @@ function normalizeLineItem(input: LineItemInput, sortOrder: number): { descripti
  *  snapshot rather than surfacing a spurious conflict for what is, from the
  *  caller's perspective, an ordinary single-user edit that merely happened
  *  to land a few milliseconds after someone else's. */
-async function recomputeAndStoreVersionTotals(versionId: number): Promise<QuoteVersion> {
+async function recomputeAndStoreVersionTotals(organizationId: number, versionId: number): Promise<QuoteVersion> {
+  const profile = await resolveTaxProfile(organizationId);
   const MAX_ATTEMPTS = 3;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const version = await get<QuoteVersion & { row_version: number }>("SELECT * FROM quote_versions WHERE id = ?", [versionId]);
     if (!version) throw new QuoteError("not_found", "Quote version not found");
-    const lines = await query<{ quantity: number; unit_price_cents: number }>(
-      "SELECT quantity, unit_price_cents FROM quote_line_items WHERE quote_version_id = ?", [versionId]
+    const lines = await query<{ quantity: number; unit_price_cents: number; taxable: number }>(
+      "SELECT quantity, unit_price_cents, taxable FROM quote_line_items WHERE quote_version_id = ?", [versionId]
     );
-    const totals = computeQuoteTotals(lines, version.discount_type, version.discount_percent, version.discount_cents, version.tax_rate);
+    const totals = computeQuoteTotals(
+      lines.map((l) => ({ quantity: l.quantity, unit_price_cents: l.unit_price_cents, taxable: !!l.taxable })),
+      version.discount_type, version.discount_percent, version.discount_cents, profile
+    );
     const result = await run(
-      `UPDATE quote_versions SET subtotal_cents = ?, discount_cents = ?, tax_amount_cents = ?, total_cents = ?, row_version = row_version + 1
+      `UPDATE quote_versions SET subtotal_cents = ?, discount_cents = ?, tax_rate = ?, tax_amount_cents = ?, total_cents = ?, row_version = row_version + 1
        WHERE id = ? AND row_version = ?`,
-      [totals.subtotalCents, totals.discountCents, totals.taxAmountCents, totals.totalCents, versionId, version.row_version]
+      [totals.subtotalCents, totals.discountCents, totals.effectiveTaxRatePercent, totals.taxAmountCents, totals.totalCents, versionId, version.row_version]
     );
     if (result.changes > 0) {
+      // Tax Snapshot (Section 10/21): re-written on every recompute while
+      // this version is still in `draft` — every caller of this function
+      // is itself draft-gated (assertDraftAndGetCurrentVersion) except
+      // createQuote, which only ever creates version 1 as a fresh draft —
+      // so this line can never run for a sent/accepted version. Once the
+      // quote leaves draft, nothing calls this function again, and the
+      // last-written snapshot freezes with it, exactly like tax_rate/
+      // tax_amount_cents above already do.
+      const company = await getCompanyProfile(organizationId);
+      await createTaxSnapshot({
+        documentType: "quote_version", documentId: versionId, profile,
+        calc: { taxableBaseCents: totals.taxableBaseCents, totalTaxCents: totals.taxAmountCents, components: totals.taxComponents },
+        businessNumber: company.business_number, taxNumber: company.tax_number,
+      });
       return {
         id: version.id, quote_id: version.quote_id, version_number: version.version_number,
         subtotal_cents: totals.subtotalCents, discount_type: version.discount_type, discount_percent: version.discount_percent,
-        discount_cents: totals.discountCents, tax_rate: version.tax_rate, tax_amount_cents: totals.taxAmountCents,
+        discount_cents: totals.discountCents, tax_rate: totals.effectiveTaxRatePercent, tax_amount_cents: totals.taxAmountCents,
         total_cents: totals.totalCents, notes: version.notes, expires_at: version.expires_at,
         created_by: version.created_by, created_at: version.created_at,
       };
@@ -255,7 +327,9 @@ export interface CreateQuoteInput {
   discount_type?: string;
   discount_percent?: number;
   discount_cents?: number;
-  tax_rate?: number;
+  // Phase 13D (Section 18): tax rate is no longer client-suppliable at
+  // creation — the server resolves the organization's current Tax Profile.
+  // Per-line taxability may still be set via `line_items[].taxable`.
   notes?: string;
   expires_at?: string | null;
   line_items?: LineItemInput[];
@@ -286,9 +360,9 @@ export async function createQuote(organizationId: number, actorUserId: number, i
 
   const discountType = DISCOUNT_TYPES.includes((input.discount_type ?? "none") as DiscountType) ? (input.discount_type as DiscountType) ?? "none" : "none";
   const versionResult = await run(
-    `INSERT INTO quote_versions (quote_id, version_number, discount_type, discount_percent, discount_cents, tax_rate, notes, expires_at, created_by)
-     VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)`,
-    [quoteId, discountType, input.discount_percent ?? 0, input.discount_cents ?? 0, input.tax_rate ?? 0, input.notes ?? "", input.expires_at ?? null, actorUserId]
+    `INSERT INTO quote_versions (quote_id, version_number, discount_type, discount_percent, discount_cents, notes, expires_at, created_by)
+     VALUES (?, 1, ?, ?, ?, ?, ?, ?)`,
+    [quoteId, discountType, input.discount_percent ?? 0, input.discount_cents ?? 0, input.notes ?? "", input.expires_at ?? null, actorUserId]
   );
   const versionId = Number(versionResult.lastInsertRowid);
 
@@ -297,7 +371,7 @@ export async function createQuote(organizationId: number, actorUserId: number, i
     await insertLineItem(organizationId, input.customer_id, versionId, lineItems[i], i);
   }
 
-  await recomputeAndStoreVersionTotals(versionId);
+  await recomputeAndStoreVersionTotals(organizationId, versionId);
   await run("UPDATE quotes SET current_version_id = ? WHERE id = ?", [versionId, quoteId]);
 
   return (await getQuote(organizationId, quoteId))!;
@@ -307,12 +381,13 @@ async function insertLineItem(organizationId: number, customerId: number, versio
   if (input.asset_id !== undefined && input.asset_id !== null) {
     await assertAssetBelongsToCustomer(organizationId, customerId, input.asset_id);
   }
-  const normalized = normalizeLineItem(input, sortOrder);
+  const profile = await resolveTaxProfile(organizationId);
+  const normalized = normalizeLineItem(input, sortOrder, profile?.default_taxable ?? true);
   const totalCents = Math.round(normalized.quantity * normalized.unit_price_cents);
   const result = await run(
-    `INSERT INTO quote_line_items (quote_version_id, description, category, quantity, unit, unit_price_cents, total_cents, sort_order, asset_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [versionId, normalized.description, normalized.category, normalized.quantity, normalized.unit, normalized.unit_price_cents, totalCents, normalized.sort_order, normalized.asset_id]
+    `INSERT INTO quote_line_items (quote_version_id, description, category, quantity, unit, unit_price_cents, total_cents, sort_order, asset_id, taxable)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [versionId, normalized.description, normalized.category, normalized.quantity, normalized.unit, normalized.unit_price_cents, totalCents, normalized.sort_order, normalized.asset_id, normalized.taxable ? 1 : 0]
   );
   return Number(result.lastInsertRowid);
 }
@@ -338,13 +413,17 @@ export async function getQuote(organizationId: number, id: number): Promise<Quot
   return quote ?? null;
 }
 
-export async function getQuoteVersion(quoteId: number, versionId: number): Promise<(QuoteVersion & { line_items: QuoteLineItem[] }) | null> {
+export async function getQuoteVersion(quoteId: number, versionId: number): Promise<(QuoteVersion & { line_items: QuoteLineItem[]; tax_snapshot: Awaited<ReturnType<typeof getTaxSnapshot>> }) | null> {
   const version = await get<QuoteVersion>(`SELECT ${QUOTE_VERSION_COLUMNS} FROM quote_versions WHERE id = ? AND quote_id = ?`, [versionId, quoteId]);
   if (!version) return null;
   const line_items = await query<QuoteLineItem>(
     "SELECT * FROM quote_line_items WHERE quote_version_id = ? ORDER BY sort_order ASC, id ASC", [versionId]
   );
-  return { ...version, line_items };
+  // Phase 13D: the persisted per-component breakdown for THIS version —
+  // never re-derived from the organization's current Tax Profile. null for
+  // a pre-Phase-13D version with no snapshot row.
+  const tax_snapshot = await getTaxSnapshot("quote_version", versionId);
+  return { ...version, line_items, tax_snapshot };
 }
 
 export async function listQuoteVersions(quoteId: number): Promise<QuoteVersion[]> {
@@ -448,7 +527,7 @@ export interface UpdateVersionInput {
   discount_type?: string;
   discount_percent?: number;
   discount_cents?: number;
-  tax_rate?: number;
+  // Phase 13D: tax_rate removed — server-resolved, no longer client-settable.
   notes?: string;
   expires_at?: string | null;
 }
@@ -463,20 +542,19 @@ export async function updateQuoteVersion(organizationId: number, quoteId: number
   }
   if (input.discount_percent !== undefined) { fields.push("discount_percent = ?"); vals.push(input.discount_percent); }
   if (input.discount_cents !== undefined) { fields.push("discount_cents = ?"); vals.push(input.discount_cents); }
-  if (input.tax_rate !== undefined) { fields.push("tax_rate = ?"); vals.push(input.tax_rate); }
   if (input.notes !== undefined) { fields.push("notes = ?"); vals.push(input.notes); }
   if (input.expires_at !== undefined) { fields.push("expires_at = ?"); vals.push(input.expires_at); }
   if (fields.length > 0) {
     await run(`UPDATE quote_versions SET ${fields.join(", ")} WHERE id = ?`, [...vals, versionId]);
   }
-  return recomputeAndStoreVersionTotals(versionId);
+  return recomputeAndStoreVersionTotals(organizationId, versionId);
 }
 
 export async function addLineItem(organizationId: number, quoteId: number, input: LineItemInput): Promise<QuoteVersion> {
   const { quote, versionId } = await assertDraftAndGetCurrentVersion(organizationId, quoteId);
   const countRow = await get<{ n: number }>("SELECT COUNT(*) as n FROM quote_line_items WHERE quote_version_id = ?", [versionId]);
   await insertLineItem(organizationId, quote.customer_id, versionId, input, countRow?.n ?? 0);
-  return recomputeAndStoreVersionTotals(versionId);
+  return recomputeAndStoreVersionTotals(organizationId, versionId);
 }
 
 export async function updateLineItem(organizationId: number, quoteId: number, lineItemId: number, input: LineItemInput): Promise<QuoteVersion> {
@@ -503,6 +581,7 @@ export async function updateLineItem(organizationId: number, quoteId: number, li
   setIfPresent("unit_price_cents", input.unit_price_cents);
   setIfPresent("sort_order", input.sort_order);
   setIfPresent("asset_id", input.asset_id);
+  if (input.taxable !== undefined) { fields.push("taxable = ?"); vals.push(input.taxable ? 1 : 0); }
 
   const newQuantity = input.quantity ?? existing.quantity;
   const newUnitPrice = input.unit_price_cents ?? existing.unit_price_cents;
@@ -510,13 +589,13 @@ export async function updateLineItem(organizationId: number, quoteId: number, li
   vals.push(Math.round(newQuantity * newUnitPrice));
 
   await run(`UPDATE quote_line_items SET ${fields.join(", ")} WHERE id = ?`, [...vals, lineItemId]);
-  return recomputeAndStoreVersionTotals(versionId);
+  return recomputeAndStoreVersionTotals(organizationId, versionId);
 }
 
 export async function deleteLineItem(organizationId: number, quoteId: number, lineItemId: number): Promise<QuoteVersion> {
   const { versionId } = await assertDraftAndGetCurrentVersion(organizationId, quoteId);
   await run("DELETE FROM quote_line_items WHERE id = ? AND quote_version_id = ?", [lineItemId, versionId]);
-  return recomputeAndStoreVersionTotals(versionId);
+  return recomputeAndStoreVersionTotals(organizationId, versionId);
 }
 
 /**
@@ -543,11 +622,16 @@ export async function createQuoteRevision(organizationId: number, quoteId: numbe
 
   let newVersionId: number;
   try {
+    // tax_rate/tax_amount_cents/total_cents are intentionally NOT copied
+    // here (Phase 13D) — recomputeAndStoreVersionTotals below resolves the
+    // CURRENT Tax Profile for this brand-new draft version, exactly like
+    // createQuote does for version 1. Copying the source version's stale
+    // blended rate would only be overwritten a few lines later anyway.
     const result = await run(
-      `INSERT INTO quote_versions (quote_id, version_number, discount_type, discount_percent, discount_cents, tax_rate, notes, expires_at, created_by)
-       SELECT ?, COALESCE(MAX(version_number), 0) + 1, ?, ?, ?, ?, ?, ?, ?
+      `INSERT INTO quote_versions (quote_id, version_number, discount_type, discount_percent, discount_cents, notes, expires_at, created_by)
+       SELECT ?, COALESCE(MAX(version_number), 0) + 1, ?, ?, ?, ?, ?, ?
        FROM quote_versions WHERE quote_id = ?`,
-      [quoteId, sourceVersion.discount_type, sourceVersion.discount_percent, sourceVersion.discount_cents, sourceVersion.tax_rate, sourceVersion.notes, sourceVersion.expires_at, actorUserId, quoteId]
+      [quoteId, sourceVersion.discount_type, sourceVersion.discount_percent, sourceVersion.discount_cents, sourceVersion.notes, sourceVersion.expires_at, actorUserId, quoteId]
     );
     newVersionId = Number(result.lastInsertRowid);
   } catch {
@@ -560,13 +644,13 @@ export async function createQuoteRevision(organizationId: number, quoteId: numbe
   );
   for (const line of sourceLines) {
     await run(
-      `INSERT INTO quote_line_items (quote_version_id, description, category, quantity, unit, unit_price_cents, total_cents, sort_order, asset_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [newVersionId, line.description, line.category, line.quantity, line.unit, line.unit_price_cents, line.total_cents, line.sort_order, line.asset_id]
+      `INSERT INTO quote_line_items (quote_version_id, description, category, quantity, unit, unit_price_cents, total_cents, sort_order, asset_id, taxable)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [newVersionId, line.description, line.category, line.quantity, line.unit, line.unit_price_cents, line.total_cents, line.sort_order, line.asset_id, line.taxable]
     );
   }
 
-  await recomputeAndStoreVersionTotals(newVersionId);
+  await recomputeAndStoreVersionTotals(organizationId, newVersionId);
   await run(
     "UPDATE quotes SET current_version_id = ?, status = 'draft', updated_at = datetime('now') WHERE id = ?",
     [newVersionId, quoteId]

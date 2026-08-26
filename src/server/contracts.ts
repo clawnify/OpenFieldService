@@ -5,6 +5,7 @@ import { StorageError, assertUploadAllowed, getObject, putObject, type StorageEn
 import { renderContractPdf, type SignatureEventMap, type SignatureImageMap } from "./contract-pdf.js";
 import { getCompanyLogo, getCompanyProfile } from "./company-profile.js";
 import { enqueueContractSignedCopy, safeEnqueue } from "./notifications.js";
+import { getTaxSnapshot, type TaxSnapshot } from "./tax-jurisdiction.js";
 
 /**
  * Phase 13 — Contracts / E-Sign (Core). A Contract is a legally-traceable
@@ -229,6 +230,13 @@ export interface CommercialSnapshot {
   tax_rate: number;
   tax_amount_cents: number;
   total_cents: number;
+  // Phase 13D — the Quote Version's own tax_snapshots row, copied in
+  // verbatim at Contract-creation time (see buildCommercialSnapshot below).
+  // null for a Quote Version that predates Phase 13D and has no snapshot —
+  // the flat tax_rate/tax_amount_cents fields above remain the only tax
+  // information available for such a Contract, exactly as before this
+  // phase (Section 21: never fabricate history that was never persisted).
+  tax_breakdown: TaxSnapshot | null;
 }
 
 async function buildCommercialSnapshot(quoteId: number, quoteVersionId: number): Promise<CommercialSnapshot> {
@@ -239,6 +247,7 @@ async function buildCommercialSnapshot(quoteId: number, quoteVersionId: number):
   const lines = await query<CommercialSnapshotLine>(
     "SELECT description, quantity, unit, unit_price_cents, total_cents FROM quote_line_items WHERE quote_version_id = ? ORDER BY sort_order ASC, id ASC", [quoteVersionId]
   );
+  const tax_breakdown = await getTaxSnapshot("quote_version", quoteVersionId);
   return {
     quote_identifier: quote?.identifier ?? "",
     quote_version_number: version?.version_number ?? 0,
@@ -248,6 +257,7 @@ async function buildCommercialSnapshot(quoteId: number, quoteVersionId: number):
     tax_rate: version?.tax_rate ?? 0,
     tax_amount_cents: version?.tax_amount_cents ?? 0,
     total_cents: version?.total_cents ?? 0,
+    tax_breakdown,
   };
 }
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PDFDocument } from "pdf-lib";
 import { WINANSI_EXTRA, renderContractPdf, sanitizeForPdf, type ContractPdfInput } from "../src/server/contract-pdf.js";
+import { extractPdfText } from "./helpers.js";
 
 // Phase 13A hardening — unit tests for the PDF renderer itself, independent
 // of the DB/HTTP layer (already covered end-to-end by test/contracts.test.ts's
@@ -22,7 +23,7 @@ function baseInput(overrides: Partial<ContractPdfInput> = {}): ContractPdfInput 
     commercial: {
       quote_identifier: "QUOTE-1", quote_version_number: 1,
       line_items: [{ description: "HVAC Install", quantity: 1, unit: "", unit_price_cents: 500000, total_cents: 500000 }],
-      subtotal_cents: 500000, discount_cents: 0, tax_rate: 0, tax_amount_cents: 0, total_cents: 500000,
+      subtotal_cents: 500000, discount_cents: 0, tax_rate: 0, tax_amount_cents: 0, total_cents: 500000, tax_breakdown: null,
     },
     customer: { name: "Jane Customer", email: "jane@example.test", phone: "555-0100", address: "123 Main St", city: "Anytown", state: "BC", zip: "V1V 1V1" },
     company: EMPTY_COMPANY,
@@ -57,11 +58,37 @@ describe("renderContractPdf", () => {
     }));
     const input = baseInput({
       version: { title: "Long-Form Agreement", body: longBody, effective_date: "2026-08-24", expires_at: "2027-08-24", version_number: 3 },
-      commercial: { quote_identifier: "QUOTE-9", quote_version_number: 2, line_items: manyLineItems, subtotal_cents: 4_100_000, discount_cents: 5000, tax_rate: 12, tax_amount_cents: 490000, total_cents: 4_585_000 },
+      commercial: { quote_identifier: "QUOTE-9", quote_version_number: 2, line_items: manyLineItems, subtotal_cents: 4_100_000, discount_cents: 5000, tax_rate: 12, tax_amount_cents: 490000, total_cents: 4_585_000, tax_breakdown: null },
     });
     const bytes = await renderContractPdf(input);
     const doc = await PDFDocument.load(bytes);
     expect(doc.getPageCount()).toBeGreaterThan(1); // must not clip/overlap by staying on one page
+  });
+
+  it("renders a per-component tax breakdown (GST/PST) instead of the flat legacy line when tax_breakdown is present (hardening — independent Testing review, Phase 13D)", async () => {
+    const input = baseInput({
+      commercial: {
+        quote_identifier: "QUOTE-1", quote_version_number: 1,
+        line_items: [{ description: "HVAC Install", quantity: 1, unit: "", unit_price_cents: 500000, total_cents: 500000 }],
+        subtotal_cents: 500000, discount_cents: 0, tax_rate: 12, tax_amount_cents: 60000, total_cents: 560000,
+        tax_breakdown: {
+          id: 1, document_type: "quote_version", document_id: 1, tax_profile_id: 1, tax_enabled: true,
+          country_code: "CA", region_code: "BC", currency: "CAD", prices_include_tax: false,
+          taxable_base_cents: 500000, total_tax_cents: 60000, business_number: "", tax_number: "", legacy: false, created_at: "2026-08-24 00:00:00",
+          components: [{ code: "GST", name: "GST", rate_percent: 5, amount_cents: 25000 }, { code: "PST", name: "PST", rate_percent: 7, amount_cents: 35000 }],
+        },
+      },
+    });
+    const bytes = await renderContractPdf(input);
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBeGreaterThanOrEqual(1);
+    const text = await extractPdfText(bytes);
+    // Real per-component labels/amounts, not the flat "Tax (12%)" fallback.
+    expect(text).toContain("GST");
+    expect(text).toContain("PST");
+    expect(text).toContain("250.00"); // $250.00 GST
+    expect(text).toContain("350.00"); // $350.00 PST
+    expect(text).not.toContain("Tax (12%)");
   });
 
   it("handles multiple signers without truncating any signature block", async () => {
@@ -80,7 +107,7 @@ describe("renderContractPdf", () => {
   it("generation never throws on missing/empty optional fields (no terms body, no company profile, no line items)", async () => {
     const input = baseInput({
       version: { title: "", body: "", effective_date: null, expires_at: null, version_number: 1 },
-      commercial: { quote_identifier: "", quote_version_number: 1, line_items: [], subtotal_cents: 0, discount_cents: 0, tax_rate: 0, tax_amount_cents: 0, total_cents: 0 },
+      commercial: { quote_identifier: "", quote_version_number: 1, line_items: [], subtotal_cents: 0, discount_cents: 0, tax_rate: 0, tax_amount_cents: 0, total_cents: 0, tax_breakdown: null },
       company: EMPTY_COMPANY,
     });
     await expect(renderContractPdf(input)).resolves.toBeInstanceOf(Uint8Array);

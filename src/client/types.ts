@@ -216,6 +216,7 @@ export interface QuoteLineItem {
   total_cents: number;
   sort_order: number;
   asset_id: number | null;
+  taxable: number;
 }
 
 export interface QuoteVersion {
@@ -235,8 +236,28 @@ export interface QuoteVersion {
   created_at: string;
 }
 
+// Phase 13D — the persisted per-component breakdown for one document
+// (a Quote Version or an Invoice). null when the document predates Phase
+// 13D and has no snapshot — the flat tax_rate/tax_amount_cents fields
+// remain the only tax information ever actually recorded for it.
+export interface TaxSnapshotComponent { code: string; name: string; rate_percent: number; amount_cents: number }
+export interface TaxSnapshot {
+  tax_enabled: boolean;
+  country_code: string;
+  region_code: string;
+  currency: string;
+  prices_include_tax: boolean;
+  taxable_base_cents: number;
+  total_tax_cents: number;
+  business_number: string;
+  tax_number: string;
+  legacy: boolean;
+  components: TaxSnapshotComponent[];
+}
+
 export interface QuoteVersionDetail extends QuoteVersion {
   line_items: QuoteLineItem[];
+  tax_snapshot: TaxSnapshot | null;
 }
 
 export interface QuoteStatusHistoryRow {
@@ -352,6 +373,7 @@ export interface Invoice {
   subtotal_cents: number;
   tax_rate: number;
   tax_amount_cents: number;
+  tax_snapshot: TaxSnapshot | null;
   rebate_amount_cents: number;
   total_cents: number;
   // Always server-computed (never independently editable) — see
@@ -380,6 +402,7 @@ export interface InvoiceLine {
   quantity: number;
   unit_price_cents: number;
   total_cents: number;
+  taxable: number;
 }
 
 export interface Payment {

@@ -966,14 +966,17 @@ describe("existing field service API", () => {
     ]);
   });
 
-  it("creates invoices with calculated line and tax totals (integer cents, not floating-point dollars — see src/server/financial.ts)", async () => {
+  it("creates invoices with calculated line and tax totals (integer cents, not floating-point dollars — see src/server/financial.ts). Phase 13D: tax is resolved from the org's Tax Profile, no longer a client-supplied tax_rate — see test/financial.test.ts's dedicated Tax & Jurisdiction integration coverage for that behavior; a client-supplied tax_rate here is simply ignored.", async () => {
     const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "AB", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }],
+    }, auth);
     const customer = await createCustomer();
     const created = await post<{ id: number; identifier: string; subtotal_cents: number; tax_amount_cents: number; total_cents: number }>(
       "/api/invoices",
       {
         customer_id: customer.id,
-        tax_rate: 5,
         due_date: "2026-05-31",
         lines: [
           { description: "Diagnostic", quantity: 1, unit_price_cents: 10000 },

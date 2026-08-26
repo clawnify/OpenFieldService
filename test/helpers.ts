@@ -247,6 +247,17 @@ export async function resetDatabase() {
     // default org must be cleared explicitly or it would leak into the
     // next test.
     "DELETE FROM organization_profiles",
+    // tax_profiles/tax_snapshots (Phase 13D) — same reasoning as
+    // organization_profiles directly above: org id=1 is never deleted, so a
+    // tax profile version (or a document's tax snapshot) a test wrote for
+    // the default org must be cleared explicitly or it leaks into the next
+    // test. tax_profile_components/tax_snapshot_components both cascade
+    // from their parent (ON DELETE CASCADE) but get their own entries
+    // anyway per this file's established convention.
+    "DELETE FROM tax_profile_components",
+    "DELETE FROM tax_profiles",
+    "DELETE FROM tax_snapshot_components",
+    "DELETE FROM tax_snapshots",
     "DELETE FROM organizations WHERE id != 1",
     "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter', 'quote_counter', 'contract_counter')",
     "DELETE FROM sqlite_sequence",

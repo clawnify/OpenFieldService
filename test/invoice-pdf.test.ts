@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { PDFDocument } from "pdf-lib";
 import { renderInvoicePdf, type InvoicePdfInput } from "../src/server/invoice-pdf.js";
 import type { CompanyProfile } from "../src/server/company-profile.js";
+import { extractPdfText } from "./helpers.js";
 
 // Phase 13A final document hardening — unit tests for the Invoice PDF
 // renderer, independent of the DB/HTTP layer (covered end-to-end by
@@ -26,6 +27,7 @@ function baseInput(overrides: Partial<InvoicePdfInput> = {}): InvoicePdfInput {
     customer: { name: "Jane Customer", email: "jane@example.test", phone: "555-0100", address: "123 Main St", city: "Anytown", state: "BC", zip: "V1V 1V1" },
     lines: [{ description: "Furnace Tune-up", quantity: 1, unit_price_cents: 20000, total_cents: 20000 }],
     taxRate: 5,
+    taxBreakdown: null,
     financials: {
       subtotal_cents: 20000, tax_amount_cents: 1000, rebate_amount_cents: 0,
       total_cents: 21000, customer_amount_cents: 21000, amount_paid_cents: 0, balance_cents: 21000, is_overdue: false,
@@ -47,6 +49,27 @@ describe("renderInvoicePdf", () => {
     const bytes = await renderInvoicePdf(baseInput());
     expect(new TextDecoder().decode(bytes.slice(0, 5))).toBe("%PDF-");
     await expect(PDFDocument.load(bytes)).resolves.toBeDefined();
+  });
+
+  it("renders a per-component tax breakdown (GST/PST) instead of the flat legacy line when taxBreakdown is present (hardening — independent Testing review, Phase 13D)", async () => {
+    const bytes = await renderInvoicePdf(baseInput({
+      taxRate: 12,
+      taxBreakdown: {
+        id: 1, document_type: "invoice", document_id: 1, tax_profile_id: 1, tax_enabled: true,
+        country_code: "CA", region_code: "BC", currency: "CAD", prices_include_tax: false,
+        taxable_base_cents: 20000, total_tax_cents: 2400, business_number: "", tax_number: "", legacy: false, created_at: "2026-08-24 00:00:00",
+        components: [{ code: "GST", name: "GST", rate_percent: 5, amount_cents: 1000 }, { code: "PST", name: "PST", rate_percent: 7, amount_cents: 1400 }],
+      },
+      financials: { subtotal_cents: 20000, tax_amount_cents: 2400, rebate_amount_cents: 0, total_cents: 22400, customer_amount_cents: 22400, amount_paid_cents: 0, balance_cents: 22400, is_overdue: false },
+    }));
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBeGreaterThanOrEqual(1);
+    const text = await extractPdfText(bytes);
+    expect(text).toContain("GST");
+    expect(text).toContain("PST");
+    expect(text).toContain("10.00"); // $10.00 GST
+    expect(text).toContain("14.00"); // $14.00 PST
+    expect(text).not.toContain("Tax (12%)");
   });
 
   it("renders correctly with no company profile configured (no logo, blank fields)", async () => {

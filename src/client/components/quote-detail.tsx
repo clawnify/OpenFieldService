@@ -11,7 +11,7 @@ const STATUS_COLORS: Record<string, string> = {
   draft: "#6b7280", sent: "#3b82f6", accepted: "#16a34a", rejected: "#dc2626", expired: "#9ca3af", cancelled: "#9ca3af",
 };
 
-const emptyItemDraft = { description: "", category: "service" as LineItemCategory, quantity: "1", unit: "", unit_price: "" };
+const emptyItemDraft = { description: "", category: "service" as LineItemCategory, quantity: "1", unit: "", unit_price: "", taxable: true };
 
 function itemDraftToPayload(d: typeof emptyItemDraft) {
   return {
@@ -19,6 +19,7 @@ function itemDraftToPayload(d: typeof emptyItemDraft) {
     quantity: parseFloat(d.quantity) || 0,
     unit: d.unit,
     unit_price_cents: parseDollarsToCents(d.unit_price) || 0,
+    taxable: d.taxable,
   };
 }
 
@@ -52,7 +53,7 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
 
   const [editingMeta, setEditingMeta] = useState(false);
   const [metaDraft, setMetaDraft] = useState({
-    discount_type: "none" as DiscountType, discount_percent: "0", discount_cents_input: "0.00", tax_rate: "0", notes: "", expires_at: "",
+    discount_type: "none" as DiscountType, discount_percent: "0", discount_cents_input: "0.00", notes: "", expires_at: "",
   });
   const [savingMeta, setSavingMeta] = useState(false);
 
@@ -111,7 +112,7 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
     if (!version) return;
     setMetaDraft({
       discount_type: version.discount_type, discount_percent: String(version.discount_percent),
-      discount_cents_input: formatCentsForInput(version.discount_cents), tax_rate: String(version.tax_rate),
+      discount_cents_input: formatCentsForInput(version.discount_cents),
       notes: version.notes, expires_at: version.expires_at ? version.expires_at.slice(0, 10) : "",
     });
     setEditingMeta(true);
@@ -125,7 +126,6 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
         discount_type: metaDraft.discount_type,
         discount_percent: metaDraft.discount_type === "percent" ? parseFloat(metaDraft.discount_percent) || 0 : 0,
         discount_cents: metaDraft.discount_type === "fixed" ? (parseDollarsToCents(metaDraft.discount_cents_input) || 0) : 0,
-        tax_rate: parseFloat(metaDraft.tax_rate) || 0,
         notes: metaDraft.notes,
         expires_at: metaDraft.expires_at || null,
       });
@@ -158,6 +158,7 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
     setItemDraft({
       description: item.description, category: item.category as LineItemCategory,
       quantity: String(item.quantity), unit: item.unit, unit_price: formatCentsForInput(item.unit_price_cents),
+      taxable: !!item.taxable,
     });
   };
 
@@ -316,7 +317,7 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
                   <thead>
                     <tr>
                       <th>Description</th><th>Category</th><th>Qty</th><th>Unit</th>
-                      <th class="text-right">Unit Price</th><th class="text-right">Total</th>
+                      <th class="text-right">Unit Price</th><th class="text-right">Total</th><th>Taxable</th>
                       {isDraft && <th></th>}
                     </tr>
                   </thead>
@@ -334,6 +335,7 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
                           <td style={{ width: 80 }}><input type="text" value={itemDraft.unit} onInput={(e) => setItemDraft({ ...itemDraft, unit: (e.target as HTMLInputElement).value })} /></td>
                           <td style={{ width: 100 }}><input type="number" step="0.01" min="0" value={itemDraft.unit_price} onInput={(e) => setItemDraft({ ...itemDraft, unit_price: (e.target as HTMLInputElement).value })} /></td>
                           <td class="text-right text-muted">—</td>
+                          <td><input type="checkbox" checked={itemDraft.taxable} onChange={(e) => setItemDraft({ ...itemDraft, taxable: (e.target as HTMLInputElement).checked })} /></td>
                           <td>
                             <button class="btn-icon" title="Save" disabled={savingItem} onClick={submitEditItem}>✓</button>
                             <button class="btn-icon" title="Cancel" onClick={() => { setEditingItemId(null); setItemDraft(emptyItemDraft); }}><X size={14} /></button>
@@ -347,6 +349,7 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
                           <td class="text-muted">{item.unit || "—"}</td>
                           <td class="text-right">{formatCents(item.unit_price_cents)}</td>
                           <td class="text-right">{formatCents(item.total_cents)}</td>
+                          <td class="text-muted">{item.taxable ? "Yes" : "No"}</td>
                           {isDraft && (
                             <td>
                               <button class="btn-icon" title="Edit" onClick={() => startEditItem(item)}><Edit3 size={12} /></button>
@@ -368,6 +371,7 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
                         <td style={{ width: 80 }}><input type="text" placeholder="ea" value={itemDraft.unit} onInput={(e) => setItemDraft({ ...itemDraft, unit: (e.target as HTMLInputElement).value })} /></td>
                         <td style={{ width: 100 }}><input type="number" step="0.01" placeholder="0.00" value={itemDraft.unit_price} onInput={(e) => setItemDraft({ ...itemDraft, unit_price: (e.target as HTMLInputElement).value })} /></td>
                         <td class="text-right text-muted">—</td>
+                        <td><input type="checkbox" checked={itemDraft.taxable} onChange={(e) => setItemDraft({ ...itemDraft, taxable: (e.target as HTMLInputElement).checked })} /></td>
                         <td>
                           <button class="btn-icon" title="Add" disabled={savingItem} onClick={submitAddItem}>✓</button>
                           <button class="btn-icon" title="Cancel" onClick={() => { setShowAddItem(false); setItemDraft(emptyItemDraft); }}><X size={14} /></button>
@@ -388,7 +392,14 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
                         <td class="text-right">−{formatCents(version.discount_cents)}</td>
                       </tr>
                     )}
-                    {version.tax_rate > 0 && (
+                    {version.tax_snapshot && version.tax_snapshot.components.length > 0 ? (
+                      version.tax_snapshot.components.map((comp) => comp.amount_cents !== 0 && (
+                        <tr key={comp.code}>
+                          <td colSpan={5} class="text-right text-muted">{comp.name} ({comp.rate_percent}%)</td>
+                          <td class="text-right">{formatCents(comp.amount_cents)}</td>
+                        </tr>
+                      ))
+                    ) : version.tax_rate > 0 && (
                       <tr>
                         <td colSpan={5} class="text-right text-muted">Tax ({version.tax_rate}%)</td>
                         <td class="text-right">{formatCents(version.tax_amount_cents)}</td>
@@ -432,10 +443,6 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
                     <input type="number" step="0.01" min="0" value={metaDraft.discount_cents_input} onInput={(e) => setMetaDraft({ ...metaDraft, discount_cents_input: (e.target as HTMLInputElement).value })} />
                   </div>
                 )}
-                <div class="form-group">
-                  <label>Tax Rate (%)</label>
-                  <input type="number" step="0.01" min="0" value={metaDraft.tax_rate} onInput={(e) => setMetaDraft({ ...metaDraft, tax_rate: (e.target as HTMLInputElement).value })} />
-                </div>
                 <div class="form-group">
                   <label>Expires</label>
                   <input type="date" value={metaDraft.expires_at} onChange={(e) => setMetaDraft({ ...metaDraft, expires_at: (e.target as HTMLInputElement).value })} />

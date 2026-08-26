@@ -131,6 +131,35 @@ describe("Contract creation from accepted Quote", () => {
     expect(snapshot.line_items).toHaveLength(1);
   });
 
+  it("commercial_snapshot.tax_breakdown captures the accepted Quote's tax component breakdown, frozen even after a later Tax Profile change (Phase 13D, Section 12)", async () => {
+    const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "BC", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }, { code: "PST", name: "PST", rate_percent: 7 }],
+    }, auth);
+    const customerId = await makeCustomer(auth);
+    const { quoteId } = await makeAcceptedQuote(auth, customerId);
+    const contract = await makeContract(auth, quoteId);
+
+    const before = await request<{ version: { commercial_snapshot: string } }>(`/api/contracts/${contract.id}`, auth);
+    const beforeSnapshot = JSON.parse(before.body.version.commercial_snapshot);
+    expect(beforeSnapshot.tax_breakdown).not.toBeNull();
+    expect(beforeSnapshot.tax_breakdown.components.map((c: { code: string }) => c.code).sort()).toEqual(["GST", "PST"]);
+    expect(beforeSnapshot.tax_amount_cents).toBe(60000); // 12% of 500000
+
+    // Settings change AFTER the contract was created — the frozen snapshot
+    // must not move, exactly like every other commercial_snapshot field.
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "ON", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "HST", name: "HST", rate_percent: 13 }],
+    }, auth);
+
+    const after = await request<{ version: { commercial_snapshot: string } }>(`/api/contracts/${contract.id}`, auth);
+    const afterSnapshot = JSON.parse(after.body.version.commercial_snapshot);
+    expect(afterSnapshot.tax_amount_cents).toBe(60000);
+    expect(afterSnapshot.tax_breakdown.components.map((c: { code: string }) => c.code).sort()).toEqual(["GST", "PST"]);
+  });
+
   it("organization_id, status, current_version_id, and accepted_quote_version_id cannot be set via any write route", async () => {
     const auth = await authHeaders();
     const customerId = await makeCustomer(auth);

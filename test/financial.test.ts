@@ -169,6 +169,105 @@ describe("automatic invoice generation on job completion", () => {
   });
 });
 
+describe("Tax & Jurisdiction — Invoice integration (Phase 13D)", () => {
+  it("an auto-generated (job-completion) invoice resolves real tax from the org's Tax Profile — was hardcoded to 0 before this phase", async () => {
+    const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "BC", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }, { code: "PST", name: "PST", rate_percent: 7 }],
+    }, auth);
+    const customer = await createCustomer();
+    const job = await completeJob(customer.id, "STANDARD", auth, 100);
+    const row = await queryDb<{ id: number; total_cents: number; tax_amount_cents: number }>("SELECT id, total_cents, tax_amount_cents FROM invoices WHERE job_id = ?", [job.id]);
+    expect(row[0].tax_amount_cents).toBe(1200); // 12% of $100
+    expect(row[0].total_cents).toBe(11200);
+
+    const detail = await getInvoiceDetail(row[0].id, auth);
+    const snapshot = detail.body.invoice.tax_snapshot as { components: { code: string; amount_cents: number }[] } | null;
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.components.map((c) => c.code).sort()).toEqual(["GST", "PST"]);
+  });
+
+  it("a manually-created invoice no longer trusts a client-supplied tax_rate — server resolves the org's Tax Profile instead", async () => {
+    const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "ON", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "HST", name: "HST", rate_percent: 13 }],
+    }, auth);
+    const customer = await createCustomer();
+    const res = await post<{ id: number; total_cents: number; tax_amount_cents: number }>("/api/invoices", {
+      customer_id: customer.id,
+      tax_rate: 99, // must be silently ignored — not declared in the schema at all
+      lines: [{ description: "Service call", quantity: 1, unit_price_cents: 10000 }],
+    }, auth);
+    expect(res.response.status).toBe(201);
+    expect(res.body.tax_amount_cents).toBe(1300); // 13% HST, never the client-supplied 99%
+    expect(res.body.total_cents).toBe(11300);
+  });
+
+  it("a non-taxable line on a manual invoice is excluded from the taxable base", async () => {
+    const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "AB", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }],
+    }, auth);
+    const customer = await createCustomer();
+    const res = await post<{ subtotal_cents: number; tax_amount_cents: number }>("/api/invoices", {
+      customer_id: customer.id,
+      lines: [
+        { description: "Taxable part", quantity: 1, unit_price_cents: 10000, taxable: true },
+        { description: "Non-taxable part", quantity: 1, unit_price_cents: 5000, taxable: false },
+      ],
+    }, auth);
+    expect(res.response.status).toBe(201);
+    expect(res.body.subtotal_cents).toBe(15000);
+    expect(res.body.tax_amount_cents).toBe(500); // 5% of only the taxable 10000
+  });
+
+  it("an issued invoice's tax total is unaffected by a later Tax Profile change (Section 13's required invariant — payments reconcile against the persisted total)", async () => {
+    const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "BC", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }, { code: "PST", name: "PST", rate_percent: 7 }],
+    }, auth);
+    const customer = await createCustomer();
+    const created = await post<{ id: number }>("/api/invoices", {
+      customer_id: customer.id, lines: [{ description: "x", quantity: 1, unit_price_cents: 100000 }],
+    }, auth);
+    const issued = await post(`/api/invoices/${created.body.id}/issue`, {}, auth);
+    expect(issued.response.status).toBe(200);
+    const before = await getInvoiceDetail(created.body.id, auth);
+    expect(before.body.invoice.tax_amount_cents).toBe(12000);
+    expect(before.body.invoice.total_cents).toBe(112000);
+
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "ON", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "HST", name: "HST", rate_percent: 13 }],
+    }, auth);
+
+    const after = await getInvoiceDetail(created.body.id, auth);
+    expect(after.body.invoice.tax_amount_cents).toBe(12000);
+    expect(after.body.invoice.total_cents).toBe(112000);
+    // A payment recorded now must reconcile against the persisted (unchanged) total.
+    const payment = await post(`/api/invoices/${created.body.id}/payments`, { amount_cents: 112000, method: "cash", payer_type: "customer" }, auth);
+    expect(payment.response.status).toBe(201);
+    const paidInvoice = await getInvoiceDetail(created.body.id, auth);
+    expect(paidInvoice.body.invoice.status).toBe("paid");
+    expect(paidInvoice.body.invoice.balance_cents).toBe(0);
+  });
+
+  it("with no Tax Profile configured, invoices behave exactly as before Phase 13D — $0 tax", async () => {
+    const auth = await authHeaders();
+    const customer = await createCustomer();
+    const res = await post<{ tax_amount_cents: number; total_cents: number }>("/api/invoices", {
+      customer_id: customer.id, lines: [{ description: "x", quantity: 1, unit_price_cents: 10000 }],
+    }, auth);
+    expect(res.response.status).toBe(201);
+    expect(res.body.tax_amount_cents).toBe(0);
+    expect(res.body.total_cents).toBe(10000);
+  });
+});
+
 describe("rebate splitting per job type", () => {
   it("STANDARD invoices never carry a rebate amount", async () => {
     const auth = await authHeaders();

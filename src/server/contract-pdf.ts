@@ -189,7 +189,17 @@ export async function renderContractPdf(input: ContractPdfInput): Promise<Uint8A
   };
   totalsRow("Subtotal", formatMoney(input.commercial.subtotal_cents));
   if (input.commercial.discount_cents) totalsRow("Discount", `-${formatMoney(input.commercial.discount_cents)}`);
-  if (input.commercial.tax_amount_cents) totalsRow(`Tax (${input.commercial.tax_rate}%)`, formatMoney(input.commercial.tax_amount_cents));
+  // Phase 13D: a component breakdown (GST 5% / PST 7% / ...) when the
+  // source Quote Version has one persisted; falls back to the legacy flat
+  // "Tax (X%)" line for a pre-Phase-13D Contract with no tax_breakdown
+  // snapshot — never fabricated, exactly what was actually stored.
+  if (input.commercial.tax_breakdown && input.commercial.tax_breakdown.components.length > 0) {
+    for (const comp of input.commercial.tax_breakdown.components) {
+      if (comp.amount_cents) totalsRow(`${comp.name} (${comp.rate_percent}%)`, formatMoney(comp.amount_cents));
+    }
+  } else if (input.commercial.tax_amount_cents) {
+    totalsRow(`Tax (${input.commercial.tax_rate}%)`, formatMoney(input.commercial.tax_amount_cents));
+  }
   totalsRow("Total", formatMoney(input.commercial.total_cents), true);
   w.spacer(14);
 

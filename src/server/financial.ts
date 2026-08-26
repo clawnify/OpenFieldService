@@ -8,6 +8,7 @@ import { renderReceiptPdf } from "./receipt-pdf.js";
 import type { StorageEnv } from "./storage.js";
 import type { PaymentProvider } from "./payment-provider.js";
 import { signMockWebhookPayload } from "./payment-provider.js";
+import { resolveTaxProfile, calculateTaxes, createTaxSnapshot, getTaxSnapshot, type TaxProfile, type TaxComponentResult } from "./tax-jurisdiction.js";
 
 /**
  * Phase 5 — Financials & Invoicing. All money is integer cents (never a REAL/
@@ -76,24 +77,32 @@ export interface InvoiceLineInput {
   description: string;
   quantity: number;
   unitPriceCents: number;
+  taxable?: boolean; // defaults to true — Phase 13D per-line taxability (Section 8)
 }
 
 export interface ComputedTotals {
   subtotalCents: number;
   taxAmountCents: number;
   totalCents: number;
+  effectiveTaxRatePercent: number; // blended rate, backward-compatible with the legacy `tax_rate` column
+  taxComponents: TaxComponentResult[];
+  taxableBaseCents: number;
 }
 
 /** Integer-cents totals — quantity may be fractional (e.g. 2.5 hours), but
  *  every money value is rounded to the nearest cent at each step so rounding
  *  error can never accumulate across many lines. */
-export function computeTotals(lines: InvoiceLineInput[], taxRatePercent: number): ComputedTotals {
-  let subtotalCents = 0;
-  for (const line of lines) {
-    subtotalCents += Math.round(line.quantity * line.unitPriceCents);
-  }
-  const taxAmountCents = Math.round(subtotalCents * (taxRatePercent / 100));
-  return { subtotalCents, taxAmountCents, totalCents: subtotalCents + taxAmountCents };
+export function computeTotals(lines: InvoiceLineInput[], profile: TaxProfile | null): ComputedTotals {
+  const calc = calculateTaxes(profile, lines.map((l) => ({ amountCents: Math.round(l.quantity * l.unitPriceCents), taxable: l.taxable ?? true })));
+  const effectiveTaxRatePercent = calc.taxableBaseCents > 0 ? Math.round((calc.totalTaxCents / calc.taxableBaseCents) * 10000) / 100 : 0;
+  return {
+    subtotalCents: calc.subtotalCents,
+    taxAmountCents: calc.totalTaxCents,
+    totalCents: calc.totalCents,
+    effectiveTaxRatePercent,
+    taxComponents: calc.components,
+    taxableBaseCents: calc.taxableBaseCents,
+  };
 }
 
 async function nextInvoiceIdentifier(): Promise<string> {
@@ -193,32 +202,35 @@ export async function generateInvoiceForJob(
      LEFT JOIN materials m ON jm.material_id = m.id WHERE jm.job_id = ?`, [jobId]
   );
 
+  const organizationId = job.organization_id as number;
+  const profile = await resolveTaxProfile(organizationId);
+  const defaultTaxable = profile?.default_taxable ?? true;
   const lines: InvoiceLineInput[] = [
-    { description: (job.service_type_name as string) || "Service", quantity: 1, unitPriceCents: priceCents },
+    { description: (job.service_type_name as string) || "Service", quantity: 1, unitPriceCents: priceCents, taxable: defaultTaxable },
   ];
   for (const m of mats) {
     lines.push({
       description: m.material_name as string,
       quantity: m.quantity as number,
       unitPriceCents: Math.round((m.unit_cost as number) * 100),
+      taxable: defaultTaxable,
     });
   }
 
-  const totals = computeTotals(lines, 0);
-  const organizationId = job.organization_id as number;
+  const totals = computeTotals(lines, profile);
   const rebateAmountCents = await computeRebateAmountCents(organizationId, job.job_type as JobType, totals.totalCents);
   const identifier = await nextInvoiceIdentifier();
 
   const statements = [
     db.prepare(
       `INSERT INTO invoices (identifier, organization_id, customer_id, job_id, status, subtotal_cents, tax_rate, tax_amount_cents, rebate_amount_cents, total_cents, notes, due_date)
-       VALUES (?, ?, ?, ?, 'draft', ?, 0, ?, ?, ?, '', '')`
-    ).bind(identifier, organizationId, job.customer_id, jobId, totals.subtotalCents, totals.taxAmountCents, rebateAmountCents, totals.totalCents),
+       VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, '', '')`
+    ).bind(identifier, organizationId, job.customer_id, jobId, totals.subtotalCents, totals.effectiveTaxRatePercent, totals.taxAmountCents, rebateAmountCents, totals.totalCents),
     ...lines.map((line) =>
       db.prepare(
-        `INSERT INTO invoice_lines (invoice_id, description, quantity, unit_price_cents, total_cents)
-         VALUES ((SELECT id FROM invoices WHERE identifier = ?), ?, ?, ?, ?)`
-      ).bind(identifier, line.description, line.quantity, line.unitPriceCents, Math.round(line.quantity * line.unitPriceCents))
+        `INSERT INTO invoice_lines (invoice_id, description, quantity, unit_price_cents, total_cents, taxable)
+         VALUES ((SELECT id FROM invoices WHERE identifier = ?), ?, ?, ?, ?, ?)`
+      ).bind(identifier, line.description, line.quantity, line.unitPriceCents, Math.round(line.quantity * line.unitPriceCents), line.taxable ? 1 : 0)
     ),
     db.prepare(
       `INSERT INTO invoice_audit (invoice_id, event_type, actor_user_id, details)
@@ -243,6 +255,17 @@ export async function generateInvoiceForJob(
   }
 
   const created = await getActiveInvoiceForJob(jobId);
+  // Tax Snapshot (Section 10) — written once, right after the invoice row
+  // it describes actually exists. A concurrent caller that lost the race
+  // above already returned above (before reaching this line), so this
+  // write always corresponds to the invoice this exact call created — it
+  // is never re-run against another caller's winning row.
+  const company = await getCompanyProfile(organizationId);
+  await createTaxSnapshot({
+    documentType: "invoice", documentId: created!.id, profile,
+    calc: { taxableBaseCents: totals.taxableBaseCents, totalTaxCents: totals.taxAmountCents, components: totals.taxComponents },
+    businessNumber: company.business_number, taxNumber: company.tax_number,
+  });
   return { invoice: created!, created: true };
 }
 
@@ -250,7 +273,10 @@ export interface ManualInvoiceInput {
   organizationId: number;
   customerId: number;
   jobId: number | null;
-  taxRatePercent: number;
+  // Phase 13D (Section 18): tax rate is no longer client-suppliable — the
+  // caller may only mark individual lines taxable/non-taxable
+  // (InvoiceLineInput#taxable); the server resolves the organization's
+  // current Tax Profile and calculates the actual rate/amount/total.
   notes: string;
   dueDate: string;
   lines: InvoiceLineInput[];
@@ -272,19 +298,22 @@ export async function createManualInvoice(
     if (existing) throw new FinancialError("invalid_state", "This job already has an active invoice");
   }
 
-  const totals = computeTotals(input.lines, input.taxRatePercent);
+  const profile = await resolveTaxProfile(input.organizationId);
+  const defaultTaxable = profile?.default_taxable ?? true;
+  const lines = input.lines.map((l) => ({ ...l, taxable: l.taxable ?? defaultTaxable }));
+  const totals = computeTotals(lines, profile);
   const identifier = await nextInvoiceIdentifier();
 
   const statements = [
     db.prepare(
       `INSERT INTO invoices (identifier, organization_id, customer_id, job_id, status, subtotal_cents, tax_rate, tax_amount_cents, rebate_amount_cents, total_cents, notes, due_date)
        VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, 0, ?, ?, ?)`
-    ).bind(identifier, input.organizationId, input.customerId, input.jobId, totals.subtotalCents, input.taxRatePercent, totals.taxAmountCents, totals.totalCents, input.notes, input.dueDate),
-    ...input.lines.map((line) =>
+    ).bind(identifier, input.organizationId, input.customerId, input.jobId, totals.subtotalCents, totals.effectiveTaxRatePercent, totals.taxAmountCents, totals.totalCents, input.notes, input.dueDate),
+    ...lines.map((line) =>
       db.prepare(
-        `INSERT INTO invoice_lines (invoice_id, description, quantity, unit_price_cents, total_cents)
-         VALUES ((SELECT id FROM invoices WHERE identifier = ?), ?, ?, ?, ?)`
-      ).bind(identifier, line.description, line.quantity, line.unitPriceCents, Math.round(line.quantity * line.unitPriceCents))
+        `INSERT INTO invoice_lines (invoice_id, description, quantity, unit_price_cents, total_cents, taxable)
+         VALUES ((SELECT id FROM invoices WHERE identifier = ?), ?, ?, ?, ?, ?)`
+      ).bind(identifier, line.description, line.quantity, line.unitPriceCents, Math.round(line.quantity * line.unitPriceCents), line.taxable ? 1 : 0)
     ),
     db.prepare(
       `INSERT INTO invoice_audit (invoice_id, event_type, actor_user_id, details)
@@ -303,6 +332,12 @@ export async function createManualInvoice(
   }
 
   const row = await get<InvoiceRow>("SELECT * FROM invoices WHERE identifier = ?", [identifier]);
+  const company = await getCompanyProfile(input.organizationId);
+  await createTaxSnapshot({
+    documentType: "invoice", documentId: row!.id, profile,
+    calc: { taxableBaseCents: totals.taxableBaseCents, totalTaxCents: totals.taxAmountCents, components: totals.taxComponents },
+    businessNumber: company.business_number, taxNumber: company.tax_number,
+  });
   return row!;
 }
 
@@ -613,6 +648,7 @@ export async function getInvoicePdfBytesForDelivery(env: StorageEnv, invoiceId: 
     },
     lines,
     taxRate: invoice.tax_rate as number,
+    taxBreakdown: await getTaxSnapshot("invoice", invoice.id as number),
     financials,
     payments: payments.filter((p) => !p.voided_at),
     company,

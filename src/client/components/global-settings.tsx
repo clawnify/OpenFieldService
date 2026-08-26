@@ -3,6 +3,7 @@ import { useApp } from "../context";
 import { api } from "../api";
 import { ConfirmDialog } from "./confirm-dialog";
 import { CompanyProfileSettings } from "./company-profile";
+import { TaxJurisdictionSettings } from "./tax-jurisdiction-settings";
 import {
   SETTINGS_CATALOG, getSettingMeta, formatSettingValue, formatSettingDate,
   type SettingCatalogEntry,
@@ -315,6 +316,7 @@ export function GlobalSettings() {
       </p>
 
       <CompanyProfileSettings />
+      <TaxJurisdictionSettings />
 
       {loading ? (
         <div class="empty-state"><p>Loading...</p></div>

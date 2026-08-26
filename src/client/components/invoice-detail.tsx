@@ -384,7 +384,14 @@ export function InvoiceDetail() {
                     <td colSpan={3} class="text-right text-muted">Subtotal</td>
                     <td class="text-right">{formatCents(invoice.subtotal_cents)}</td>
                   </tr>
-                  {invoice.tax_rate > 0 && (
+                  {invoice.tax_snapshot && invoice.tax_snapshot.components.length > 0 ? (
+                    invoice.tax_snapshot.components.map((comp) => comp.amount_cents !== 0 && (
+                      <tr key={comp.code}>
+                        <td colSpan={3} class="text-right text-muted">{comp.name} ({comp.rate_percent}%)</td>
+                        <td class="text-right">{formatCents(comp.amount_cents)}</td>
+                      </tr>
+                    ))
+                  ) : invoice.tax_rate > 0 && (
                     <tr>
                       <td colSpan={3} class="text-right text-muted">Tax ({invoice.tax_rate}%)</td>
                       <td class="text-right">{formatCents(invoice.tax_amount_cents)}</td>

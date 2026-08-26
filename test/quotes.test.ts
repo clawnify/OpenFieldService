@@ -74,13 +74,166 @@ async function makeQuote(auth: RequestInit, customerId: number, overrides: Recor
   return res.body.quote;
 }
 
-describe("Quote CRUD", () => {
-  it("admin creates a quote with initial line items and correct computed totals", async () => {
+describe("Tax & Jurisdiction — historical immutability (Phase 13D)", () => {
+  it("Quote Version A keeps its tax basis unchanged after the org's Tax Profile changes (Section 11's required invariant)", async () => {
     const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "BC", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }, { code: "PST", name: "PST", rate_percent: 7 }],
+    }, auth);
+    const customerId = await makeCustomer(auth);
+    const quote = await makeQuote(auth, customerId, {
+      line_items: [{ description: "Install furnace", quantity: 1, unit_price_cents: 100000 }],
+    });
+    const before = await request<{ version: { tax_amount_cents: number; total_cents: number } }>(`/api/quotes/${quote.id}`, auth);
+    expect(before.body.version.tax_amount_cents).toBe(12000); // 12% of 100000
+
+    // Settings change: switch to a wholly different profile (Ontario HST).
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "ON", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "HST", name: "HST", rate_percent: 13 }],
+      effective_from: new Date(Date.now() + 60_000).toISOString(),
+    }, auth);
+
+    // Version A (still draft, not re-edited) must NOT have silently changed.
+    const after = await request<{ version: { tax_amount_cents: number; total_cents: number } }>(`/api/quotes/${quote.id}`, auth);
+    expect(after.body.version.tax_amount_cents).toBe(12000);
+    expect(after.body.version.total_cents).toBe(before.body.version.total_cents);
+  });
+
+  it("a draft version DOES recompute against the CURRENT profile when explicitly re-edited (still draft — not the immutability boundary)", async () => {
+    const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "AB", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }],
+    }, auth);
+    const customerId = await makeCustomer(auth);
+    const quote = await makeQuote(auth, customerId, { line_items: [{ description: "x", quantity: 1, unit_price_cents: 100000 }] });
+    const before = await request<{ version: { tax_amount_cents: number } }>(`/api/quotes/${quote.id}`, auth);
+    expect(before.body.version.tax_amount_cents).toBe(5000);
+
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "ON", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "HST", name: "HST", rate_percent: 13 }],
+    }, auth);
+    // An explicit draft edit (adding a line item) intentionally recomputes —
+    // this is expected: the quote is still in draft, still mutable.
+    await post(`/api/quotes/${quote.id}/line-items`, { description: "y", quantity: 1, unit_price_cents: 0 }, auth);
+    const after = await request<{ version: { tax_amount_cents: number } }>(`/api/quotes/${quote.id}`, auth);
+    expect(after.body.version.tax_amount_cents).toBe(13000);
+  });
+
+  it("a non-taxable line item is excluded from the taxable base, a taxable one is included", async () => {
+    const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "AB", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }],
+    }, auth);
+    const customerId = await makeCustomer(auth);
+    const quote = await makeQuote(auth, customerId, {
+      line_items: [
+        { description: "Taxable", quantity: 1, unit_price_cents: 100000, taxable: true },
+        { description: "Non-taxable", quantity: 1, unit_price_cents: 50000, taxable: false },
+      ],
+    });
+    const detail = await request<{ version: { subtotal_cents: number; tax_amount_cents: number } }>(`/api/quotes/${quote.id}`, auth);
+    expect(detail.body.version.subtotal_cents).toBe(150000);
+    expect(detail.body.version.tax_amount_cents).toBe(5000); // 5% of only the taxable 100000
+  });
+
+  it("a percent discount combined with mixed taxable/non-taxable lines: discount is allocated pro-rata, tax applies only to the discounted taxable share (hardening — independent Testing review)", async () => {
+    const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "BC", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }, { code: "PST", name: "PST", rate_percent: 7 }],
+    }, auth);
+    const customerId = await makeCustomer(auth);
+    const quote = await makeQuote(auth, customerId, {
+      discount_type: "percent", discount_percent: 10,
+      line_items: [
+        { description: "Taxable", quantity: 1, unit_price_cents: 100000, taxable: true },
+        { description: "Non-taxable", quantity: 1, unit_price_cents: 50000, taxable: false },
+      ],
+    });
+    const detail = await request<{ version: { subtotal_cents: number; discount_cents: number; tax_amount_cents: number; total_cents: number } }>(`/api/quotes/${quote.id}`, auth);
+    const v = detail.body.version;
+    // subtotal 150000; 10% discount = 15000, allocated pro-rata by gross
+    // share: 10000 off the taxable 100000, 5000 off the non-taxable 50000.
+    // Discounted taxable base = 90000; tax = 12% of 90000 = 10800 (never
+    // touches the non-taxable 45000 remaining). Total = 135000 + 10800.
+    expect(v.subtotal_cents).toBe(150000);
+    expect(v.discount_cents).toBe(15000);
+    expect(v.tax_amount_cents).toBe(10800);
+    expect(v.total_cents).toBe(145800);
+    expect(v.subtotal_cents - v.discount_cents + v.tax_amount_cents).toBe(v.total_cents);
+  });
+
+  it("the quote_version tax_snapshot component breakdown is exposed and matches the stored total", async () => {
+    const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "BC", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }, { code: "PST", name: "PST", rate_percent: 7 }],
+    }, auth);
+    const customerId = await makeCustomer(auth);
+    const quote = await makeQuote(auth, customerId, { line_items: [{ description: "x", quantity: 1, unit_price_cents: 100000 }] });
+    const detail = await request<{ version: { tax_amount_cents: number; tax_snapshot: { components: { code: string; amount_cents: number }[] } | null } }>(`/api/quotes/${quote.id}`, auth);
+    expect(detail.body.version.tax_snapshot).not.toBeNull();
+    const sum = detail.body.version.tax_snapshot!.components.reduce((s, c) => s + c.amount_cents, 0);
+    expect(sum).toBe(detail.body.version.tax_amount_cents);
+    expect(detail.body.version.tax_snapshot!.components.map((c) => c.code).sort()).toEqual(["GST", "PST"]);
+  });
+
+  it("inclusive pricing with a discount: displayed Subtotal - Discount + Tax reconciles exactly to Total (hardening — independent Architecture review)", async () => {
+    const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "BC", currency: "CAD", prices_include_tax: true, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }, { code: "PST", name: "PST", rate_percent: 7 }],
+    }, auth);
+    const customerId = await makeCustomer(auth);
+    const quote = await makeQuote(auth, customerId, {
+      discount_type: "percent", discount_percent: 10,
+      line_items: [{ description: "x", quantity: 1, unit_price_cents: 11300 }], // $113.00, tax-inclusive
+    });
+    const detail = await request<{ version: { subtotal_cents: number; discount_cents: number; tax_amount_cents: number; total_cents: number } }>(`/api/quotes/${quote.id}`, auth);
+    const v = detail.body.version;
+    // The gross total is unchanged by tax being embedded — only reduced by the discount.
+    expect(v.total_cents).toBe(11300 - v.discount_cents);
+    // The row-sum identity a reader sees on screen must hold in BOTH pricing modes.
+    expect(v.subtotal_cents - v.discount_cents + v.tax_amount_cents).toBe(v.total_cents);
+  });
+
+  it("a Quote Revision resolves the CURRENT profile for its new draft version, independent of the source version's frozen basis", async () => {
+    const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "AB", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }],
+    }, auth);
+    const customerId = await makeCustomer(auth);
+    const quote = await makeQuote(auth, customerId, { line_items: [{ description: "x", quantity: 1, unit_price_cents: 100000 }] });
+    await post(`/api/quotes/${quote.id}/transition`, { to_status: "sent" }, auth);
+
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "ON", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "HST", name: "HST", rate_percent: 13 }],
+    }, auth);
+
+    const revision = await post(`/api/quotes/${quote.id}/revisions`, {}, auth);
+    expect(revision.response.status).toBe(201);
+    const detail = await request<{ version: { tax_amount_cents: number } }>(`/api/quotes/${quote.id}`, auth);
+    expect(detail.body.version.tax_amount_cents).toBe(13000); // the NEW draft version uses the current (ON) profile
+  });
+});
+
+describe("Quote CRUD", () => {
+  it("admin creates a quote with initial line items and correct computed totals (Phase 13D: tax resolved from the org's Tax Profile)", async () => {
+    const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "SK", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "TAX", name: "Combined Tax", rate_percent: 10 }],
+    }, auth);
     const customerId = await makeCustomer(auth);
     const res = await post<{ quote: { id: number; identifier: string; status: string } }>("/api/quotes", {
       customer_id: customerId,
-      tax_rate: 10,
       line_items: [
         { description: "Furnace unit", category: "equipment", quantity: 1, unit: "ea", unit_price_cents: 500000 },
         { description: "Labor", category: "labor", quantity: 3, unit: "hr", unit_price_cents: 10000 },
@@ -203,12 +356,16 @@ describe("Line items", () => {
 });
 
 describe("Totals / tax / discount", () => {
-  it("computes a percent discount correctly and taxes the post-discount subtotal", async () => {
+  it("computes a percent discount correctly and taxes the post-discount subtotal (Phase 13D: tax resolved from the org's Tax Profile, no longer a client-supplied tax_rate)", async () => {
     const auth = await authHeaders();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "AB", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }],
+    }, auth);
     const customerId = await makeCustomer(auth);
     const res = await post<{ quote: { id: number } }>("/api/quotes", {
       customer_id: customerId,
-      discount_type: "percent", discount_percent: 10, tax_rate: 5,
+      discount_type: "percent", discount_percent: 10,
       line_items: [{ description: "x", quantity: 1, unit_price_cents: 100000 }],
     }, auth);
     const detail = await request<{ version: { subtotal_cents: number; discount_cents: number; tax_amount_cents: number; total_cents: number } }>(`/api/quotes/${res.body.quote.id}`, auth);
@@ -217,6 +374,16 @@ describe("Totals / tax / discount", () => {
     expect(detail.body.version.discount_cents).toBe(10000);
     expect(detail.body.version.tax_amount_cents).toBe(4500);
     expect(detail.body.version.total_cents).toBe(94500);
+  });
+
+  it("a client-supplied tax_rate on quote create/update is rejected (Phase 13D: schema no longer declares that field, .strict() 400s it)", async () => {
+    const auth = await authHeaders();
+    const customerId = await makeCustomer(auth);
+    const create = await post("/api/quotes", { customer_id: customerId, tax_rate: 99 }, auth);
+    expect(create.response.status).toBe(400);
+    const quote = await makeQuote(auth, customerId);
+    const update = await put(`/api/quotes/${quote.id}/version`, { tax_rate: 99 }, auth);
+    expect(update.response.status).toBe(400);
   });
 
   it("a fixed discount larger than the subtotal is capped, never producing a negative total", async () => {
@@ -696,6 +863,31 @@ describe("Tenant isolation — Quotes", () => {
     const listB = await request<{ quotes: unknown[]; total: number }>("/api/quotes?limit=200", b.auth);
     expect(listA.body.total).toBe(0);
     expect(listB.body.total).toBe(1);
+  });
+
+  it("a document's tax_snapshot never bleeds across tenants — each org's quote resolves its OWN Tax Profile, never the other's (hardening — independent Testing review, Phase 13D)", async () => {
+    const a = await orgA();
+    const b = await orgB();
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "AB", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "GST", name: "GST", rate_percent: 5 }],
+    }, a.auth);
+    await post("/api/tax-profile", {
+      tax_enabled: true, country_code: "CA", region_code: "ON", currency: "CAD", prices_include_tax: false, default_taxable: true,
+      components: [{ code: "HST", name: "HST", rate_percent: 13 }],
+    }, b.auth);
+
+    const aCustomerId = await makeCustomer(a.auth, "Org A Customer");
+    const aQuote = await makeQuote(a.auth, aCustomerId, { line_items: [{ description: "x", quantity: 1, unit_price_cents: 100000 }] });
+    const bCustomerId = await makeCustomer(b.auth, "Org B Customer");
+    const bQuote = await makeQuote(b.auth, bCustomerId, { line_items: [{ description: "x", quantity: 1, unit_price_cents: 100000 }] });
+
+    const aDetail = await request<{ version: { tax_amount_cents: number; tax_snapshot: { components: { code: string }[] } | null } }>(`/api/quotes/${aQuote.id}`, a.auth);
+    const bDetail = await request<{ version: { tax_amount_cents: number; tax_snapshot: { components: { code: string }[] } | null } }>(`/api/quotes/${bQuote.id}`, b.auth);
+    expect(aDetail.body.version.tax_amount_cents).toBe(5000); // AB GST 5%
+    expect(aDetail.body.version.tax_snapshot!.components.map((c) => c.code)).toEqual(["GST"]);
+    expect(bDetail.body.version.tax_amount_cents).toBe(13000); // ON HST 13%
+    expect(bDetail.body.version.tax_snapshot!.components.map((c) => c.code)).toEqual(["HST"]);
   });
 });
 

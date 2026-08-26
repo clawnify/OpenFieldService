@@ -1,4 +1,5 @@
 import type { CompanyProfile } from "./company-profile.js";
+import type { TaxSnapshot } from "./tax-jurisdiction.js";
 import {
   ACCENT, CONTENT_WIDTH, INK, MARGIN, MUTED, PAGE_WIDTH, PdfWriter,
   formatDateOnly, formatDateTime, formatMoney, sanitizeForPdf,
@@ -49,6 +50,11 @@ export interface InvoicePdfInput {
   customer: { name: string; email: string; phone: string; address: string; city: string; state: string; zip: string };
   lines: InvoicePdfLine[];
   taxRate: number;
+  // Phase 13D — the persisted per-component breakdown for THIS invoice
+  // (never re-derived from today's Tax Profile). null for a pre-Phase-13D
+  // invoice, in which case `taxRate` above is the only tax detail that was
+  // ever actually recorded.
+  taxBreakdown: TaxSnapshot | null;
   financials: {
     subtotal_cents: number; tax_amount_cents: number; rebate_amount_cents: number;
     total_cents: number; customer_amount_cents: number; amount_paid_cents: number; balance_cents: number; is_overdue: boolean;
@@ -135,7 +141,13 @@ export async function renderInvoicePdf(input: InvoicePdfInput): Promise<Uint8Arr
   };
   const f = input.financials;
   totalsRow("Subtotal", formatMoney(f.subtotal_cents));
-  if (f.tax_amount_cents) totalsRow(`Tax (${input.taxRate}%)`, formatMoney(f.tax_amount_cents));
+  if (input.taxBreakdown && input.taxBreakdown.components.length > 0) {
+    for (const comp of input.taxBreakdown.components) {
+      if (comp.amount_cents) totalsRow(`${comp.name} (${comp.rate_percent}%)`, formatMoney(comp.amount_cents));
+    }
+  } else if (f.tax_amount_cents) {
+    totalsRow(`Tax (${input.taxRate}%)`, formatMoney(f.tax_amount_cents));
+  }
   if (f.rebate_amount_cents) totalsRow("Rebate", `-${formatMoney(f.rebate_amount_cents)}`);
   totalsRow("Invoice Total", formatMoney(f.total_cents), true);
   totalsRow("Amount Paid", formatMoney(f.amount_paid_cents));
