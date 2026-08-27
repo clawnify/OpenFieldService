@@ -25,6 +25,7 @@ export function CustomerList() {
           <Search size={14} class="search-icon" />
           <input
             type="text"
+            aria-label="Search customers"
             placeholder="Search customers..."
             value={customersSearch}
             onInput={(e) => setCustomersSearch((e.target as HTMLInputElement).value)}

@@ -88,6 +88,7 @@ export function UserManagement() {
           <Search size={14} class="search-icon" />
           <input
             type="text"
+            aria-label="Search users"
             placeholder="Search users..."
             value={search}
             onInput={(e) => setSearch((e.target as HTMLInputElement).value)}

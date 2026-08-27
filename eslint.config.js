@@ -36,4 +36,18 @@ export default tseslint.config(
       },
     },
   },
+  {
+    // Phase 19A — Playwright-driven E2E helper scripts: plain Node at the
+    // top level (console/process/fetch), but also pass closures into
+    // page.evaluate() that execute in the BROWSER (document/window) —
+    // ESLint parses those statically and can't tell them apart, so this
+    // tier gets both global sets, same reasoning as **/*.{ts,tsx} above.
+    files: ["test/e2e/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+        ...globals.browser,
+      },
+    },
+  },
 );

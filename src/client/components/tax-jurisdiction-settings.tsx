@@ -142,23 +142,23 @@ export function TaxJurisdictionSettings() {
             <p class="text-muted" style={{ fontSize: 11 }}>When off, new Quotes/Invoices calculate $0 tax.</p>
           </div>
           <div class="form-group">
-            <label>Country</label>
-            <input type="text" value={countryCode} onInput={(e) => setCountryCode((e.target as HTMLInputElement).value.toUpperCase())} placeholder="CA" maxLength={2} />
+            <label for="tj-country">Country</label>
+            <input id="tj-country" type="text" value={countryCode} onInput={(e) => setCountryCode((e.target as HTMLInputElement).value.toUpperCase())} placeholder="CA" maxLength={2} />
           </div>
           <div class="form-group">
-            <label>Province / State / Region</label>
+            <label for="tj-region">Province / State / Region</label>
             {countryCode === "CA" && options ? (
-              <select value={regionCode} onChange={(e) => setRegionCode((e.target as HTMLSelectElement).value)}>
+              <select id="tj-region" value={regionCode} onChange={(e) => setRegionCode((e.target as HTMLSelectElement).value)}>
                 <option value="">Select a province/territory</option>
                 {options.ca_regions.map((r) => <option key={r.code} value={r.code}>{r.name} ({r.code})</option>)}
               </select>
             ) : (
-              <input type="text" value={regionCode} onInput={(e) => setRegionCode((e.target as HTMLInputElement).value)} />
+              <input id="tj-region" type="text" value={regionCode} onInput={(e) => setRegionCode((e.target as HTMLInputElement).value)} />
             )}
           </div>
           <div class="form-group">
-            <label>Currency</label>
-            <input type="text" value={currency} onInput={(e) => setCurrency((e.target as HTMLInputElement).value.toUpperCase())} placeholder="CAD" maxLength={3} />
+            <label for="tj-currency">Currency</label>
+            <input id="tj-currency" type="text" value={currency} onInput={(e) => setCurrency((e.target as HTMLInputElement).value.toUpperCase())} placeholder="CAD" maxLength={3} />
           </div>
         </div>
 
@@ -197,9 +197,9 @@ export function TaxJurisdictionSettings() {
         {components.length === 0 && <p class="text-muted" style={{ fontSize: 12 }}>No components configured — tax will always be $0.</p>}
         {components.map((c, i) => (
           <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-            <input type="text" value={c.code} onInput={(e) => updateComponent(i, "code", (e.target as HTMLInputElement).value)} placeholder="GST" style={{ width: 80 }} />
-            <input type="text" value={c.name} onInput={(e) => updateComponent(i, "name", (e.target as HTMLInputElement).value)} placeholder="Display name" style={{ flex: 1 }} />
-            <input type="number" step="0.001" min="0" max="100" value={c.rate_percent} onInput={(e) => updateComponent(i, "rate_percent", (e.target as HTMLInputElement).value)} style={{ width: 90 }} />
+            <input type="text" value={c.code} onInput={(e) => updateComponent(i, "code", (e.target as HTMLInputElement).value)} placeholder="GST" style={{ width: 80 }} aria-label={`Tax component ${i + 1} code`} />
+            <input type="text" value={c.name} onInput={(e) => updateComponent(i, "name", (e.target as HTMLInputElement).value)} placeholder="Display name" style={{ flex: 1 }} aria-label={`Tax component ${i + 1} display name`} />
+            <input type="number" step="0.001" min="0" max="100" value={c.rate_percent} onInput={(e) => updateComponent(i, "rate_percent", (e.target as HTMLInputElement).value)} style={{ width: 90 }} aria-label={`Tax component ${i + 1} rate percent`} />
             <span class="text-muted">%</span>
             <button type="button" class="btn-icon danger" onClick={() => removeComponent(i)} title="Remove component"><Trash2 size={14} /></button>
           </div>

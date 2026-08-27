@@ -393,6 +393,7 @@ export function JobDetail() {
                 value={checklistText}
                 onInput={(e) => setChecklistText((e.target as HTMLInputElement).value)}
                 placeholder="Add checklist item..."
+                aria-label="Add checklist item"
                 onKeyDown={(e) => e.key === "Enter" && handleAddChecklist()}
               />
               <button class="btn btn-primary btn-sm" onClick={handleAddChecklist}>
@@ -428,7 +429,7 @@ export function JobDetail() {
             )}
             {showAddMaterial ? (
               <div class="note-input-row">
-                <select value={materialId} onChange={(e) => setMaterialId((e.target as HTMLSelectElement).value)} style={{ flex: 2 }}>
+                <select value={materialId} onChange={(e) => setMaterialId((e.target as HTMLSelectElement).value)} style={{ flex: 2 }} aria-label="Select material">
                   <option value="">Select material...</option>
                   {materials.map((m) => (
                     <option key={m.id} value={m.id}>{m.name} (${m.unit_cost}/{m.unit})</option>
@@ -456,6 +457,7 @@ export function JobDetail() {
                 value={noteText}
                 onInput={(e) => setNoteText((e.target as HTMLInputElement).value)}
                 placeholder="Add a note..."
+                aria-label="Add a note"
                 onKeyDown={(e) => e.key === "Enter" && handleAddNote()}
               />
               <button class="btn btn-primary btn-sm" onClick={handleAddNote}>
@@ -528,6 +530,7 @@ export function JobDetail() {
             <div class="detail-sidebar-section">
               <h4>Assign Technician</h4>
               <select
+                aria-label="Assign technician"
                 value={job.technician_id || ""}
                 onChange={(e) => {
                   const val = (e.target as HTMLSelectElement).value;
@@ -559,12 +562,12 @@ export function JobDetail() {
                   editingEligibility ? (
                     <div class="form-grid">
                       <div class="form-group full-width">
-                        <label>Eligibility Code</label>
-                        <input type="text" value={editCode} onInput={(e) => setEditCode((e.target as HTMLInputElement).value)} />
+                        <label for="job-eligibility-code">Eligibility Code</label>
+                        <input id="job-eligibility-code" type="text" value={editCode} onInput={(e) => setEditCode((e.target as HTMLInputElement).value)} />
                       </div>
                       <div class="form-group full-width">
-                        <label>Expiry</label>
-                        <input type="date" value={editExpiry} onChange={(e) => setEditExpiry((e.target as HTMLInputElement).value)} />
+                        <label for="job-eligibility-expiry">Expiry</label>
+                        <input id="job-eligibility-expiry" type="date" value={editExpiry} onChange={(e) => setEditExpiry((e.target as HTMLInputElement).value)} />
                       </div>
                       <div class="form-group full-width" style={{ display: "flex", gap: 8 }}>
                         <button class="btn btn-sm" onClick={() => setEditingEligibility(false)}>Cancel</button>
@@ -659,17 +662,17 @@ export function JobDetail() {
               {pendingTransition === "eligibility_approved" && (
                 <div class="form-grid">
                   <div class="form-group full-width">
-                    <label>Eligibility Code *</label>
+                    <label for="job-status-elig-code">Eligibility Code *</label>
                     <input
-                      type="text" value={eligCode}
+                      id="job-status-elig-code" type="text" value={eligCode}
                       onInput={(e) => setEligCode((e.target as HTMLInputElement).value)}
                       required
                     />
                   </div>
                   <div class="form-group full-width">
-                    <label>Eligibility Code Expiry *</label>
+                    <label for="job-status-elig-expiry">Eligibility Code Expiry *</label>
                     <input
-                      type="date" value={eligExpiry}
+                      id="job-status-elig-expiry" type="date" value={eligExpiry}
                       onChange={(e) => setEligExpiry((e.target as HTMLInputElement).value)}
                       required
                     />

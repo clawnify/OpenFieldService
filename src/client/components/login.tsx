@@ -44,8 +44,9 @@ export function LoginPage() {
 
         <form onSubmit={handleSubmit}>
           <div class="form-group">
-            <label>Email</label>
+            <label for="login-email">Email</label>
             <input
+              id="login-email"
               type="email"
               autoComplete="username"
               value={email}
@@ -55,9 +56,10 @@ export function LoginPage() {
             />
           </div>
           <div class="form-group">
-            <label>Password</label>
+            <label for="login-password">Password</label>
             <div class="password-input-wrap">
               <input
+                id="login-password"
                 type={showPassword ? "text" : "password"}
                 autoComplete="current-password"
                 value={password}

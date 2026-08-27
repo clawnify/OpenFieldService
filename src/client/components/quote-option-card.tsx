@@ -166,8 +166,8 @@ export function QuoteOptionCard({
     <div class="card quote-option-card-admin">
       <div class="form-grid">
         <div class="form-group">
-          <label>Tier</label>
-          <select value={draft.tier} disabled={!isDraft} onChange={(e) => setField("tier", (e.target as HTMLSelectElement).value as OptionTier)}>
+          <label for={`qo-${option.id}-tier`}>Tier</label>
+          <select id={`qo-${option.id}-tier`} value={draft.tier} disabled={!isDraft} onChange={(e) => setField("tier", (e.target as HTMLSelectElement).value as OptionTier)}>
             {OPTION_TIERS.map((t) => <option key={t} value={t}>{TIER_LABELS[t]}</option>)}
           </select>
         </div>
@@ -178,24 +178,24 @@ export function QuoteOptionCard({
           </label>
         </div>
         <div class="form-group full-width">
-          <label>Name</label>
-          <input type="text" value={draft.name} disabled={!isDraft} onInput={(e) => setField("name", (e.target as HTMLInputElement).value)} />
+          <label for={`qo-${option.id}-name`}>Name</label>
+          <input id={`qo-${option.id}-name`} type="text" value={draft.name} disabled={!isDraft} onInput={(e) => setField("name", (e.target as HTMLInputElement).value)} />
         </div>
         <div class="form-group full-width">
-          <label>Headline</label>
-          <input type="text" value={draft.headline} disabled={!isDraft} placeholder="e.g. Recommended balance of efficiency and price" onInput={(e) => setField("headline", (e.target as HTMLInputElement).value)} />
+          <label for={`qo-${option.id}-headline`}>Headline</label>
+          <input id={`qo-${option.id}-headline`} type="text" value={draft.headline} disabled={!isDraft} placeholder="e.g. Recommended balance of efficiency and price" onInput={(e) => setField("headline", (e.target as HTMLInputElement).value)} />
         </div>
         <div class="form-group full-width">
-          <label>Customer-Facing Description</label>
-          <textarea rows={2} value={draft.description} disabled={!isDraft} onInput={(e) => setField("description", (e.target as HTMLTextAreaElement).value)} />
+          <label for={`qo-${option.id}-description`}>Customer-Facing Description</label>
+          <textarea id={`qo-${option.id}-description`} rows={2} value={draft.description} disabled={!isDraft} onInput={(e) => setField("description", (e.target as HTMLTextAreaElement).value)} />
         </div>
         <div class="form-group full-width">
-          <label>Highlights (comma-separated)</label>
-          <input type="text" value={draft.highlightsText} disabled={!isDraft} placeholder="Best value, Longest warranty, Premium comfort" onInput={(e) => setField("highlightsText", (e.target as HTMLInputElement).value)} />
+          <label for={`qo-${option.id}-highlights`}>Highlights (comma-separated)</label>
+          <input id={`qo-${option.id}-highlights`} type="text" value={draft.highlightsText} disabled={!isDraft} placeholder="Best value, Longest warranty, Premium comfort" onInput={(e) => setField("highlightsText", (e.target as HTMLInputElement).value)} />
         </div>
         <div class="form-group">
-          <label>Discount Type</label>
-          <select value={draft.discount_type} disabled={!isDraft} onChange={(e) => setField("discount_type", (e.target as HTMLSelectElement).value)}>
+          <label for={`qo-${option.id}-discount-type`}>Discount Type</label>
+          <select id={`qo-${option.id}-discount-type`} value={draft.discount_type} disabled={!isDraft} onChange={(e) => setField("discount_type", (e.target as HTMLSelectElement).value)}>
             <option value="none">None</option>
             <option value="fixed">Fixed</option>
             <option value="percent">Percent</option>
@@ -203,14 +203,14 @@ export function QuoteOptionCard({
         </div>
         {draft.discount_type === "percent" && (
           <div class="form-group">
-            <label>Discount %</label>
-            <input type="number" min="0" max="100" value={draft.discount_percent} disabled={!isDraft} onInput={(e) => setField("discount_percent", (e.target as HTMLInputElement).value)} />
+            <label for={`qo-${option.id}-discount-percent`}>Discount %</label>
+            <input id={`qo-${option.id}-discount-percent`} type="number" min="0" max="100" value={draft.discount_percent} disabled={!isDraft} onInput={(e) => setField("discount_percent", (e.target as HTMLInputElement).value)} />
           </div>
         )}
         {draft.discount_type === "fixed" && (
           <div class="form-group">
-            <label>Discount $</label>
-            <input type="text" inputMode="decimal" value={draft.discount_input} disabled={!isDraft} onInput={(e) => setField("discount_input", (e.target as HTMLInputElement).value)} />
+            <label for={`qo-${option.id}-discount-fixed`}>Discount $</label>
+            <input id={`qo-${option.id}-discount-fixed`} type="text" inputMode="decimal" value={draft.discount_input} disabled={!isDraft} onInput={(e) => setField("discount_input", (e.target as HTMLInputElement).value)} />
           </div>
         )}
       </div>
@@ -237,13 +237,13 @@ export function QuoteOptionCard({
             {option.line_items.map((line) => (
               editingLineId === line.id ? (
                 <tr key={line.id} class="table-row">
-                  <td><input type="text" value={lineDraft.description} onInput={(e) => setLineDraft({ ...lineDraft, description: (e.target as HTMLInputElement).value })} /></td>
-                  <td style={{ width: 60 }}><input type="number" step="any" min="0.01" value={lineDraft.quantity} onInput={(e) => setLineDraft({ ...lineDraft, quantity: (e.target as HTMLInputElement).value })} /></td>
-                  <td style={{ width: 70 }}><input type="text" value={lineDraft.unit} onInput={(e) => setLineDraft({ ...lineDraft, unit: (e.target as HTMLInputElement).value })} /></td>
-                  <td style={{ width: 90 }}><input type="text" inputMode="decimal" value={lineDraft.unit_price_input} onInput={(e) => setLineDraft({ ...lineDraft, unit_price_input: (e.target as HTMLInputElement).value })} /></td>
+                  <td><input type="text" aria-label="Line description" value={lineDraft.description} onInput={(e) => setLineDraft({ ...lineDraft, description: (e.target as HTMLInputElement).value })} /></td>
+                  <td style={{ width: 60 }}><input type="number" step="any" min="0.01" aria-label="Line quantity" value={lineDraft.quantity} onInput={(e) => setLineDraft({ ...lineDraft, quantity: (e.target as HTMLInputElement).value })} /></td>
+                  <td style={{ width: 70 }}><input type="text" aria-label="Line unit" value={lineDraft.unit} onInput={(e) => setLineDraft({ ...lineDraft, unit: (e.target as HTMLInputElement).value })} /></td>
+                  <td style={{ width: 90 }}><input type="text" inputMode="decimal" aria-label="Line unit price" value={lineDraft.unit_price_input} onInput={(e) => setLineDraft({ ...lineDraft, unit_price_input: (e.target as HTMLInputElement).value })} /></td>
                   {hasCostAccess && <td class="text-right text-muted">{line.cost_cents != null ? formatCents(line.cost_cents) : "—"}</td>}
                   <td class="text-right text-muted">—</td>
-                  <td><input type="checkbox" checked={lineDraft.taxable} onChange={(e) => setLineDraft({ ...lineDraft, taxable: (e.target as HTMLInputElement).checked })} /></td>
+                  <td><input type="checkbox" aria-label="Line taxable" checked={lineDraft.taxable} onChange={(e) => setLineDraft({ ...lineDraft, taxable: (e.target as HTMLInputElement).checked })} /></td>
                   <td>
                     <button class="btn-icon" disabled={savingLine} onClick={submitEditLine}>✓</button>
                     <button class="btn-icon" onClick={() => { setEditingLineId(null); setLineDraft(emptyLineDraft); }}><X size={14} /></button>
@@ -271,16 +271,16 @@ export function QuoteOptionCard({
               <tr class="table-row">
                 <td>
                   <div style={{ display: "flex", gap: 4 }}>
-                    <input type="text" placeholder="Description" value={lineDraft.description} onInput={(e) => setLineDraft({ ...lineDraft, description: (e.target as HTMLInputElement).value, pricebook_item_id: null })} />
+                    <input type="text" placeholder="Description" aria-label="New line description" value={lineDraft.description} onInput={(e) => setLineDraft({ ...lineDraft, description: (e.target as HTMLInputElement).value, pricebook_item_id: null })} />
                     <button type="button" class="btn-icon" title="Select from Pricebook" onClick={() => setShowPicker(true)}><BookOpen size={14} /></button>
                   </div>
                 </td>
-                <td style={{ width: 60 }}><input type="number" step="any" min="0.01" value={lineDraft.quantity} onInput={(e) => setLineDraft({ ...lineDraft, quantity: (e.target as HTMLInputElement).value })} /></td>
-                <td style={{ width: 70 }}><input type="text" placeholder="ea" value={lineDraft.unit} onInput={(e) => setLineDraft({ ...lineDraft, unit: (e.target as HTMLInputElement).value })} /></td>
-                <td style={{ width: 90 }}><input type="text" inputMode="decimal" placeholder="0.00" value={lineDraft.unit_price_input} onInput={(e) => setLineDraft({ ...lineDraft, unit_price_input: (e.target as HTMLInputElement).value })} /></td>
+                <td style={{ width: 60 }}><input type="number" step="any" min="0.01" aria-label="New line quantity" value={lineDraft.quantity} onInput={(e) => setLineDraft({ ...lineDraft, quantity: (e.target as HTMLInputElement).value })} /></td>
+                <td style={{ width: 70 }}><input type="text" placeholder="ea" aria-label="New line unit" value={lineDraft.unit} onInput={(e) => setLineDraft({ ...lineDraft, unit: (e.target as HTMLInputElement).value })} /></td>
+                <td style={{ width: 90 }}><input type="text" inputMode="decimal" placeholder="0.00" aria-label="New line unit price" value={lineDraft.unit_price_input} onInput={(e) => setLineDraft({ ...lineDraft, unit_price_input: (e.target as HTMLInputElement).value })} /></td>
                 {hasCostAccess && <td class="text-right text-muted">—</td>}
                 <td class="text-right text-muted">—</td>
-                <td><input type="checkbox" checked={lineDraft.taxable} onChange={(e) => setLineDraft({ ...lineDraft, taxable: (e.target as HTMLInputElement).checked })} /></td>
+                <td><input type="checkbox" aria-label="New line taxable" checked={lineDraft.taxable} onChange={(e) => setLineDraft({ ...lineDraft, taxable: (e.target as HTMLInputElement).checked })} /></td>
                 <td>
                   <button class="btn-icon" disabled={savingLine} onClick={submitAddLine}>✓</button>
                   <button class="btn-icon" onClick={() => { setShowAddLine(false); setLineDraft(emptyLineDraft); }}><X size={14} /></button>

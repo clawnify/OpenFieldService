@@ -117,19 +117,19 @@ export function CompanyProfileSettings() {
         <h3 class="settings-group-heading">Identity</h3>
         <div class="form-grid">
           <div class="form-group">
-            <label>Company Name</label>
-            <input type="text" value={form.company_name} onInput={set("company_name")} placeholder="Coreline Comfort" />
+            <label for="cp-company-name">Company Name</label>
+            <input id="cp-company-name" type="text" value={form.company_name} onInput={set("company_name")} placeholder="Coreline Comfort" />
           </div>
           <div class="form-group">
-            <label>Legal Name</label>
-            <input type="text" value={form.legal_name} onInput={set("legal_name")} placeholder="Coreline Comfort Ltd." />
+            <label for="cp-legal-name">Legal Name</label>
+            <input id="cp-legal-name" type="text" value={form.legal_name} onInput={set("legal_name")} placeholder="Coreline Comfort Ltd." />
           </div>
         </div>
 
         <h3 class="settings-group-heading">Branding</h3>
         <div class="form-grid">
           <div class="form-group full-width">
-            <label>Company Logo</label>
+            <label for="cp-logo">Company Logo</label>
             {hasLogo && (
               <div style={{ marginBottom: 8 }}>
                 <img
@@ -140,7 +140,7 @@ export function CompanyProfileSettings() {
             )}
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input
-                ref={logoInputRef} type="file" accept="image/png,image/jpeg"
+                id="cp-logo" ref={logoInputRef} type="file" accept="image/png,image/jpeg"
                 onChange={uploadLogo} disabled={uploadingLogo}
               />
               {hasLogo && (
@@ -154,56 +154,56 @@ export function CompanyProfileSettings() {
         <h3 class="settings-group-heading">Contact</h3>
         <div class="form-grid">
           <div class="form-group">
-            <label>Phone</label>
-            <input type="text" value={form.phone} onInput={set("phone")} />
+            <label for="cp-phone">Phone</label>
+            <input id="cp-phone" type="text" value={form.phone} onInput={set("phone")} />
           </div>
           <div class="form-group">
-            <label>Email</label>
-            <input type="email" value={form.email} onInput={set("email")} />
+            <label for="cp-email">Email</label>
+            <input id="cp-email" type="email" value={form.email} onInput={set("email")} />
           </div>
           <div class="form-group">
-            <label>Website</label>
-            <input type="text" value={form.website} onInput={set("website")} placeholder="https://example.com" />
+            <label for="cp-website">Website</label>
+            <input id="cp-website" type="text" value={form.website} onInput={set("website")} placeholder="https://example.com" />
           </div>
         </div>
 
         <h3 class="settings-group-heading">Address</h3>
         <div class="form-grid">
           <div class="form-group full-width">
-            <label>Address Line 1</label>
-            <input type="text" value={form.address_line1} onInput={set("address_line1")} />
+            <label for="cp-address1">Address Line 1</label>
+            <input id="cp-address1" type="text" value={form.address_line1} onInput={set("address_line1")} />
           </div>
           <div class="form-group full-width">
-            <label>Address Line 2</label>
-            <input type="text" value={form.address_line2} onInput={set("address_line2")} />
+            <label for="cp-address2">Address Line 2</label>
+            <input id="cp-address2" type="text" value={form.address_line2} onInput={set("address_line2")} />
           </div>
           <div class="form-group">
-            <label>City</label>
-            <input type="text" value={form.city} onInput={set("city")} />
+            <label for="cp-city">City</label>
+            <input id="cp-city" type="text" value={form.city} onInput={set("city")} />
           </div>
           <div class="form-group">
-            <label>Province / State</label>
-            <input type="text" value={form.state} onInput={set("state")} />
+            <label for="cp-state">Province / State</label>
+            <input id="cp-state" type="text" value={form.state} onInput={set("state")} />
           </div>
           <div class="form-group">
-            <label>Postal / ZIP Code</label>
-            <input type="text" value={form.postal_code} onInput={set("postal_code")} />
+            <label for="cp-postal">Postal / ZIP Code</label>
+            <input id="cp-postal" type="text" value={form.postal_code} onInput={set("postal_code")} />
           </div>
           <div class="form-group">
-            <label>Country</label>
-            <input type="text" value={form.country} onInput={set("country")} />
+            <label for="cp-country">Country</label>
+            <input id="cp-country" type="text" value={form.country} onInput={set("country")} />
           </div>
         </div>
 
         <h3 class="settings-group-heading">Business IDs</h3>
         <div class="form-grid">
           <div class="form-group">
-            <label>Business Number</label>
-            <input type="text" value={form.business_number} onInput={set("business_number")} placeholder="123456789BC0001" />
+            <label for="cp-business-number">Business Number</label>
+            <input id="cp-business-number" type="text" value={form.business_number} onInput={set("business_number")} placeholder="123456789BC0001" />
           </div>
           <div class="form-group">
-            <label>Tax Number</label>
-            <input type="text" value={form.tax_number} onInput={set("tax_number")} placeholder="123456789RT0001" />
+            <label for="cp-tax-number">Tax Number</label>
+            <input id="cp-tax-number" type="text" value={form.tax_number} onInput={set("tax_number")} placeholder="123456789RT0001" />
             <p class="text-muted" style={{ fontSize: 11 }}>GST/HST registration number, if different from your Business Number.</p>
           </div>
         </div>
@@ -211,8 +211,8 @@ export function CompanyProfileSettings() {
         <h3 class="settings-group-heading">Contract Footer</h3>
         <div class="form-grid">
           <div class="form-group full-width">
-            <label>Default Contract Footer</label>
-            <textarea rows={3} value={form.contract_footer} onInput={set("contract_footer")} placeholder="Thank you for your business." />
+            <label for="cp-footer">Default Contract Footer</label>
+            <textarea id="cp-footer" rows={3} value={form.contract_footer} onInput={set("contract_footer")} placeholder="Thank you for your business." />
             <p class="text-muted" style={{ fontSize: 11 }}>Plain text only — printed on every page of the signed Contract PDF.</p>
           </div>
         </div>

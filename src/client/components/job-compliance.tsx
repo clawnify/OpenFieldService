@@ -162,6 +162,7 @@ export function JobCompliance({
             )}
             <input
               ref={inputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }}
+              aria-label={`Add ${KIND_LABEL[kind]}`}
               onChange={(e) => {
                 const file = (e.target as HTMLInputElement).files?.[0];
                 if (file) handleUpload(kind, file);
@@ -183,30 +184,34 @@ export function JobCompliance({
         </div>
         <div class="form-grid">
           <div class="form-group full-width">
-            <label>Work Performed</label>
+            <label for="jc-work-performed">Work Performed</label>
             <textarea
+              id="jc-work-performed"
               rows={2} value={reportDraft.work_performed}
               onInput={(e) => setReportDraft({ ...reportDraft, work_performed: (e.target as HTMLTextAreaElement).value })}
               placeholder="What did you do on this job?"
             />
           </div>
           <div class="form-group full-width">
-            <label>Findings</label>
+            <label for="jc-findings">Findings</label>
             <textarea
+              id="jc-findings"
               rows={2} value={reportDraft.findings}
               onInput={(e) => setReportDraft({ ...reportDraft, findings: (e.target as HTMLTextAreaElement).value })}
             />
           </div>
           <div class="form-group full-width">
-            <label>Materials Used</label>
+            <label for="jc-materials-used">Materials Used</label>
             <input
+              id="jc-materials-used"
               type="text" value={reportDraft.materials_used}
               onInput={(e) => setReportDraft({ ...reportDraft, materials_used: (e.target as HTMLInputElement).value })}
             />
           </div>
           <div class="form-group full-width">
-            <label>Notes</label>
+            <label for="jc-notes">Notes</label>
             <textarea
+              id="jc-notes"
               rows={2} value={reportDraft.notes}
               onInput={(e) => setReportDraft({ ...reportDraft, notes: (e.target as HTMLTextAreaElement).value })}
             />
@@ -360,12 +365,12 @@ function SignaturePad({ jobId, onCaptured, onClose }: { jobId: number; onCapture
         </div>
         <div class="form-grid">
           <div class="form-group full-width">
-            <label>Customer Name *</label>
-            <input type="text" value={signerName} onInput={(e) => setSignerName((e.target as HTMLInputElement).value)} required />
+            <label for="sig-signer-name">Customer Name *</label>
+            <input id="sig-signer-name" type="text" value={signerName} onInput={(e) => setSignerName((e.target as HTMLInputElement).value)} required />
           </div>
           <div class="form-group full-width">
-            <label>Relationship (optional)</label>
-            <input type="text" value={signerRelationship} onInput={(e) => setSignerRelationship((e.target as HTMLInputElement).value)} placeholder="Owner, Property Manager, ..." />
+            <label for="sig-signer-relationship">Relationship (optional)</label>
+            <input id="sig-signer-relationship" type="text" value={signerRelationship} onInput={(e) => setSignerRelationship((e.target as HTMLInputElement).value)} placeholder="Owner, Property Manager, ..." />
           </div>
         </div>
         <p class="text-muted signature-instruction">Have the customer sign in the box below with a finger or stylus.</p>
