@@ -273,6 +273,12 @@ export async function resetDatabase() {
     "DELETE FROM voice_engine_credentials",
     "DELETE FROM phone_operations_settings",
     "DELETE FROM phone_operations_audit",
+    // Phase 16 — call_follow_ups/call_tool_invocations both cascade from
+    // calls (ON DELETE CASCADE), already in this list, but get their own
+    // entries anyway per this file's established convention (see the
+    // Phase 13D tax_snapshot_components precedent above).
+    "DELETE FROM call_follow_ups",
+    "DELETE FROM call_tool_invocations",
     "DELETE FROM organizations WHERE id != 1",
     "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter', 'quote_counter', 'contract_counter')",
     "DELETE FROM sqlite_sequence",

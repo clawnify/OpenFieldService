@@ -21,6 +21,21 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Phase 16 UI/UX hardening finding: a card-hosted table wider than its
+ * `.table-wrap` (e.g. Phone Numbers, whose Agent/Status <select> columns
+ * need real width) is correctly contained by `.table-wrap`'s own
+ * overflow-x:auto all the way up through <body> — but `document.
+ * documentElement.scrollWidth` (the root <html> element) still measured
+ * wider than the viewport in real-browser testing (Playwright, 390px),
+ * meaning a genuine page-level horizontal scrollbar was reachable despite
+ * every intermediate container correctly self-clipping. This is the
+ * standard, safe defensive fix — nothing in this app relies on
+ * page-level horizontal scroll (every legitimate wide-content case already
+ * has its own dedicated `.table-wrap`/`overflow-x:auto` container), so
+ * this can only ever remove an unintended scrollbar, never hide reachable
+ * content. */
+html, body { overflow-x: clip; }
+
 body {
   font-family: var(--font);
   background: var(--bg);
@@ -1978,8 +1993,22 @@ body {
 
   .tech-sticky-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
-  /* Room for the fixed bar so it never overlaps the page's last content. */
-  .job-detail-page { padding-bottom: 84px; }
+  /* Phase 16 UI/UX hardening finding: a pre-existing flat `84px` value here
+   * (added when the sticky bar was first built) doesn't actually reserve
+   * the bar's real height on a notched phone — `.tech-sticky-btn` alone is
+   * 46px, plus the bar's own `10px` top padding and `10px +
+   * env(safe-area-inset-bottom)` bottom padding is ~66px BEFORE the inset,
+   * and a ~34px home-indicator inset pushes the bar to ~100px tall, so a
+   * job with a full completion checklist (photos + report + signature)
+   * could still render its last controls partially underneath the bar.
+   * Computed directly from the bar's own sizing (not re-guessed as a
+   * second flat number, which independent review correctly caught as
+   * silently shadowed by this very rule — same selector, later in the
+   * cascade, so the fix never took effect) with a small buffer for visual
+   * breathing room. Verified via real-browser (Playwright) scroll-to-
+   * bottom measurement: zero overlap between the last content section and
+   * the bar's bounding rect. */
+  .job-detail-page { padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
 }
 
 /* ── My Jobs Today (technician-home.tsx) ────────────────────────────────
@@ -2259,4 +2288,222 @@ body {
   padding: 2px 12px; margin: -2px 0;
   color: var(--text-secondary); font-size: 0.8rem;
   border: none; cursor: default;
+}
+
+/* ── Accessibility utility ───────────────────────────────────────────── */
+
+/* Visually hidden but still reachable by screen readers/keyboard — for a
+ * `<label>` a compact control (a single icon-only or placeholder-only
+ * input) needs for a real accessible name without a visible duplicate of
+ * text already conveyed by context (e.g. a placeholder). Standard
+ * clip-based technique, not display:none (which removes it from the
+ * accessibility tree entirely). */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+/* ── Phone Operations (Phase 15/16) — Mobile Navigation ─────────────────
+ * Phase 16 UI/UX hardening finding: `.sidebar` was a fixed 240px column
+ * with NO responsive override anywhere in this file — at a 390/430px
+ * phone width it consumed 60%+ of the viewport with no way to hide it,
+ * the single most severe defect blocking any Technician mobile usability
+ * (Technician is this app's mobile-first role). Converted to an off-canvas
+ * drawer at <=640px: hidden by translateX until `.sidebar.open`, a
+ * hamburger toggle button (visible only at this breakpoint) opens it, and
+ * a backdrop closes it on outside-tap. Desktop/tablet (>640px) behavior is
+ * completely unchanged — this only adds new rules inside the existing
+ * <=640px breakpoint bucket. */
+.sidebar-mobile-toggle {
+  display: none;
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  /* Above .sidebar's own z-index (61) — independent review finding: the
+   * toggle previously sat BELOW the open drawer's stacking order, so its
+   * own "X" close affordance became visually covered and unclickable the
+   * moment the drawer opened (only the backdrop/Escape/nav-click could
+   * close it). Must always stay on top regardless of drawer state. */
+  z-index: 62;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.sidebar-backdrop {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .sidebar-mobile-toggle { display: inline-flex; }
+
+  .sidebar {
+    position: fixed;
+    z-index: 61;
+    left: 0;
+    top: 0;
+    transform: translateX(-100%);
+    /* Accessibility review finding (P0): a translateX-only closed state
+     * still leaves every nav/user-action button inside .sidebar in the tab
+     * order and the accessibility tree even though it's visually off
+     * -screen — a keyboard user tabbing from the toggle lands on invisible
+     * buttons, and a screen reader's linear/swipe navigation exposes them
+     * too. `visibility: hidden` removes an element from both the tab order
+     * and the accessibility tree in every modern browser, without the
+     * layout/measurement side effects of `display: none`. The delayed
+     * transition on `visibility` (0s duration, 0.2s delay) means it only
+     * takes effect AFTER the slide-out animation finishes on close, so the
+     * open→close animation still looks identical to before; opening has no
+     * delay, so the drawer is instantly interactive the moment it appears. */
+    visibility: hidden;
+    transition: transform 0.2s ease, visibility 0s linear 0.2s;
+    box-shadow: var(--shadow-lg);
+  }
+  .sidebar.open { transform: translateX(0); visibility: visible; transition: transform 0.2s ease; }
+
+  .sidebar-backdrop.open {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 59;
+  }
+
+  /* The toggle button sits above the app's own content — give the main
+   * column enough top clearance that nothing renders underneath it. */
+  .main-content { padding-top: 52px; }
+}
+
+/* ── Phone Operations (Phase 15/16) — CRM Context, Follow-ups, Transcript ─
+ * Independent architecture review finding: this section originally defined
+ * its own `.po-crm-group`/`.po-crm-group-label` with the same padding/
+ * border-top/heading styling the existing `.form-section`/
+ * `.form-section-heading` pattern already provides — genuine design-system
+ * duplication (and `.form-section + .form-section` already gives the
+ * between-groups divider for free via a sibling selector, no
+ * `:first-of-type` override needed). Each group in the JSX now composes
+ * `.form-section`/`.form-section-heading` directly; the two rules below
+ * are reduced to ONLY the icon+text flex layout `.form-section-heading`
+ * doesn't provide on its own, rather than re-declaring font/color/spacing
+ * that already exists. This also fixes a real gap the duplication caused:
+ * `.po-crm-context` (the outer `.card`) has no padding of its own — the
+ * groups sat flush against the card's left/right border before switching
+ * to `.form-section`, which carries its own `padding: 14px 20px`. */
+
+.po-crm-context h3 { padding: 14px 20px 0; margin-bottom: 4px; }
+
+.po-crm-group-label { display: flex; align-items: center; gap: 6px; }
+
+.po-match-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.po-match-source { font-size: 12px; }
+
+.po-linked-record {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.po-correction-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.po-correction-row input { flex: 1 1 160px; min-width: 0; }
+
+.po-followup-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.po-followup-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.po-followup-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  min-width: 0;
+}
+.po-followup-due { font-size: 12px; }
+
+.po-followup-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+.po-followup-form {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.po-followup-form input[type="text"] { flex: 1 1 200px; min-width: 0; }
+.po-followup-form input[type="date"] { flex: 0 1 160px; }
+
+.po-form-actions { flex-direction: row !important; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+.po-tool-policy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 6px;
+  margin-top: 4px;
+}
+.po-tool-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 400 !important;
+  font-size: 13px;
+}
+
+.po-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.po-transcript-line {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  max-width: 85%;
+}
+.po-transcript-agent { background: var(--primary-light); align-self: flex-start; }
+.po-transcript-caller { background: var(--bg); border: 1px solid var(--border-subtle); align-self: flex-end; }
+
+.po-transcript-speaker { font-weight: 600; flex-shrink: 0; }
+.po-transcript-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+@media (max-width: 640px) {
+  .po-transcript-line { max-width: 100%; }
+  .po-followup-form input[type="text"], .po-followup-form input[type="date"] { flex-basis: 100%; }
+  .po-form-actions .btn { flex: 1 1 auto; justify-content: center; }
+  /* Accessibility review finding (P2): "Mark Done"/"Add Follow-up" render
+   * as `.btn-sm` (~24-26px tall, no min-height at any breakpoint) — well
+   * under the ~44px touch-target guideline. Same fix shape already
+   * established elsewhere in this file for exactly this situation
+   * (`.tech-route-stop-actions .btn`/`.compliance-item .btn`), just never
+   * applied to these new buttons. */
+  .po-followup-actions .btn, .po-followup-form .btn, .po-form-actions .btn { min-height: 44px; }
 }

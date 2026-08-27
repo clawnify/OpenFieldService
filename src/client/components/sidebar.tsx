@@ -1,11 +1,11 @@
-import { useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { useApp } from "../context";
 import { useAuth } from "../auth-context";
 import { ROLE_LABELS } from "../role-labels";
 import { ChangeMyPassword } from "./change-my-password";
 import {
   CalendarClock, LayoutDashboard, Briefcase, Users, Wrench, Settings, CalendarDays,
-  FileText, Package, UserCog, KeyRound, LogOut, CalendarSync, SlidersHorizontal, BadgeCheck, Target, Calculator, FileSignature, Phone,
+  FileText, Package, UserCog, KeyRound, LogOut, CalendarSync, SlidersHorizontal, BadgeCheck, Target, Calculator, FileSignature, Phone, Menu, X,
 } from "lucide-preact";
 import type { View } from "../types";
 
@@ -40,68 +40,114 @@ export function Sidebar({ currentView }: { currentView: View }) {
   const { navigate, stats } = useApp();
   const { user, logout } = useAuth();
   const [showChangePassword, setShowChangePassword] = useState(false);
+  // Mobile-only off-canvas drawer state (Phase 16 UI/UX hardening — see the
+  // styles.css comment above `.sidebar-mobile-toggle`: below 640px this
+  // fixed sidebar has nowhere else to go, so it starts closed and opens as
+  // an overlay). Desktop/tablet ignore this entirely — the CSS that reads
+  // `.sidebar.open` only exists inside the <=640px media query.
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const firstNavItemRef = useRef<HTMLButtonElement>(null);
 
   const visibleNavItems = navItems.filter((item) =>
     (!item.adminOnly || user?.role === "admin") && (!item.hideFromTechnician || user?.role !== "technician")
   );
 
+  const closeMobile = () => {
+    setMobileOpen(false);
+    toggleRef.current?.focus();
+  };
+
+  const go = (path: string) => {
+    navigate(path);
+    setMobileOpen(false);
+  };
+
+  // Accessibility review finding: opening the off-canvas drawer previously
+  // left keyboard focus wherever it already was (the toggle button) with no
+  // way to dismiss except a mouse click on the backdrop — Escape now closes
+  // it (returning focus to the toggle, the standard disclosure pattern),
+  // and opening it moves focus into the drawer's first nav item so a
+  // keyboard user actually lands inside the menu they just opened.
+  useEffect(() => {
+    if (!mobileOpen) return;
+    firstNavItemRef.current?.focus();
+    const onKeyDown = (e: KeyboardEvent) => { if (e.key === "Escape") closeMobile(); };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [mobileOpen]);
+
   return (
-    <aside class="sidebar">
-      <div class="sidebar-brand">
-        <div class="sidebar-brand-icon">
-          <CalendarClock size={16} />
-        </div>
-        Field Scheduler
-      </div>
-      <nav class="sidebar-nav">
-        <div class="sidebar-section-title">Menu</div>
-        {visibleNavItems.map((item) => (
-          <button
-            key={item.view}
-            class={`sidebar-item ${currentView === item.view ? "active" : ""}`}
-            onClick={() => navigate(item.path)}
-          >
-            <item.icon size={16} />
-            <span>{item.view === "dashboard" && user?.role === "technician" ? "My Jobs" : item.label}</span>
-            {item.view === "jobs" && stats.jobs > 0 && (
-              <span class="sidebar-badge">{stats.jobs}</span>
-            )}
-            {item.view === "customers" && stats.customers > 0 && (
-              <span class="sidebar-badge">{stats.customers}</span>
-            )}
-            {item.view === "invoices" && stats.invoices_outstanding > 0 && (
-              <span class="sidebar-badge">{stats.invoices_outstanding}</span>
-            )}
-          </button>
-        ))}
-      </nav>
-      <div class="sidebar-footer">
-        <div class="sidebar-stat">
-          <span class="sidebar-stat-value">{stats.today_jobs}</span>
-          <span class="sidebar-stat-label">Today</span>
-        </div>
-        <div class="sidebar-stat">
-          <span class="sidebar-stat-value">{stats.upcoming_jobs}</span>
-          <span class="sidebar-stat-label">Upcoming</span>
-        </div>
-      </div>
-      {user && (
-        <div class="sidebar-user">
-          <div class="sidebar-user-info">
-            <div class="sidebar-user-name">{user.name}</div>
-            <div class="sidebar-user-role">{ROLE_LABELS[user.role]}</div>
+    <>
+      <button
+        ref={toggleRef}
+        type="button"
+        class="sidebar-mobile-toggle"
+        aria-label={mobileOpen ? "Close menu" : "Open menu"}
+        aria-expanded={mobileOpen}
+        onClick={() => setMobileOpen((o) => !o)}
+      >
+        {mobileOpen ? <X size={20} /> : <Menu size={20} />}
+      </button>
+      <div class={`sidebar-backdrop ${mobileOpen ? "open" : ""}`} onClick={closeMobile} />
+      <aside class={`sidebar ${mobileOpen ? "open" : ""}`}>
+        <div class="sidebar-brand">
+          <div class="sidebar-brand-icon">
+            <CalendarClock size={16} />
           </div>
-          <div class="sidebar-user-actions">
-            <button class="btn-icon" title="Change my password" onClick={() => setShowChangePassword(true)}>
-              <KeyRound size={14} />
+          Field Scheduler
+        </div>
+        <nav class="sidebar-nav">
+          <div class="sidebar-section-title">Menu</div>
+          {visibleNavItems.map((item, i) => (
+            <button
+              key={item.view}
+              ref={i === 0 ? firstNavItemRef : undefined}
+              class={`sidebar-item ${currentView === item.view ? "active" : ""}`}
+              onClick={() => go(item.path)}
+            >
+              <item.icon size={16} />
+              <span>{item.view === "dashboard" && user?.role === "technician" ? "My Jobs" : item.label}</span>
+              {item.view === "jobs" && stats.jobs > 0 && (
+                <span class="sidebar-badge">{stats.jobs}</span>
+              )}
+              {item.view === "customers" && stats.customers > 0 && (
+                <span class="sidebar-badge">{stats.customers}</span>
+              )}
+              {item.view === "invoices" && stats.invoices_outstanding > 0 && (
+                <span class="sidebar-badge">{stats.invoices_outstanding}</span>
+              )}
             </button>
-            <button class="btn-icon" title="Log out" onClick={() => logout()}>
-              <LogOut size={14} />
-            </button>
+          ))}
+        </nav>
+        <div class="sidebar-footer">
+          <div class="sidebar-stat">
+            <span class="sidebar-stat-value">{stats.today_jobs}</span>
+            <span class="sidebar-stat-label">Today</span>
+          </div>
+          <div class="sidebar-stat">
+            <span class="sidebar-stat-value">{stats.upcoming_jobs}</span>
+            <span class="sidebar-stat-label">Upcoming</span>
           </div>
         </div>
-      )}
-      {showChangePassword && <ChangeMyPassword onClose={() => setShowChangePassword(false)} />}
-    </aside>
+        {user && (
+          <div class="sidebar-user">
+            <div class="sidebar-user-info">
+              <div class="sidebar-user-name">{user.name}</div>
+              <div class="sidebar-user-role">{ROLE_LABELS[user.role]}</div>
+            </div>
+            <div class="sidebar-user-actions">
+              <button class="btn-icon" title="Change my password" aria-label="Change my password" onClick={() => setShowChangePassword(true)}>
+                <KeyRound size={14} />
+              </button>
+              <button class="btn-icon" title="Log out" aria-label="Log out" onClick={() => logout()}>
+                <LogOut size={14} />
+              </button>
+            </div>
+          </div>
+        )}
+        {showChangePassword && <ChangeMyPassword onClose={() => setShowChangePassword(false)} />}
+      </aside>
+    </>
   );
 }

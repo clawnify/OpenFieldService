@@ -46,6 +46,13 @@ import {
   createOutboundCall as placeTwilioOutboundCall, mapTwilioCallStatus,
 } from "./twilio-provider.js";
 import {
+  PhoneOperationsCrmError, KNOWN_TOOL_NAMES,
+  resolveCallerContext, getCustomerVoiceContext, getLeadVoiceContext, getJobVoiceStatus, getAvailability,
+  linkCallToCustomer, unlinkCallCustomer, linkCallToLead, linkCallToJob,
+  createFollowUp, listFollowUps, completeFollowUp,
+  buildToolRegistry, invokeTool, listToolInvocations,
+} from "./phone-operations-crm.js";
+import {
   CompanyProfileValidationError,
   getCompanyLogo,
   getCompanyProfile,
@@ -963,39 +970,48 @@ const createJob = createRoute({
   },
 });
 
-app.openapi(createJob, async (c) => {
-  // Phase 7.2 security fix: this route previously had NO role check at
-  // all — any authenticated role, including technician, could create a job
-  // for any customer and assign it to any active technician. The RBAC gate
-  // runs FIRST, before nextIdentifier() or any database write (nextIdentifier()
-  // itself mutates the _meta counter), matching every other write route in
-  // this file and specifically the "RBAC before mutation" requirement — see
-  // mem:risks/job-creation-rbac. `.strict()` added to match updateJob's
-  // existing convention on this same resource: an unrecognized field
-  // (status/actor_user_id/role/etc.) is now rejected with 400 rather than
-  // silently stripped, though it was already never trusted either way
-  // (schema never declared those fields, so Zod's default non-strict
-  // behavior already discarded them before this fix — this only makes that
-  // discard loud instead of silent).
-  const me = currentUser(c);
-  if (me.role === "technician") {
-    return c.json({ error: "Technicians cannot create jobs — contact a dispatcher" }, 403);
-  }
+// Phase 16 — extracted so Phone Operations' `create_appointment_for_customer`
+// tool (src/server/phone-operations-crm.ts) creates Jobs through this EXACT
+// same validated path rather than a second, parallel INSERT — CLAUDE.md's
+// explicit "never bypass the canonical service" rule for Job creation.
+// Behavior is unchanged from the pre-Phase-16 inline route body this was
+// extracted from verbatim; only the RBAC check (route-specific — Phone
+// Operations has its own, separate authorization model, not "block
+// technician") and the two Hono-context side effects (Google Calendar sync,
+// notification enqueue, both needing `c.env`) stay in each call site.
+export type CreateJobRecordInput = {
+  customer_id: number;
+  technician_id?: number | null;
+  service_type_id?: number | null;
+  job_type?: JobType;
+  priority?: string;
+  scheduled_date: string;
+  scheduled_time?: string;
+  duration?: number;
+  price?: number;
+  address?: string;
+  notes?: string;
+  is_recurring?: number;
+  recurrence_interval?: string;
+};
+export type CreateJobRecordResult =
+  | { ok: true; job: Job }
+  | { ok: false; status: 400; error: string }
+  | { ok: false; status: 404; error: string }
+  | { ok: false; status: 409; error: string; conflict: { job_id: number; scheduled_date: string; scheduled_time: string; duration: number } };
 
-  const data = c.req.valid("json");
-  const organizationId = actorOrganizationId(c);
-
+async function createJobRecord(organizationId: number, actorUserId: number | null, data: CreateJobRecordInput): Promise<CreateJobRecordResult> {
   try {
     validateScheduleFields(data);
   } catch (err) {
-    if (err instanceof ScheduleValidationError) return c.json({ error: err.message }, 400);
+    if (err instanceof ScheduleValidationError) return { ok: false, status: 400, error: err.message };
     throw err;
   }
   if (data.technician_id !== undefined && data.technician_id !== null) {
     try {
       await assertTechnicianAssignable(organizationId, data.technician_id);
     } catch (err) {
-      if (err instanceof ScheduleValidationError) return c.json({ error: err.message }, 400);
+      if (err instanceof ScheduleValidationError) return { ok: false, status: 400, error: err.message };
       throw err;
     }
   }
@@ -1006,7 +1022,7 @@ app.openapi(createJob, async (c) => {
   const ownedCustomer = await get<{ address: string; city: string; state: string; zip: string }>(
     "SELECT address, city, state, zip FROM customers WHERE id = ? AND organization_id = ?", [data.customer_id, organizationId]
   );
-  if (!ownedCustomer) return c.json({ error: "Customer not found" }, 404);
+  if (!ownedCustomer) return { ok: false, status: 404, error: "Customer not found" };
 
   const identifier = await nextIdentifier();
   // Status is never client-supplied at creation — it's always the entry status
@@ -1045,7 +1061,7 @@ app.openapi(createJob, async (c) => {
     try {
       await checkScheduleConflict(data.technician_id, data.scheduled_date, data.scheduled_time || "09:00", duration, null);
     } catch (err) {
-      if (err instanceof ScheduleConflictError) return c.json({ error: err.message, conflict: err.conflict }, 409);
+      if (err instanceof ScheduleConflictError) return { ok: false, status: 409, error: err.message, conflict: err.conflict };
       throw err;
     }
   }
@@ -1087,32 +1103,62 @@ app.openapi(createJob, async (c) => {
   );
   // Audit trail entry for the job's initial status — not a "transition" through
   // transitionJob() (there's no prior status to move from), but job_status_history
-  // should still read as a complete record from creation onward. `me` is the
-  // same real session user resolved at the top of this handler (never a
-  // client-supplied actor id).
+  // should still read as a complete record from creation onward. `actorUserId`
+  // is always a real, server-resolved actor id (never client-supplied).
   await run(
     "INSERT INTO job_status_history (job_id, from_status, to_status, actor_user_id, reason) VALUES (?, NULL, ?, ?, ?)",
-    [job!.id, initialStatus, me.id, "Job created"]
+    [job!.id, initialStatus, actorUserId, "Job created"]
   );
-  // Google Calendar sync is best-effort: syncJobToAllConnectedUsers never throws,
-  // so a Google outage or misconfiguration can never stop a job from being created.
-  await syncJobToAllConnectedUsers(googleEnv(c), job!.id);
-  // Phase 9.1 — appointment confirmation. Every job has a scheduled_date
-  // (NOT NULL) and a scheduled_time (defaults to "09:00") the moment it's
-  // created, regardless of whether a technician is assigned yet — "you're
-  // booked for this date/time" is true independent of internal staffing,
-  // so this is not gated on technician_id. Best-effort: a notification
-  // problem must never fail or roll back a successful job creation.
+  return { ok: true, job: job! };
+}
+
+/** The two side effects every job-creation call site runs identically after
+ *  a successful createJobRecord() — both best-effort, matching this
+ *  codebase's existing "an integration outage must never fail or roll back
+ *  a successful creation" discipline. Needs `c` for googleEnv(c)/c.env, so
+ *  it can't live inside createJobRecord() itself (see that function's own
+ *  header comment). */
+async function runJobCreationSideEffects(c: Context<Env>, job: Job): Promise<void> {
+  await syncJobToAllConnectedUsers(googleEnv(c), job.id);
   await safeEnqueue(async () => {
-    const contact = await getCustomerContact(job!.customer_id);
+    const contact = await getCustomerContact(job.customer_id);
     if (!contact) return;
     await enqueueAppointmentConfirmation({
-      jobId: job!.id, jobIdentifier: job!.identifier,
-      customerId: job!.customer_id, customerName: contact.name, customerEmail: contact.email, customerPhone: contact.phone,
-      scheduledDate: job!.scheduled_date, scheduledTime: job!.scheduled_time,
+      jobId: job.id, jobIdentifier: job.identifier,
+      customerId: job.customer_id, customerName: contact.name, customerEmail: contact.email, customerPhone: contact.phone,
+      scheduledDate: job.scheduled_date, scheduledTime: job.scheduled_time,
     });
   });
-  return c.json(job!, 201);
+}
+
+app.openapi(createJob, async (c) => {
+  // Phase 7.2 security fix: this route previously had NO role check at
+  // all — any authenticated role, including technician, could create a job
+  // for any customer and assign it to any active technician. The RBAC gate
+  // runs FIRST, before nextIdentifier() or any database write (nextIdentifier()
+  // itself mutates the _meta counter), matching every other write route in
+  // this file and specifically the "RBAC before mutation" requirement — see
+  // mem:risks/job-creation-rbac. `.strict()` added to match updateJob's
+  // existing convention on this same resource: an unrecognized field
+  // (status/actor_user_id/role/etc.) is now rejected with 400 rather than
+  // silently stripped, though it was already never trusted either way
+  // (schema never declared those fields, so Zod's default non-strict
+  // behavior already discarded them before this fix — this only makes that
+  // discard loud instead of silent).
+  const me = currentUser(c);
+  if (me.role === "technician") {
+    return c.json({ error: "Technicians cannot create jobs — contact a dispatcher" }, 403);
+  }
+
+  const data = c.req.valid("json");
+  const organizationId = actorOrganizationId(c);
+  const result = await createJobRecord(organizationId, me.id, data);
+  if (!result.ok) {
+    if (result.status === 409) return c.json({ error: result.error, conflict: result.conflict }, 409);
+    return c.json({ error: result.error }, result.status);
+  }
+  await runJobCreationSideEffects(c, result.job);
+  return c.json(result.job, 201);
 });
 
 const updateJob = createRoute({
@@ -3003,24 +3049,44 @@ const createLead = createRoute({
   },
 });
 
-app.openapi(createLead, async (c) => {
-  const me = currentUser(c);
-  if (me.role === "technician") return c.json({ error: "Technicians cannot create leads" }, 403);
+// Phase 16 — extracted so Phone Operations' `create_lead_from_call` tool
+// (src/server/phone-operations-crm.ts) creates Leads through this EXACT
+// same validated path rather than a second, parallel INSERT. Behavior
+// unchanged from the pre-Phase-16 inline route body; RBAC stays in the
+// route (Phone Operations has its own, separate authorization model).
+export type CreateLeadRecordInput = {
+  name: string;
+  phone?: string;
+  email?: string;
+  address?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  assigned_user_id?: number | null;
+  referral_source?: string;
+  referral_name?: string;
+  referred_by_customer_id?: number | null;
+  program_interest?: string | null;
+  estimated_value_cents?: number | null;
+  estimate_notes?: string;
+  notes?: string;
+};
+export type CreateLeadRecordResult = { ok: true; lead: Lead } | { ok: false; error: string };
 
-  const data = c.req.valid("json");
-  if (!data.name.trim()) return c.json({ error: "Name is required" }, 400);
+async function createLeadRecord(organizationId: number, actorUserId: number | null, data: CreateLeadRecordInput): Promise<CreateLeadRecordResult> {
+  if (!data.name.trim()) return { ok: false, error: "Name is required" };
 
   if (data.assigned_user_id !== undefined && data.assigned_user_id !== null) {
-    const err = await validateLeadAssigneeUserId(actorOrganizationId(c), data.assigned_user_id);
-    if (err) return c.json({ error: err }, 400);
+    const err = await validateLeadAssigneeUserId(organizationId, data.assigned_user_id);
+    if (err) return { ok: false, error: err };
   }
 
   let referral;
   try {
     // A brand-new Lead has no id yet — same reasoning as createCustomer.
-    referral = await resolveReferralAttribution(actorOrganizationId(c), data, null, null);
+    referral = await resolveReferralAttribution(organizationId, data, null, null);
   } catch (err) {
-    if (err instanceof CustomerValidationError) return c.json({ error: err.message }, 400);
+    if (err instanceof CustomerValidationError) return { ok: false, error: err.message };
     throw err;
   }
 
@@ -3041,7 +3107,7 @@ app.openapi(createLead, async (c) => {
        program_interest, estimated_value_cents, estimate_notes, notes)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      identifier, actorOrganizationId(c), data.name, data.phone || "", data.email || "", data.address || "",
+      identifier, organizationId, data.name, data.phone || "", data.email || "", data.address || "",
       data.city || "", data.state || "", data.zip || "",
       data.assigned_user_id ?? null,
       referral.referral_source, referral.referral_name, referral.referred_by_customer_id,
@@ -3053,12 +3119,22 @@ app.openapi(createLead, async (c) => {
   // Initial history row — same precedent as createJob: no prior status to
   // transition FROM, so this is a direct insert, not a transitionLead() call
   // (transitionLead() requires an existing row to read a "from" status out
-  // of). `me` is the real session user resolved at the top of this handler.
+  // of). `actorUserId` is always a real, server-resolved actor id.
   await run(
     "INSERT INTO lead_status_history (lead_id, old_status, new_status, actor_user_id, reason) VALUES (?, NULL, 'new', ?, ?)",
-    [lead!.id, me.id, "Lead created"]
+    [lead!.id, actorUserId, "Lead created"]
   );
-  return c.json(lead!, 201);
+  return { ok: true, lead: lead! };
+}
+
+app.openapi(createLead, async (c) => {
+  const me = currentUser(c);
+  if (me.role === "technician") return c.json({ error: "Technicians cannot create leads" }, 403);
+
+  const data = c.req.valid("json");
+  const result = await createLeadRecord(actorOrganizationId(c), me.id, data);
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return c.json(result.lead, 201);
 });
 
 const updateLead = createRoute({
@@ -7770,6 +7846,7 @@ const saveVoiceAgentRoute = createRoute({
     instructions: z.string().max(20000),
     is_default: z.boolean(),
     status: z.enum(["draft", "active", "archived"]),
+    tool_policy: z.array(z.enum(KNOWN_TOOL_NAMES)).max(50).default([]),
   }) } } } },
   responses: {
     201: { description: "New agent version published", content: { "application/json": { schema: z.any() } } },
@@ -8094,6 +8171,18 @@ app.post("/api/phone-operations/twilio/voice", async (c) => {
   if (!numberOwner.inbound_enabled) return c.body(buildRejectedCallTwiML(), 200, { "Content-Type": "text/xml" });
   try {
     const call = await createInboundCall({ organizationId: numberOwner.organization_id, phoneNumberId: numberOwner.phone_number_id, voiceAgentId: numberOwner.voice_agent_id, fromNumber: from, toNumber: to, providerCallSid: callSid });
+    // Phase 16 — automatic caller matching at call creation. Exactly one
+    // normalized-phone match auto-links with EXACT_PHONE confidence
+    // (Section 8/45); zero or multiple matches are left UNKNOWN for a
+    // human/tool to resolve, never guessed. Best-effort: a matching
+    // problem must never fail or roll back a successfully created call,
+    // same discipline as this route's other best-effort integrations.
+    try {
+      const resolution = await resolveCallerContext(numberOwner.organization_id, from);
+      if (resolution.matches.length === 1) {
+        await linkCallToCustomer(numberOwner.organization_id, call.id, resolution.matches[0].id, "system", "EXACT_PHONE");
+      }
+    } catch { /* best-effort — see comment above */ }
     if (!c.env.VOICE_ENGINE_STREAM_BASE_URL) return c.body(buildRejectedCallTwiML(), 200, { "Content-Type": "text/xml" });
     const session = await issueCallSession(call.id);
     const streamUrl = `${c.env.VOICE_ENGINE_STREAM_BASE_URL}?session=${encodeURIComponent(session.token)}`;
@@ -8243,6 +8332,221 @@ app.post("/api/phone-operations/runtime/sessions/:id/disconnected", async (c) =>
   const found = await markCallSessionDisconnected(runtime.organization_id, Number(c.req.param("id")), typeof body.reason === "string" ? body.reason : "");
   if (!found) return c.json({ error: "Not found" }, 404);
   return c.json({ ok: true }, 200);
+});
+
+// ── Phone Operations CRM integration (Phase 16) — the tool registry the
+// Voice Engine runtime calls through. Every side effect is created via the
+// SAME domain functions/paths the ordinary dispatcher UI uses
+// (createJobRecord/createLeadRecord — see their own header comments) —
+// never a raw INSERT bypassing business validation. Authorization is never
+// left to the model: invokeTool() checks the CALLING CALL's own frozen
+// voice_agent_snapshot.tool_policy (captured at call-start, immune to a
+// later live policy edit) before any tool body runs. ────────────────────
+
+const phoneOperationsToolRegistry = buildToolRegistry({
+  createLeadRecord: async (organizationId, input, actorUserId) => {
+    const result = await createLeadRecord(organizationId, actorUserId, input as CreateLeadRecordInput);
+    if (!result.ok) throw new PhoneOperationsCrmError("invalid_input", result.error);
+    return { id: result.lead.id, identifier: result.lead.identifier };
+  },
+  createJobRecord: async (organizationId, input, actorUserId) => {
+    const result = await createJobRecord(organizationId, actorUserId, input as CreateJobRecordInput);
+    if (!result.ok) {
+      if (result.status === 409) return { conflict: true, message: result.error };
+      throw new PhoneOperationsCrmError("invalid_input", result.error);
+    }
+    return { id: result.job.id, identifier: result.job.identifier };
+  },
+});
+
+app.post("/api/phone-operations/runtime/calls/:id/tools/invoke", async (c) => {
+  const runtime = await runtimeAuth(c);
+  if (!runtime) return c.json({ error: "Unauthorized" }, 401);
+  const call = await getCall(runtime.organization_id, Number(c.req.param("id")));
+  if (!call) return c.json({ error: "Not found" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const toolName = typeof body.tool === "string" ? body.tool : "";
+  const idempotencyKey = typeof body.idempotency_key === "string" ? body.idempotency_key : "";
+  if (!toolName || !idempotencyKey) return c.json({ error: "tool and idempotency_key are required" }, 400);
+  const args = typeof body.args === "object" && body.args !== null ? body.args : {};
+  // The frozen policy captured on THIS call at start time — never the
+  // agent's current live tool_policy, so a later permission edit can never
+  // retroactively change what an in-flight or already-completed call may
+  // do (Section 28's explicit requirement).
+  const agentToolPolicy = Array.isArray((call.voice_agent_snapshot as { tool_policy?: unknown }).tool_policy)
+    ? (call.voice_agent_snapshot as { tool_policy: string[] }).tool_policy : [];
+  const result = await invokeTool(phoneOperationsToolRegistry, { organizationId: runtime.organization_id, callId: call.id, actorUserId: null }, toolName, idempotencyKey, agentToolPolicy, args);
+  return c.json(result, result.status === "denied" ? 403 : 200);
+});
+
+// ── Phone Operations CRM — admin/dispatcher read/review + manual
+// correction surfaces (Section 43-48). Same RBAC as every other call
+// route: admin+dispatcher, technician fully blocked. ─────────────────────
+
+const getCallCrmContextRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/calls/{id}/crm-context",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Matched Customer/Lead/Job, follow-ups, and tool actions taken for this call", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getCallCrmContextRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const organizationId = actorOrganizationId(c);
+  const call = await getCall(organizationId, Number(id));
+  if (!call) return c.json({ error: "Not found" }, 404);
+  const [customer, lead, job, followUps, toolInvocations] = await Promise.all([
+    call.customer_id ? getCustomerVoiceContext(organizationId, call.customer_id) : null,
+    call.lead_id ? getLeadVoiceContext(organizationId, call.lead_id) : null,
+    call.job_id ? getJobVoiceStatus(organizationId, call.job_id) : null,
+    listFollowUps(organizationId, { callId: call.id }),
+    listToolInvocations(organizationId, call.id),
+  ]);
+  return c.json({
+    match_confidence: call.match_confidence, match_source: call.match_source,
+    customer, lead, job, follow_ups: followUps, tool_invocations: toolInvocations,
+  }, 200);
+});
+
+const linkCallRoute = createRoute({
+  method: "post",
+  path: "/api/phone-operations/calls/{id}/link",
+  request: {
+    params: IdParam,
+    body: { content: { "application/json": { schema: z.object({
+      entity_type: z.enum(["customer", "lead", "job"]),
+      entity_id: z.number().int().nullable(),
+    }) } } },
+  },
+  responses: {
+    200: { description: "Linked (or unlinked, if entity_id is null)", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(linkCallRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const { entity_type, entity_id } = c.req.valid("json");
+  const organizationId = actorOrganizationId(c);
+  const source = `user:${me.id}`;
+  try {
+    if (entity_type === "customer") {
+      if (entity_id === null) await unlinkCallCustomer(organizationId, Number(id), source);
+      else await linkCallToCustomer(organizationId, Number(id), entity_id, source, "MANUAL");
+    } else if (entity_type === "lead") {
+      if (entity_id === null) return c.json({ error: "Unlinking a lead is not supported — link a different lead instead" }, 400);
+      await linkCallToLead(organizationId, Number(id), entity_id);
+    } else {
+      if (entity_id === null) return c.json({ error: "Unlinking a job is not supported — link a different job instead" }, 400);
+      await linkCallToJob(organizationId, Number(id), entity_id);
+    }
+    await recordPhoneOperationsAudit({ organizationId, eventType: "call_manually_linked", entityType: entity_type, entityId: entity_id, actorType: "user", actorUserId: me.id, details: { call_id: Number(id) } });
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof PhoneOperationsCrmError) return c.json({ error: err.message }, err.code === "not_found" ? 404 : 400);
+    throw err;
+  }
+});
+
+const getAvailabilityRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/availability",
+  request: { query: z.object({ date: z.string(), time: z.string().optional(), duration: z.string().optional() }) },
+  responses: {
+    200: { description: "Per-technician availability for the requested window", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getAvailabilityRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { date, time, duration } = c.req.valid("query");
+  const availability = await getAvailability(actorOrganizationId(c), date, time || "09:00", duration ? parseInt(duration, 10) : 60);
+  return c.json({ availability }, 200);
+});
+
+const followUpsQuery = z.object({ status: z.string().optional() });
+const listFollowUpsRoute = createRoute({
+  method: "get",
+  path: "/api/phone-operations/follow-ups",
+  request: { query: followUpsQuery },
+  responses: {
+    200: { description: "Follow-ups for this organization", content: { "application/json": { schema: z.any() } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listFollowUpsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { status } = c.req.valid("query");
+  const followUps = await listFollowUps(actorOrganizationId(c), { status });
+  return c.json({ follow_ups: followUps }, 200);
+});
+
+const completeFollowUpRoute = createRoute({
+  method: "post",
+  path: "/api/phone-operations/follow-ups/{id}/complete",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Completed", content: { "application/json": { schema: OkSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(completeFollowUpRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const done = await completeFollowUp(actorOrganizationId(c), Number(id));
+  if (!done) return c.json({ error: "Not found" }, 404);
+  return c.json({ ok: true }, 200);
+});
+
+const createFollowUpRoute = createRoute({
+  method: "post",
+  path: "/api/phone-operations/calls/{id}/follow-ups",
+  request: {
+    params: IdParam,
+    body: { content: { "application/json": { schema: z.object({
+      note: z.string().min(1).max(2000),
+      due_date: z.string().nullable().optional(),
+      assigned_user_id: z.number().int().nullable().optional(),
+    }) } } },
+  },
+  responses: {
+    201: { description: "Follow-up created", content: { "application/json": { schema: z.any() } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(createFollowUpRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPhoneOperationsCalls(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const data = c.req.valid("json");
+  const organizationId = actorOrganizationId(c);
+  const call = await getCall(organizationId, Number(id));
+  if (!call) return c.json({ error: "Not found" }, 404);
+  try {
+    const followUp = await createFollowUp(organizationId, call.id, {
+      customerId: call.customer_id, leadId: call.lead_id, jobId: call.job_id,
+      assignedUserId: data.assigned_user_id ?? null, dueDate: data.due_date ?? null, note: data.note,
+      createdByType: "user", createdByUserId: me.id,
+    });
+    return c.json({ follow_up: followUp }, 201);
+  } catch (err) {
+    if (err instanceof PhoneOperationsCrmError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
 });
 
 const publishSettingRoute = createRoute({

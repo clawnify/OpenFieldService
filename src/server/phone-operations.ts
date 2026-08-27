@@ -355,18 +355,27 @@ export interface VoiceAgent {
   instructions: string;
   is_default: boolean;
   status: string;
+  /** Phase 16 — the exact set of Phone Operations CRM tool names this
+   *  AGENT VERSION may invoke (see phone-operations-crm.ts's tool
+   *  registry). Versioned like every other column here: changing it
+   *  publishes a new agent version and never rewrites what an
+   *  already-run call's own frozen `voice_agent_snapshot` recorded. */
+  tool_policy: string[];
   effective_from: string;
   effective_until: string | null;
   created_by: number | null;
   created_at: string;
 }
 
-interface VoiceAgentRow extends Omit<VoiceAgent, "is_default"> {
+interface VoiceAgentRow extends Omit<VoiceAgent, "is_default" | "tool_policy"> {
   is_default: number;
+  tool_policy: string;
 }
 
 function toAgent(row: VoiceAgentRow): VoiceAgent {
-  return { ...row, is_default: !!row.is_default };
+  let toolPolicy: string[] = [];
+  try { toolPolicy = JSON.parse(row.tool_policy); } catch { /* malformed policy never crashes a read — resolves to no tools */ }
+  return { ...row, is_default: !!row.is_default, tool_policy: Array.isArray(toolPolicy) ? toolPolicy : [] };
 }
 
 /** Every agent version currently in effect (one row per distinct `name`),
@@ -415,6 +424,7 @@ export interface SaveVoiceAgentInput {
   instructions: string;
   is_default: boolean;
   status: string;
+  tool_policy: string[];
   effectiveFrom?: string;
   actorId: number;
 }
@@ -452,11 +462,11 @@ export async function saveVoiceAgent(input: SaveVoiceAgentInput): Promise<VoiceA
     await run("UPDATE voice_agents SET effective_until = ? WHERE id = ?", [effectiveFrom, latest.id]);
   }
   await run(
-    `INSERT INTO voice_agents (organization_id, name, language, voice, model, instructions, is_default, status, effective_from, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO voice_agents (organization_id, name, language, voice, model, instructions, is_default, status, tool_policy, effective_from, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.organizationId, name, input.language, input.voice, input.model, input.instructions,
-      input.is_default ? 1 : 0, input.status, effectiveFrom, input.actorId,
+      input.is_default ? 1 : 0, input.status, JSON.stringify(input.tool_policy ?? []), effectiveFrom, input.actorId,
     ]
   );
   const row = await get<VoiceAgentRow>(
@@ -580,6 +590,14 @@ export interface Call {
   end_reason: string;
   duration_seconds: number | null;
   created_at: string;
+  /** Phase 16 — CRM linkage. Nullable/independent (a call may link to a
+   *  Customer, a Lead, a Job, any combination, or none) — see
+   *  phone-operations-crm.ts for how these are set. */
+  customer_id: number | null;
+  lead_id: number | null;
+  job_id: number | null;
+  match_confidence: "EXACT_PHONE" | "MANUAL" | "UNKNOWN";
+  match_source: string;
 }
 
 interface CallRow extends Omit<Call, "voice_agent_snapshot"> {
@@ -594,7 +612,11 @@ function toCall(row: CallRow): Call {
 
 function snapshotAgent(agent: VoiceAgent | null): Record<string, unknown> {
   if (!agent) return {};
-  return { id: agent.id, name: agent.name, language: agent.language, voice: agent.voice, model: agent.model, instructions: agent.instructions };
+  // Phase 16: tool_policy is frozen here too — the ONE place invokeTool()
+  // reads a call's permitted tools from (see phone-operations-crm.ts), so a
+  // later edit to this agent's live tool_policy can never retroactively
+  // grant or revoke capability on an already-started call.
+  return { id: agent.id, name: agent.name, language: agent.language, voice: agent.voice, model: agent.model, instructions: agent.instructions, tool_policy: agent.tool_policy };
 }
 
 /** Every gate a new call must pass before OFS will create/accept it —
