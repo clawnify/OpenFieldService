@@ -83,8 +83,14 @@ export interface QuoteWorkflowRow {
 export interface TransitionQuoteInput {
   toStatus: string;
   /** Real, server-resolved actor id — never a value trusted from a request
-   *  body. */
-  actorUserId: number;
+   *  body. `null` for a system/customer-triggered transition with no
+   *  staff actor (Phase 18 — a customer accepting via a public Good/
+   *  Better/Best share link) — mirrors contracts.ts's own
+   *  `transitionContractInternal(..., null, "Derived from signature
+   *  request completion")` precedent for the identical "publicly-triggered
+   *  status change" shape. `quote_status_history.actor_user_id` is
+   *  already nullable for exactly this reason. */
+  actorUserId: number | null;
   /** Real, server-resolved organization id — a quote belonging to a
    *  different organization is treated as not found. */
   organizationId: number;
@@ -93,6 +99,15 @@ export interface TransitionQuoteInput {
    *  significant should always carry a stated reason, unlike Job's
    *  optional cancel reason. */
   reason?: string;
+  /** Phase 18 (Section 22/25) — when toStatus === "accepted" and the
+   *  accepted version has Good/Better/Best options, this is the exact
+   *  option the customer (or staff, recording a selection) chose. Stored
+   *  permanently on `quotes.accepted_option_id`, the same "explicit,
+   *  permanent snapshot, never re-inferred" discipline as
+   *  `accepted_version_id` itself. `undefined`/omitted for an ordinary
+   *  non-Good/Better/Best acceptance — `accepted_option_id` simply stays
+   *  NULL, exactly like every pre-Phase-18 accepted Quote. */
+  acceptedOptionId?: number | null;
 }
 
 export interface QuoteTransitionOutcome {
@@ -159,15 +174,16 @@ export async function transitionQuote(
     throw new QuoteWorkflowError("missing_data", `A reason is required to mark a quote as ${toStatus}`);
   }
 
-  return transitionQuoteInternal(db, quote, toStatus, input.actorUserId, input.reason ?? "");
+  return transitionQuoteInternal(db, quote, toStatus, input.actorUserId, input.reason ?? "", input.acceptedOptionId ?? null);
 }
 
 async function transitionQuoteInternal(
   db: D1Database,
   quote: QuoteWorkflowRow,
   toStatus: QuoteStatus,
-  actorUserId: number,
-  reason: string
+  actorUserId: number | null,
+  reason: string,
+  acceptedOptionId: number | null = null
 ): Promise<QuoteTransitionOutcome> {
   // accepted_version_id (hardening addendum): an EXPLICIT, permanent
   // snapshot of quote.current_version_id at this exact moment — not just an
@@ -175,12 +191,16 @@ async function transitionQuoteInternal(
   // (true today, since createQuoteRevision() structurally excludes
   // "accepted", but Phase 13 should be able to reference an exact accepted
   // version without depending on that invariant holding forever).
+  // accepted_by stays NULL for a customer self-service acceptance (Phase
+  // 18's public Good/Better/Best selection, actorUserId===null) — no staff
+  // member "recorded" it, which is itself the accurate, honest fact; the
+  // column's own type (`number | null`) already allows this.
   const extraSet = toStatus === "accepted"
-    ? ", accepted_by = ?, accepted_at = datetime('now'), accepted_version_id = ?"
+    ? ", accepted_by = ?, accepted_at = datetime('now'), accepted_version_id = ?, accepted_option_id = ?"
     : toStatus === "rejected"
       ? ", rejected_reason = ?"
       : "";
-  const extraParams = toStatus === "accepted" ? [actorUserId, quote.current_version_id] : toStatus === "rejected" ? [reason] : [];
+  const extraParams = toStatus === "accepted" ? [actorUserId, quote.current_version_id, acceptedOptionId] : toStatus === "rejected" ? [reason] : [];
 
   const updateStmt = db.prepare(
     `UPDATE quotes SET status = ?, updated_at = datetime('now')${extraSet} WHERE id = ? AND status = ?`

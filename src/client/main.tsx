@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from "./auth-context";
 import { LoginPage } from "./components/login";
 import { SignContract } from "./components/sign-contract";
 import { PublicPay } from "./components/public-pay";
+import { EstimateSelection } from "./components/estimate-selection";
 import "./styles.css";
 
 function Root() {
@@ -26,12 +27,18 @@ const signMatch = window.location.pathname.match(/^\/sign\/([^/]+)$/);
 // Phase 13B — same standalone-page precedent as /sign/:token above, for
 // the public online-payment link (see public-pay.tsx's own doc comment).
 const payMatch = window.location.pathname.match(/^\/pay\/([^/]+)$/);
+// Phase 18 — same standalone-page precedent, for the public Good/Better/
+// Best estimate comparison/selection link (see estimate-selection.tsx's
+// own doc comment).
+const estimateMatch = window.location.pathname.match(/^\/estimate\/([^/]+)$/);
 
 render(
   signMatch ? (
     <SignContract token={decodeURIComponent(signMatch[1])} />
   ) : payMatch ? (
     <PublicPay token={decodeURIComponent(payMatch[1])} />
+  ) : estimateMatch ? (
+    <EstimateSelection token={decodeURIComponent(estimateMatch[1])} />
   ) : (
     <AuthProvider>
       <Root />

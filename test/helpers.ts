@@ -200,6 +200,18 @@ export async function resetDatabase() {
     "DELETE FROM quotes",
     "DELETE FROM quote_line_items",
     "DELETE FROM quote_status_history",
+    // Phase 18 (Good/Better/Best) — all cascade from quote_versions/
+    // quote_options (ON DELETE CASCADE) once `quotes` above is gone, but
+    // get explicit entries anyway per this file's established convention.
+    // quote_share_events (child of quote_share_links) and quote_share_links
+    // (child of quotes/quote_versions/quote_options) are listed before
+    // quote_versions itself is deleted, same "children of quotes before the
+    // quote_versions delete" ordering as the pre-existing entries here.
+    "DELETE FROM quote_share_events",
+    "DELETE FROM quote_share_links",
+    "DELETE FROM quote_option_audit",
+    "DELETE FROM quote_option_line_items",
+    "DELETE FROM quote_options",
     "DELETE FROM quote_versions",
     // leads (Phase 8.0) has no FK relationship requiring a particular
     // ordering here — every FK it holds (assigned_user_id/

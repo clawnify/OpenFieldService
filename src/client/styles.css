@@ -1635,6 +1635,78 @@ body {
 
 .auth-card form .form-group { margin-bottom: 14px; }
 
+/* ── Public Estimate selection page (estimate-selection.tsx, Phase 18) ───
+   Reuses .auth-title/.auth-subtitle/.auth-error/.btn-block from the auth-
+   page family above, but needs its own wide, multi-card layout instead of
+   a single narrow .auth-card — a Good/Better/Best comparison is the one
+   public page that must show 1-4 options side by side on desktop while
+   staying a single scrollable column on mobile (Section 42: "avoid wide
+   desktop-only comparison layouts" — the grid's minmax collapses to one
+   column on its own, no separate breakpoint override needed). */
+.estimate-page { min-height: 100vh; padding: 32px 20px; background: var(--bg); }
+.estimate-wrap { max-width: 1100px; margin: 0 auto; }
+.estimate-header { text-align: center; margin-bottom: 28px; }
+.estimate-status-card {
+  max-width: 480px; margin: 80px auto; text-align: center;
+  background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow-lg); padding: 32px 24px;
+}
+.estimate-options-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 20px;
+  align-items: stretch;
+}
+.estimate-option-card {
+  position: relative;
+  display: flex; flex-direction: column;
+  background: var(--card-bg); border: 2px solid var(--border); border-radius: var(--radius);
+  padding: 20px; box-shadow: var(--shadow);
+}
+.estimate-option-card.recommended { border-color: var(--accent, #16a34a); }
+.estimate-option-card.selected { border-color: var(--accent, #16a34a); box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.15); }
+.estimate-recommended-badge {
+  position: absolute; top: -11px; left: 16px;
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--accent, #16a34a); color: #fff; font-size: 11px; font-weight: 700;
+  padding: 3px 10px; border-radius: 999px;
+}
+.estimate-option-tier { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-top: 4px; }
+.estimate-option-name { font-size: 18px; font-weight: 700; margin: 4px 0; }
+.estimate-option-headline { font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; }
+.estimate-highlights { list-style: none; padding: 0; margin: 8px 0; display: flex; flex-direction: column; gap: 6px; }
+.estimate-highlights li { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); }
+.estimate-line-items { list-style: none; padding: 0; margin: 10px 0; flex: 1; display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--border-subtle); padding-top: 10px; }
+.estimate-line-items li { font-size: 13px; }
+.estimate-option-totals { margin: 10px 0; border-top: 1px solid var(--border-subtle); padding-top: 10px; }
+.estimate-total-row { display: flex; justify-content: space-between; font-size: 13px; padding: 2px 0; }
+.estimate-total-main { font-size: 17px; font-weight: 700; margin-top: 4px; }
+.estimate-confirm-bar {
+  position: sticky; bottom: 16px; margin-top: 24px;
+  display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; align-items: center;
+  background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow-lg); padding: 14px; max-width: 480px; margin-left: auto; margin-right: auto;
+}
+.estimate-name-input { flex: 1; min-width: 180px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 14px; }
+@media (max-width: 480px) {
+  .estimate-page { padding: 20px 12px; }
+  .estimate-option-card { padding: 16px; }
+}
+
+/* ── Admin/Dispatcher Estimate builder (quote-option-card.tsx /
+   quote-options-builder.tsx, Phase 18) ─────────────────────────────── */
+.quote-options-list { display: flex; flex-direction: column; gap: 16px; }
+.quote-option-card-admin { padding: 16px; }
+.quote-option-totals-row {
+  display: flex; flex-wrap: wrap; gap: 16px; justify-content: flex-end;
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-subtle);
+  font-size: 13px;
+}
+.quote-share-link-box {
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
 .auth-error {
   background: #fef2f2;
   color: var(--danger);

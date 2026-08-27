@@ -4,6 +4,7 @@ import { formatCents, formatCentsForInput, parseDollarsToCents } from "../money"
 import { QUOTE_STATUS_LABELS, LINE_ITEM_CATEGORIES, LINE_ITEM_CATEGORY_LABELS, DISCOUNT_TYPES } from "../quote-status";
 import { ConfirmDialog } from "./confirm-dialog";
 import { RelatedContracts } from "./related-contracts";
+import { QuoteOptionsBuilder } from "./quote-options-builder";
 import { PricebookPicker } from "./pricebook-picker";
 import { ArrowLeft, Trash2, Edit3, Plus, X, BookOpen } from "lucide-preact";
 import type { Quote, QuoteVersionDetail, QuoteVersion, QuoteStatusHistoryRow, QuoteLineItem, DiscountType, LineItemCategory, PricebookItem } from "../types";
@@ -529,6 +530,8 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
               </table>
             </div>
           </div>
+
+          <QuoteOptionsBuilder quoteId={quote.id} isDraft={isDraft} quoteStatus={quote.status} acceptedOptionId={quote.accepted_option_id} />
 
           <RelatedContracts quoteId={quote.id} navigate={navigate} />
         </div>

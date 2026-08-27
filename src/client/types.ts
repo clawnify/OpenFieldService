@@ -197,6 +197,7 @@ export interface Quote {
   accepted_by: number | null;
   accepted_at: string | null;
   accepted_version_id: number | null;
+  accepted_option_id: number | null;
   rejected_reason: string;
   created_by: number | null;
   created_at: string;
@@ -787,4 +788,102 @@ export interface PricebookItemAuditEntry {
   actor_user_id: number | null;
   details: string;
   created_at: string;
+}
+
+// Phase 18 — Good / Better / Best Estimate Options.
+export const OPTION_TIERS = ["GOOD", "BETTER", "BEST", "CUSTOM"] as const;
+export type OptionTier = typeof OPTION_TIERS[number];
+
+export interface QuoteOptionLineItem {
+  id: number;
+  quote_option_id: number;
+  description: string;
+  category: string;
+  quantity: number;
+  unit: string;
+  unit_price_cents: number;
+  cost_cents?: number | null;
+  total_cents: number;
+  sort_order: number;
+  asset_id: number | null;
+  taxable: number;
+  pricebook_item_id: number | null;
+}
+
+export interface QuoteOptionCostSummary {
+  totalCostCents: number;
+  totalSellCents: number;
+  grossProfitCents: number;
+  grossMarginPercent: number;
+  markupPercent: number;
+}
+
+export interface QuoteOption {
+  id: number;
+  quote_version_id: number;
+  tier: OptionTier;
+  name: string;
+  headline: string;
+  description: string;
+  internal_notes?: string;
+  sort_order: number;
+  recommended: boolean;
+  discount_type: string;
+  discount_percent: number;
+  discount_cents: number;
+  subtotal_cents: number;
+  tax_rate: number;
+  tax_amount_cents: number;
+  total_cents: number;
+  highlights: string[];
+  created_at: string;
+  updated_at: string;
+  line_items: QuoteOptionLineItem[];
+  cost_summary?: QuoteOptionCostSummary;
+}
+
+export interface QuoteShareLink {
+  id: number;
+  quote_id: number;
+  quote_version_id: number;
+  status: string;
+  expires_at: string;
+  selected_option_id: number | null;
+  selected_at: string | null;
+  selector_name: string;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PublicQuoteOption {
+  id: number;
+  quote_version_id: number;
+  tier: OptionTier;
+  name: string;
+  headline: string;
+  description: string;
+  sort_order: number;
+  recommended: boolean;
+  discount_type: string;
+  discount_percent: number;
+  discount_cents: number;
+  subtotal_cents: number;
+  tax_rate: number;
+  tax_amount_cents: number;
+  total_cents: number;
+  highlights: string[];
+  created_at: string;
+  updated_at: string;
+  line_items: Omit<QuoteOptionLineItem, "cost_cents">[];
+  tax_breakdown: { components: { code: string; name: string; rate_percent: number; amount_cents: number }[] } | null;
+}
+
+export interface PublicQuoteView {
+  quote_identifier: string;
+  customer_name: string;
+  status: string;
+  expires_at: string;
+  already_selected_option_id: number | null;
+  options: PublicQuoteOption[];
 }

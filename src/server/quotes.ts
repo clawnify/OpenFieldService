@@ -65,6 +65,12 @@ export interface Quote {
    *  Phase 13 (Contracts/E-Sign) should reference THIS, not
    *  `current_version_id`, when identifying exactly what was approved. */
   accepted_version_id: number | null;
+  /** Phase 18 — explicit, permanent snapshot of which Good/Better/Best
+   *  option the customer (or staff, recording a selection) chose, set once
+   *  by transitionQuote() alongside accepted_version_id. NULL for every
+   *  pre-Phase-18 accepted Quote and for any Quote accepted the ordinary
+   *  way without ever having options — both are valid, unambiguous states. */
+  accepted_option_id: number | null;
   rejected_reason: string;
   created_by: number | null;
   created_at: string;
@@ -306,7 +312,7 @@ function normalizeLineItem(input: LineItemInput, sortOrder: number, defaultTaxab
  *  snapshot rather than surfacing a spurious conflict for what is, from the
  *  caller's perspective, an ordinary single-user edit that merely happened
  *  to land a few milliseconds after someone else's. */
-async function recomputeAndStoreVersionTotals(organizationId: number, versionId: number): Promise<QuoteVersion> {
+export async function recomputeAndStoreVersionTotals(organizationId: number, versionId: number): Promise<QuoteVersion> {
   const profile = await resolveTaxProfile(organizationId);
   const MAX_ATTEMPTS = 3;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
@@ -410,6 +416,20 @@ export async function createQuote(organizationId: number, actorUserId: number, i
 async function insertLineItem(organizationId: number, customerId: number, versionId: number, input: LineItemInput, sortOrder: number): Promise<number> {
   if (input.asset_id !== undefined && input.asset_id !== null) {
     await assertAssetBelongsToCustomer(organizationId, customerId, input.asset_id);
+  }
+  // Phase 18 architecture-review finding: a quote_version's own top-level
+  // quote_line_items and its Good/Better/Best quote_options are mutually
+  // exclusive (see quote-options.ts#createOption's matching guard in the
+  // other direction) — a version that already has options must not also
+  // grow plain line items, which would create the same "which is
+  // authoritative" ambiguity from the opposite side. Harmless no-op for
+  // createQuote's own initial-line-items loop (a brand-new quote can never
+  // have options yet). Raw table check, not an import of quote-options.ts,
+  // to avoid a circular module dependency (quote-options.ts already
+  // imports from this file).
+  const existingOptions = await get<{ n: number }>("SELECT COUNT(*) as n FROM quote_options WHERE quote_version_id = ?", [versionId]);
+  if (existingOptions?.n) {
+    throw new QuoteError("invalid_input", "This quote has Good/Better/Best options — add lines to an option instead of the plain line-item list (the two are mutually exclusive for the same version)");
   }
   const snapshot = await resolvePricebookSnapshot(organizationId, input.pricebook_item_id);
   const profile = await resolveTaxProfile(organizationId);

@@ -331,7 +331,7 @@ function allocateComponents(components: TaxComponent[], combinedRatePercent: num
 
 // ── Snapshots (Section 10) ──────────────────────────────────────────────
 
-export type TaxSnapshotDocumentType = "quote_version" | "invoice";
+export type TaxSnapshotDocumentType = "quote_version" | "invoice" | "quote_option";
 
 export interface TaxSnapshot {
   id: number;

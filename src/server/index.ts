@@ -143,6 +143,34 @@ import {
   transitionQuote,
 } from "./quote-workflow.js";
 import {
+  OPTION_TIERS,
+  QuoteOptionError,
+  canViewOptionCost,
+  computeOptionCostSummary,
+  stripLineCost,
+  type QuoteOption,
+  type QuoteOptionLineItem,
+  createOption as createQuoteOption,
+  updateOption as updateQuoteOption,
+  deleteOption as deleteQuoteOption,
+  duplicateOption as duplicateQuoteOption,
+  reorderOptions as reorderQuoteOptions,
+  listOptions as listQuoteOptions,
+  getOption as getQuoteOption,
+  listOptionAudit as listQuoteOptionAudit,
+  addOptionLineItem,
+  updateOptionLineItem,
+  deleteOptionLineItem,
+  generateShareLink,
+  resendShareLink,
+  listShareLinks,
+  getPublicQuoteView,
+  commitSelection,
+  staffSelectOption,
+  getEstimatePdfData,
+} from "./quote-options.js";
+import { renderEstimatePdf } from "./estimate-pdf.js";
+import {
   SIGNATURE_METHODS,
   SIGNER_ROLES,
   ContractError,
@@ -4368,6 +4396,7 @@ const QuoteSchema = z.object({
   accepted_by: z.number().int().nullable(),
   accepted_at: z.string().nullable(),
   accepted_version_id: z.number().int().nullable(),
+  accepted_option_id: z.number().int().nullable(),
   rejected_reason: z.string(),
   created_by: z.number().int().nullable(),
   created_at: z.string(),
@@ -4860,6 +4889,614 @@ app.openapi(getQuoteStatusHistoryRoute, async (c) => {
   if (!quote) return c.json({ error: "Quote not found" }, 404);
   const history = await getQuoteStatusHistory(quote.id);
   return c.json({ history }, 200);
+});
+
+// ── Good / Better / Best Estimate Options (Phase 18) ────────────────────
+//
+// Lives inside the existing Quote/Version model (Section 5) — an Option is
+// a self-contained commercial alternative attached to a Quote's CURRENT
+// version, editable only while the Quote is still draft (same "sent is
+// historically stable" rule as plain Quote line items). RBAC is the SAME
+// canManageQuotes policy as the rest of Quotes (admin/dispatcher manage,
+// technician blocked) — no novel access tier invented (Section 45).
+// Cost/margin (Section 16/17) is stripped server-side (canViewOptionCost,
+// admin-only) at serialization, not hidden client-side — same discipline
+// as Phase 17's Pricebook stripCost().
+
+const QuoteOptionLineItemFullSchema = z.object({
+  id: z.number().int(),
+  quote_option_id: z.number().int(),
+  description: z.string(),
+  category: z.string(),
+  quantity: z.number(),
+  unit: z.string(),
+  unit_price_cents: z.number().int(),
+  cost_cents: z.number().int().nullable(),
+  total_cents: z.number().int(),
+  sort_order: z.number().int(),
+  asset_id: z.number().int().nullable(),
+  taxable: z.number().int(),
+  pricebook_item_id: z.number().int().nullable(),
+}).openapi("QuoteOptionLineItemFull");
+
+const QuoteOptionLineItemPublicSchema = QuoteOptionLineItemFullSchema.omit({ cost_cents: true }).openapi("QuoteOptionLineItemPublic");
+const QuoteOptionLineItemResponseSchema = z.union([QuoteOptionLineItemFullSchema, QuoteOptionLineItemPublicSchema]);
+
+const CostSummarySchema = z.object({
+  totalCostCents: z.number().int(), totalSellCents: z.number().int(), grossProfitCents: z.number().int(),
+  grossMarginPercent: z.number(), markupPercent: z.number(),
+}).openapi("QuoteOptionCostSummary");
+
+const QuoteOptionSchema = z.object({
+  id: z.number().int(),
+  quote_version_id: z.number().int(),
+  tier: z.string(),
+  name: z.string(),
+  headline: z.string(),
+  description: z.string(),
+  internal_notes: z.string(),
+  sort_order: z.number().int(),
+  recommended: z.boolean(),
+  discount_type: z.string(),
+  discount_percent: z.number(),
+  discount_cents: z.number().int(),
+  subtotal_cents: z.number().int(),
+  tax_rate: z.number(),
+  tax_amount_cents: z.number().int(),
+  total_cents: z.number().int(),
+  highlights: z.array(z.string()),
+  created_at: z.string(),
+  updated_at: z.string(),
+  line_items: z.array(QuoteOptionLineItemResponseSchema),
+  cost_summary: CostSummarySchema.optional(),
+}).openapi("QuoteOption");
+
+const QuoteOptionInputSchema = z.object({
+  tier: z.enum(OPTION_TIERS as unknown as [string, ...string[]]).optional(),
+  name: z.string().max(200).optional(),
+  headline: z.string().max(200).optional(),
+  description: z.string().max(4000).optional(),
+  internal_notes: z.string().max(4000).optional(),
+  sort_order: z.number().int().optional(),
+  recommended: z.boolean().optional(),
+  discount_type: z.enum(DISCOUNT_TYPES as unknown as [string, ...string[]]).optional(),
+  discount_percent: z.number().min(0).max(100).optional(),
+  discount_cents: z.number().int().min(0).optional(),
+  highlights: z.array(z.string().max(200)).max(20).optional(),
+}).strict();
+const QuoteOptionUpdateInputSchema = QuoteOptionInputSchema.partial().strict();
+
+const QuoteOptionLineItemInputSchema = z.object({
+  description: z.string().max(500).optional(),
+  category: z.enum(LINE_ITEM_CATEGORIES as unknown as [string, ...string[]]).optional(),
+  quantity: z.number().positive().optional(),
+  unit: z.string().max(50).optional(),
+  unit_price_cents: z.number().int().min(0).optional(),
+  sort_order: z.number().int().optional(),
+  asset_id: z.number().int().nullable().optional(),
+  taxable: z.boolean().optional(),
+  pricebook_item_id: z.number().int().nullable().optional(),
+}).strict();
+const QuoteOptionLineItemUpdateInputSchema = QuoteOptionLineItemInputSchema.partial().strict();
+
+const QuoteShareLinkSchema = z.object({
+  id: z.number().int(),
+  quote_id: z.number().int(),
+  quote_version_id: z.number().int(),
+  status: z.string(),
+  expires_at: z.string(),
+  selected_option_id: z.number().int().nullable(),
+  selected_at: z.string().nullable(),
+  selector_name: z.string(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).openapi("QuoteShareLink");
+
+function quoteOptionErrorResponse(err: QuoteOptionError): { body: { error: string }; status: 400 | 404 | 409 } {
+  if (err.code === "not_found" || err.code === "invalid_pricebook_item" || err.code === "invalid_asset") return { body: { error: err.message }, status: 404 };
+  if (err.code === "not_draft" || err.code === "conflict" || err.code === "already_selected" || err.code === "no_options" || err.code === "not_sent") return { body: { error: err.message }, status: 409 };
+  return { body: { error: err.message }, status: 400 };
+}
+
+/** Serializes an option + its line items for the response — cost stripped
+ *  for any role without canViewOptionCost, and the derived cost summary
+ *  (Section 17) is computed and attached ONLY for an authorized caller,
+ *  never sent to a dispatcher/technician/public viewer at all. */
+function serializeOption(option: QuoteOption, lineItems: QuoteOptionLineItem[], includeCost: boolean) {
+  const line_items = includeCost ? lineItems : lineItems.map(stripLineCost);
+  const cost_summary = includeCost ? computeOptionCostSummary(lineItems) : undefined;
+  return { ...option, line_items, cost_summary };
+}
+
+const listQuoteOptionsRoute = createRoute({
+  method: "get",
+  path: "/api/quotes/{id}/options",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Options", content: { "application/json": { schema: z.object({ options: z.array(QuoteOptionSchema) }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listQuoteOptionsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const includeCost = canViewOptionCost(me.role);
+  try {
+    const { options, lineItems } = await listQuoteOptions(actorOrganizationId(c), Number(id));
+    return c.json({ options: options.map((o) => serializeOption(o, lineItems.get(o.id) ?? [], includeCost)) }, 200);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) return c.json({ error: err.message }, err.code === "not_found" ? 404 : 400);
+    throw err;
+  }
+});
+
+const createQuoteOptionRoute = createRoute({
+  method: "post",
+  path: "/api/quotes/{id}/options",
+  request: { params: IdParam, body: { content: { "application/json": { schema: QuoteOptionInputSchema } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ option: QuoteOptionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Quote is not in draft status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(createQuoteOptionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const option = await createQuoteOption(actorOrganizationId(c), me.id, Number(id), c.req.valid("json"));
+    return c.json({ option: serializeOption(option, [], canViewOptionCost(me.role)) }, 201);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) { const { body, status } = quoteOptionErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+const getQuoteOptionRoute = createRoute({
+  method: "get",
+  path: "/api/quotes/{id}/options/{optionId}",
+  request: { params: z.object({ id: z.string(), optionId: z.string() }) },
+  responses: {
+    200: { description: "Option detail", content: { "application/json": { schema: z.object({ option: QuoteOptionSchema }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getQuoteOptionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id, optionId } = c.req.valid("param");
+  try {
+    const found = await getQuoteOption(actorOrganizationId(c), Number(id), Number(optionId));
+    if (!found) return c.json({ error: "Option not found" }, 404);
+    return c.json({ option: serializeOption(found.option, found.lineItems, canViewOptionCost(me.role)) }, 200);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) return c.json({ error: err.message }, 404);
+    throw err;
+  }
+});
+
+const updateQuoteOptionRoute = createRoute({
+  method: "put",
+  path: "/api/quotes/{id}/options/{optionId}",
+  request: { params: z.object({ id: z.string(), optionId: z.string() }), body: { content: { "application/json": { schema: QuoteOptionUpdateInputSchema } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ option: QuoteOptionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Quote is not in draft status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(updateQuoteOptionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id, optionId } = c.req.valid("param");
+  try {
+    const option = await updateQuoteOption(actorOrganizationId(c), me.id, Number(id), Number(optionId), c.req.valid("json"));
+    const lineItems = await query<QuoteOptionLineItem>("SELECT * FROM quote_option_line_items WHERE quote_option_id = ? ORDER BY sort_order ASC, id ASC", [Number(optionId)]);
+    return c.json({ option: serializeOption(option, lineItems, canViewOptionCost(me.role)) }, 200);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) { const { body, status } = quoteOptionErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+const deleteQuoteOptionRoute = createRoute({
+  method: "delete",
+  path: "/api/quotes/{id}/options/{optionId}",
+  request: { params: z.object({ id: z.string(), optionId: z.string() }) },
+  responses: {
+    200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Quote is not in draft status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(deleteQuoteOptionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id, optionId } = c.req.valid("param");
+  try {
+    await deleteQuoteOption(actorOrganizationId(c), Number(id), Number(optionId));
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) { const { body, status } = quoteOptionErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+const duplicateQuoteOptionRoute = createRoute({
+  method: "post",
+  path: "/api/quotes/{id}/options/{optionId}/duplicate",
+  request: { params: z.object({ id: z.string(), optionId: z.string() }), body: { content: { "application/json": { schema: z.object({ tier: z.enum(OPTION_TIERS as unknown as [string, ...string[]]).optional() }).strict() } } } },
+  responses: {
+    201: { description: "Duplicated", content: { "application/json": { schema: z.object({ option: QuoteOptionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Quote is not in draft status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(duplicateQuoteOptionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id, optionId } = c.req.valid("param");
+  const { tier } = c.req.valid("json");
+  try {
+    const option = await duplicateQuoteOption(actorOrganizationId(c), me.id, Number(id), Number(optionId), tier);
+    const lineItems = await query<QuoteOptionLineItem>("SELECT * FROM quote_option_line_items WHERE quote_option_id = ? ORDER BY sort_order ASC, id ASC", [option.id]);
+    return c.json({ option: serializeOption(option, lineItems, canViewOptionCost(me.role)) }, 201);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) { const { body, status } = quoteOptionErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+const reorderQuoteOptionsRoute = createRoute({
+  method: "post",
+  path: "/api/quotes/{id}/options/reorder",
+  request: { params: IdParam, body: { content: { "application/json": { schema: z.object({ option_ids: z.array(z.number().int()).max(50) }).strict() } } } },
+  responses: {
+    200: { description: "Reordered", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Quote is not in draft status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(reorderQuoteOptionsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    await reorderQuoteOptions(actorOrganizationId(c), Number(id), c.req.valid("json").option_ids);
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) { const { body, status } = quoteOptionErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+const getQuoteOptionAuditRoute = createRoute({
+  method: "get",
+  path: "/api/quotes/{id}/options/{optionId}/audit",
+  request: { params: z.object({ id: z.string(), optionId: z.string() }) },
+  responses: {
+    200: { description: "Audit log", content: { "application/json": { schema: z.object({ audit: z.array(z.object({ id: z.number().int(), event_type: z.string(), actor_user_id: z.number().int().nullable(), details: z.string(), created_at: z.string() })) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getQuoteOptionAuditRoute, async (c) => {
+  const me = currentUser(c);
+  // Admin-only (not the wider canManageQuotes) — audit details can include
+  // price-change diffs, same "cost-tier surface" gating as Phase 17's own
+  // Pricebook audit route.
+  if (!canViewOptionCost(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id, optionId } = c.req.valid("param");
+  try {
+    const audit = await listQuoteOptionAudit(actorOrganizationId(c), Number(id), Number(optionId));
+    return c.json({ audit }, 200);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) return c.json({ error: err.message }, 404);
+    throw err;
+  }
+});
+
+const addQuoteOptionLineItemRoute = createRoute({
+  method: "post",
+  path: "/api/quotes/{id}/options/{optionId}/line-items",
+  request: { params: z.object({ id: z.string(), optionId: z.string() }), body: { content: { "application/json": { schema: QuoteOptionLineItemInputSchema } } } },
+  responses: {
+    201: { description: "Added", content: { "application/json": { schema: z.object({ option: QuoteOptionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Quote is not in draft status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(addQuoteOptionLineItemRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id, optionId } = c.req.valid("param");
+  try {
+    const option = await addOptionLineItem(actorOrganizationId(c), me.role, Number(id), Number(optionId), c.req.valid("json"));
+    const lineItems = await query<QuoteOptionLineItem>("SELECT * FROM quote_option_line_items WHERE quote_option_id = ? ORDER BY sort_order ASC, id ASC", [Number(optionId)]);
+    return c.json({ option: serializeOption(option, lineItems, canViewOptionCost(me.role)) }, 201);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) { const { body, status } = quoteOptionErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+const updateQuoteOptionLineItemRoute = createRoute({
+  method: "put",
+  path: "/api/quotes/{id}/options/{optionId}/line-items/{lineItemId}",
+  request: { params: z.object({ id: z.string(), optionId: z.string(), lineItemId: z.string() }), body: { content: { "application/json": { schema: QuoteOptionLineItemUpdateInputSchema } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ option: QuoteOptionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Quote is not in draft status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(updateQuoteOptionLineItemRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id, optionId, lineItemId } = c.req.valid("param");
+  try {
+    const option = await updateOptionLineItem(actorOrganizationId(c), me.role, Number(id), Number(optionId), Number(lineItemId), c.req.valid("json"));
+    const lineItems = await query<QuoteOptionLineItem>("SELECT * FROM quote_option_line_items WHERE quote_option_id = ? ORDER BY sort_order ASC, id ASC", [Number(optionId)]);
+    return c.json({ option: serializeOption(option, lineItems, canViewOptionCost(me.role)) }, 200);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) { const { body, status } = quoteOptionErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+const deleteQuoteOptionLineItemRoute = createRoute({
+  method: "delete",
+  path: "/api/quotes/{id}/options/{optionId}/line-items/{lineItemId}",
+  request: { params: z.object({ id: z.string(), optionId: z.string(), lineItemId: z.string() }) },
+  responses: {
+    200: { description: "Deleted", content: { "application/json": { schema: z.object({ option: QuoteOptionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Quote is not in draft status", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(deleteQuoteOptionLineItemRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id, optionId, lineItemId } = c.req.valid("param");
+  try {
+    const option = await deleteOptionLineItem(actorOrganizationId(c), Number(id), Number(optionId), Number(lineItemId));
+    const lineItems = await query<QuoteOptionLineItem>("SELECT * FROM quote_option_line_items WHERE quote_option_id = ? ORDER BY sort_order ASC, id ASC", [Number(optionId)]);
+    return c.json({ option: serializeOption(option, lineItems, canViewOptionCost(me.role)) }, 200);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) { const { body, status } = quoteOptionErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+const staffSelectQuoteOptionRoute = createRoute({
+  method: "post",
+  path: "/api/quotes/{id}/options/{optionId}/select",
+  request: { params: z.object({ id: z.string(), optionId: z.string() }) },
+  responses: {
+    200: { description: "Selected", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Quote is not sent, or already responded to", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(staffSelectQuoteOptionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id, optionId } = c.req.valid("param");
+  try {
+    await staffSelectOption(c.env.DB, actorOrganizationId(c), me.id, Number(id), Number(optionId));
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) { const { body, status } = quoteOptionErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+const createShareLinkRoute = createRoute({
+  method: "post",
+  path: "/api/quotes/{id}/share-links",
+  request: { params: IdParam },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ link: QuoteShareLinkSchema, token: z.string() }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "No options yet, or quote not in a shareable state", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(createShareLinkRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const { link, token } = await generateShareLink(c.env.DB, actorOrganizationId(c), me.id, Number(id));
+    return c.json({ link, token }, 201);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) { const { body, status } = quoteOptionErrorResponse(err); return c.json(body, status); }
+    if (err instanceof QuoteWorkflowError) return c.json({ error: err.message }, 409);
+    throw err;
+  }
+});
+
+const listShareLinksRoute = createRoute({
+  method: "get",
+  path: "/api/quotes/{id}/share-links",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Share links", content: { "application/json": { schema: z.object({ links: z.array(QuoteShareLinkSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listShareLinksRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const links = await listShareLinks(actorOrganizationId(c), Number(id));
+    return c.json({ links }, 200);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) return c.json({ error: err.message }, 404);
+    throw err;
+  }
+});
+
+const resendShareLinkRoute = createRoute({
+  method: "post",
+  path: "/api/quotes/{id}/share-links/{linkId}/resend",
+  request: { params: z.object({ id: z.string(), linkId: z.string() }) },
+  responses: {
+    200: { description: "Resent", content: { "application/json": { schema: z.object({ link: QuoteShareLinkSchema, token: z.string() }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(resendShareLinkRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id, linkId } = c.req.valid("param");
+  try {
+    const { link, token } = await resendShareLink(actorOrganizationId(c), me.id, Number(id), Number(linkId));
+    return c.json({ link, token }, 200);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) { const { body, status } = quoteOptionErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+// Phase 18 (Section 39/40) — professional Estimate PDF, rendered LIVE on
+// every request from current option data (same lifecycle decision already
+// made for Invoice PDF — see estimate-pdf.ts's own header comment for the
+// explicit disclosure: no frozen/snapshotted artifact exists for this
+// document). Same admin/dispatcher RBAC as every other Quote route; never
+// includes cost/margin/internal notes (Section 39).
+app.get("/api/quotes/:id/estimate-pdf", async (c) => {
+  const me = currentUser(c);
+  if (!canManageQuotes({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Quote not found" }, 404);
+  const organizationId = actorOrganizationId(c);
+  const data = await getEstimatePdfData(organizationId, id);
+  if (!data) return c.json({ error: "Quote not found, or has no version yet" }, 404);
+
+  const customer = await get<{ name: string; email: string; phone: string; address: string; city: string; state: string; zip: string }>(
+    "SELECT name, email, phone, address, city, state, zip FROM customers WHERE id = ?", [data.customerId]
+  );
+  const company = await getCompanyProfile(organizationId);
+  const logo = await getCompanyLogo(c.env, organizationId);
+  const bytes = await renderEstimatePdf({
+    quoteIdentifier: data.quoteIdentifier,
+    status: data.status,
+    expiresAt: data.expiresAt,
+    customer: customer ?? { name: "", email: "", phone: "", address: "", city: "", state: "", zip: "" },
+    company,
+    options: data.options,
+    logo: logo ? { bytes: logo.bytes, format: logo.contentType === "image/jpeg" ? "jpeg" : "png" } : null,
+  });
+
+  const disposition = c.req.query("mode") === "download" ? "attachment" : "inline";
+  return new Response(bytes.slice().buffer as ArrayBuffer, {
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `${disposition}; filename="Estimate-${data.quoteIdentifier}.pdf"`,
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'; sandbox",
+      "Cache-Control": "private, no-store",
+    },
+  });
+});
+
+// ── Public Estimate view / selection (token-gated, unauthenticated) ────
+// Same discipline as the public Contract-signing routes above: a single
+// generic "invalid or expired" error for every failure mode (no token
+// existing, wrong hash, expired, cancelled) — never distinguishes them, no
+// enumeration signal. No organization_id is ever accepted from the client;
+// every value is resolved entirely from the token itself.
+
+const GENERIC_SHARE_LINK_ERROR = "This estimate link is invalid or has expired";
+
+const PublicQuoteOptionSchema = QuoteOptionSchema.omit({ internal_notes: true, cost_summary: true }).extend({
+  line_items: z.array(QuoteOptionLineItemPublicSchema),
+  tax_breakdown: z.object({ components: z.array(z.object({ code: z.string(), name: z.string(), rate_percent: z.number(), amount_cents: z.number().int() })) }).nullable(),
+});
+
+const PublicQuoteViewSchema = z.object({
+  quote_identifier: z.string(),
+  customer_name: z.string(),
+  status: z.string(),
+  expires_at: z.string(),
+  already_selected_option_id: z.number().int().nullable(),
+  options: z.array(PublicQuoteOptionSchema),
+});
+
+const getPublicQuoteViewRoute = createRoute({
+  method: "get",
+  path: "/api/public/quotes/estimate/{token}",
+  request: { params: z.object({ token: z.string() }) },
+  responses: {
+    200: { description: "Estimate view", content: { "application/json": { schema: z.object({ view: PublicQuoteViewSchema }) } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getPublicQuoteViewRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const view = await getPublicQuoteView(token);
+  if (!view) return c.json({ error: GENERIC_SHARE_LINK_ERROR }, 404);
+  return c.json({ view }, 200);
+});
+
+const selectPublicOptionRoute = createRoute({
+  method: "post",
+  path: "/api/public/quotes/estimate/{token}/select",
+  request: {
+    params: z.object({ token: z.string() }),
+    body: { content: { "application/json": { schema: z.object({ option_id: z.number().int(), selector_name: z.string().max(200) }).strict() } } },
+  },
+  responses: {
+    200: { description: "Selected", content: { "application/json": { schema: OkSchema } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "A different option was already selected", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(selectPublicOptionRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const { option_id, selector_name } = c.req.valid("json");
+  try {
+    await commitSelection(c.env.DB, token, option_id, selector_name, clientIp(c), clientUserAgent(c));
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof QuoteOptionError) {
+      if (err.code === "invalid_token") return c.json({ error: GENERIC_SHARE_LINK_ERROR }, 404);
+      if (err.code === "already_selected" || err.code === "conflict") return c.json({ error: err.message }, 409);
+      return c.json({ error: err.message }, 404);
+    }
+    throw err;
+  }
 });
 
 // ── Contracts / E-Sign (Phase 13) ────────────────────────────────────
