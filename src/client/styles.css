@@ -925,6 +925,10 @@ body {
 }
 .form-section .form-grid { padding: 0; }
 
+/* ── Pricebook (pricebook-item-form.tsx) ─────────────────────────────── */
+.audit-list { list-style: none; padding: 0; margin: 0; }
+.metadata-editor .metadata-row input { min-width: 0; }
+
 /* ── Customer search select (customer-search-select.tsx) ────────────────
  * Searchable combobox for "Referred By Customer" — modeled on the existing
  * .search-box / .jobs-search-input patterns above rather than introducing

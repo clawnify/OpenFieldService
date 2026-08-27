@@ -4,14 +4,15 @@ import { formatCents, formatCentsForInput, parseDollarsToCents } from "../money"
 import { QUOTE_STATUS_LABELS, LINE_ITEM_CATEGORIES, LINE_ITEM_CATEGORY_LABELS, DISCOUNT_TYPES } from "../quote-status";
 import { ConfirmDialog } from "./confirm-dialog";
 import { RelatedContracts } from "./related-contracts";
-import { ArrowLeft, Trash2, Edit3, Plus, X } from "lucide-preact";
-import type { Quote, QuoteVersionDetail, QuoteVersion, QuoteStatusHistoryRow, QuoteLineItem, DiscountType, LineItemCategory } from "../types";
+import { PricebookPicker } from "./pricebook-picker";
+import { ArrowLeft, Trash2, Edit3, Plus, X, BookOpen } from "lucide-preact";
+import type { Quote, QuoteVersionDetail, QuoteVersion, QuoteStatusHistoryRow, QuoteLineItem, DiscountType, LineItemCategory, PricebookItem } from "../types";
 
 const STATUS_COLORS: Record<string, string> = {
   draft: "#6b7280", sent: "#3b82f6", accepted: "#16a34a", rejected: "#dc2626", expired: "#9ca3af", cancelled: "#9ca3af",
 };
 
-const emptyItemDraft = { description: "", category: "service" as LineItemCategory, quantity: "1", unit: "", unit_price: "", taxable: true };
+const emptyItemDraft = { description: "", category: "service" as LineItemCategory, quantity: "1", unit: "", unit_price: "", taxable: true, pricebook_item_id: null as number | null };
 
 function itemDraftToPayload(d: typeof emptyItemDraft) {
   return {
@@ -20,6 +21,7 @@ function itemDraftToPayload(d: typeof emptyItemDraft) {
     unit: d.unit,
     unit_price_cents: parseDollarsToCents(d.unit_price) || 0,
     taxable: d.taxable,
+    pricebook_item_id: d.pricebook_item_id,
   };
 }
 
@@ -50,6 +52,7 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
   const [editingItemId, setEditingItemId] = useState<number | null>(null);
   const [savingItem, setSavingItem] = useState(false);
   const [pendingDeleteItem, setPendingDeleteItem] = useState<number | null>(null);
+  const [showPricebookPicker, setShowPricebookPicker] = useState(false);
 
   const [editingMeta, setEditingMeta] = useState(false);
   const [metaDraft, setMetaDraft] = useState({
@@ -158,8 +161,24 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
     setItemDraft({
       description: item.description, category: item.category as LineItemCategory,
       quantity: String(item.quantity), unit: item.unit, unit_price: formatCentsForInput(item.unit_price_cents),
-      taxable: !!item.taxable,
+      taxable: !!item.taxable, pricebook_item_id: item.pricebook_item_id,
     });
+  };
+
+  // Phase 17 — copies the Pricebook item's fields into the draft ONCE; this
+  // is a one-time snapshot, not a live binding (see the server-side half in
+  // src/server/quotes.ts's `resolvePricebookSnapshot`). A later Pricebook
+  // price change never reaches back into this already-saved line item.
+  const applyPricebookSelection = (item: PricebookItem) => {
+    setItemDraft((d) => ({
+      ...d,
+      description: item.name,
+      unit: item.unit,
+      unit_price: formatCentsForInput(item.sell_price_cents),
+      taxable: item.taxable,
+      pricebook_item_id: item.id,
+    }));
+    setShowPricebookPicker(false);
   };
 
   const submitEditItem = async () => {
@@ -361,7 +380,12 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
                     ))}
                     {showAddItem && (
                       <tr class="table-row">
-                        <td><input type="text" placeholder="Description" value={itemDraft.description} onInput={(e) => setItemDraft({ ...itemDraft, description: (e.target as HTMLInputElement).value })} /></td>
+                        <td>
+                          <div style={{ display: "flex", gap: 4 }}>
+                            <input type="text" placeholder="Description" value={itemDraft.description} onInput={(e) => setItemDraft({ ...itemDraft, description: (e.target as HTMLInputElement).value, pricebook_item_id: null })} />
+                            <button type="button" class="btn-icon" title="Select from Pricebook" onClick={() => setShowPricebookPicker(true)}><BookOpen size={14} /></button>
+                          </div>
+                        </td>
                         <td>
                           <select value={itemDraft.category} onChange={(e) => setItemDraft({ ...itemDraft, category: (e.target as HTMLSelectElement).value as LineItemCategory })}>
                             {LINE_ITEM_CATEGORIES.map((c) => <option key={c} value={c}>{LINE_ITEM_CATEGORY_LABELS[c]}</option>)}
@@ -591,6 +615,10 @@ export function QuoteDetail({ id, navigate }: { id: number; navigate: (to: strin
           onConfirm={confirmDelete}
           onClose={() => setPendingDelete(false)}
         />
+      )}
+
+      {showPricebookPicker && (
+        <PricebookPicker onSelect={applyPricebookSelection} onClose={() => setShowPricebookPicker(false)} />
       )}
 
       {viewingVersion && (

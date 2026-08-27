@@ -532,3 +532,46 @@ describe("Tenant isolation — Assets", () => {
     expect(resA.body.types.map((t) => t.key).sort()).toEqual(resB.body.types.map((t) => t.key).sort());
   });
 });
+
+// Phase 17 — Pricebook. `pricebook_item_id` is a pure provenance pointer to
+// the catalog Equipment definition an Asset was sold/installed from
+// (Section 40) — nullable, never re-derives the Asset's own independently-
+// editable manufacturer/model/serial fields. Added per an independent
+// architecture review finding that the column was schema-only and
+// unreachable via any API route.
+describe("Assets — Pricebook provenance link (Phase 17)", () => {
+  async function makePricebookItem(auth: RequestInit, name = "Linked Equipment") {
+    const res = await post<{ item: { id: number } }>("/api/pricebook", { type: "EQUIPMENT", name }, auth);
+    expect(res.response.status).toBe(201);
+    return res.body.item.id;
+  }
+
+  it("sets and clears pricebook_item_id on create and update without touching the Asset's own identity fields", async () => {
+    const auth = await authHeaders();
+    const customerId = await makeCustomer(auth);
+    const pricebookItemId = await makePricebookItem(auth);
+
+    const assetId = await makeAsset(auth, customerId, { pricebook_item_id: pricebookItemId });
+    const detail = await request<{ asset: { pricebook_item_id: number | null; manufacturer: string } }>(`/api/assets/${assetId}`, auth);
+    expect(detail.body.asset.pricebook_item_id).toBe(pricebookItemId);
+    expect(detail.body.asset.manufacturer).toBe("Carrier"); // Asset's own field, untouched by the link.
+
+    const cleared = await put<{ asset: { pricebook_item_id: number | null } }>(`/api/assets/${assetId}`, { pricebook_item_id: null }, auth);
+    expect(cleared.response.status).toBe(200);
+    expect(cleared.body.asset.pricebook_item_id).toBeNull();
+  });
+
+  it("rejects a pricebook_item_id from another organization on both create and update", async () => {
+    const a = await orgA();
+    const b = await orgB();
+    const customerId = await makeCustomer(a.auth);
+    const orgBItemId = await makePricebookItem(b.auth, "Org B Equipment");
+
+    const created = await post("/api/assets", { customer_id: customerId, pricebook_item_id: orgBItemId }, a.auth);
+    expect(created.response.status).toBe(404);
+
+    const assetId = await makeAsset(a.auth, customerId);
+    const updated = await put(`/api/assets/${assetId}`, { pricebook_item_id: orgBItemId }, a.auth);
+    expect(updated.response.status).toBe(404);
+  });
+});

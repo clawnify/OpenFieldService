@@ -97,6 +97,25 @@ import {
   unlinkAssetFromJob,
   updateAsset,
 } from "./assets.js";
+import {
+  PricebookError,
+  PRICEBOOK_ITEM_TYPES,
+  PRICEBOOK_ITEM_STATUSES,
+  canManagePricebook,
+  canViewPricebook,
+  stripCost,
+  type PricebookItem,
+  type PricebookItemPublicView,
+  listCategories as listPricebookCategories,
+  createCategory as createPricebookCategory,
+  updateCategory as updatePricebookCategory,
+  deleteCategory as deletePricebookCategory,
+  listItems as listPricebookItems,
+  getItem as getPricebookItem,
+  createItem as createPricebookItem,
+  updateItem as updatePricebookItem,
+  listItemAudit as listPricebookItemAudit,
+} from "./pricebook.js";
 import { HVAC_ASSET_TYPES } from "./modules/hvac/asset-types.js";
 import {
   DISCOUNT_TYPES,
@@ -3617,6 +3636,7 @@ const AssetSchema = z.object({
   installation_date: z.string().nullable(),
   status: z.string(),
   notes: z.string(),
+  pricebook_item_id: z.number().int().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
 }).openapi("Asset");
@@ -3635,6 +3655,10 @@ const AssetInputSchema = z.object({
   installation_date: z.string().nullable().optional(),
   status: z.enum(ASSET_STATUSES as [string, ...string[]]).optional(),
   notes: z.string().max(2000).optional(),
+  // Phase 17 — provenance link to the Pricebook Equipment definition this
+  // Asset was sold/installed from (Section 40). Optional/nullable; never
+  // re-derives the Asset's own manufacturer/model/serial fields.
+  pricebook_item_id: z.number().int().nullable().optional(),
 }).strict();
 
 const AssetUpdateInputSchema = AssetInputSchema.partial().strict();
@@ -3647,11 +3671,13 @@ const AssetUpdateInputSchema = AssetInputSchema.partial().strict();
  *  mapping below (it can also throw "reparent_blocked", 409). */
 function createAssetErrorResponse(err: AssetError): { body: { error: string }; status: 400 | 404 } {
   if (err.code === "invalid_customer") return { body: { error: "Customer not found" }, status: 404 };
+  if (err.code === "invalid_pricebook_item") return { body: { error: err.message }, status: 404 };
   return { body: { error: err.message }, status: 400 };
 }
 
 function updateAssetErrorResponse(err: AssetError): { body: { error: string }; status: 400 | 404 | 409 } {
   if (err.code === "invalid_customer") return { body: { error: "Customer not found" }, status: 404 };
+  if (err.code === "invalid_pricebook_item") return { body: { error: err.message }, status: 404 };
   if (err.code === "reparent_blocked") return { body: { error: err.message }, status: 409 };
   return { body: { error: err.message }, status: 400 };
 }
@@ -3920,6 +3946,375 @@ app.openapi(unlinkJobAssetRoute, async (c) => {
   return c.json({ ok: true }, 200);
 });
 
+// ── Pricebook (Phase 17) ────────────────────────────────────────────
+// Reusable, organization-scoped product/service catalog. RBAC:
+// canManagePricebook (admin-only) gates every write and cost-bearing read;
+// canViewPricebook (admin+dispatcher) gates read-only catalog browsing with
+// cost fields stripped server-side (never just hidden client-side — see
+// stripCost in pricebook.ts). Technician gets no route access at all,
+// matching the existing Leads/Quotes/Contracts/Phone-Operations front-
+// office/sales precedent in this codebase.
+
+const PricebookCategorySchema = z.object({
+  id: z.number().int(),
+  name: z.string(),
+  description: z.string(),
+  active: z.boolean(),
+  sort_order: z.number().int(),
+  parent_category_id: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).openapi("PricebookCategory");
+
+const PricebookCategoryInputSchema = z.object({
+  name: z.string().min(1).max(200),
+  description: z.string().max(2000).optional(),
+  active: z.boolean().optional(),
+  sort_order: z.number().int().optional(),
+  parent_category_id: z.number().int().nullable().optional(),
+}).strict();
+const PricebookCategoryUpdateInputSchema = PricebookCategoryInputSchema.partial().strict();
+
+// Two response shapes — the full item (admin) always includes cost/internal
+// fields; the public view (dispatcher) never even has them as optional
+// fields, so a caller can't accidentally serialize `undefined` cost data
+// where real customer/dispatcher-facing cost secrecy is required.
+const PricebookItemFieldsSchema = {
+  id: z.number().int(),
+  type: z.enum(PRICEBOOK_ITEM_TYPES as [string, ...string[]]),
+  name: z.string(),
+  description: z.string(),
+  sku: z.string(),
+  category_id: z.number().int().nullable(),
+  manufacturer: z.string(),
+  model: z.string(),
+  unit: z.string(),
+  default_quantity: z.number(),
+  sell_price_cents: z.number().int(),
+  taxable: z.boolean(),
+  status: z.enum(PRICEBOOK_ITEM_STATUSES as [string, ...string[]]),
+  equipment_metadata: z.string(),
+  warranty_metadata: z.string(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+};
+const PricebookItemPublicSchema = z.object(PricebookItemFieldsSchema).openapi("PricebookItemPublic");
+const PricebookItemFullSchema = z.object({
+  ...PricebookItemFieldsSchema,
+  internal_notes: z.string(),
+  cost_cents: z.number().int(),
+  preferred_vendor: z.string(),
+  vendor_sku: z.string(),
+}).openapi("PricebookItemFull");
+// Union covers both possible response shapes for the OpenAPI document —
+// the actual per-request shape is chosen at runtime by role (see
+// serializeItem below), never client-selectable.
+const PricebookItemResponseSchema = z.union([PricebookItemFullSchema, PricebookItemPublicSchema]);
+
+const PricebookItemInputSchema = z.object({
+  type: z.enum(PRICEBOOK_ITEM_TYPES as [string, ...string[]]),
+  name: z.string().min(1).max(200),
+  description: z.string().max(4000).optional(),
+  internal_notes: z.string().max(4000).optional(),
+  sku: z.string().max(100).optional(),
+  category_id: z.number().int().nullable().optional(),
+  manufacturer: z.string().max(200).optional(),
+  model: z.string().max(200).optional(),
+  unit: z.string().max(50).optional(),
+  default_quantity: z.number().positive().optional(),
+  cost_cents: z.number().int().min(0).optional(),
+  sell_price_cents: z.number().int().min(0).optional(),
+  taxable: z.boolean().optional(),
+  status: z.enum(PRICEBOOK_ITEM_STATUSES as [string, ...string[]]).optional(),
+  preferred_vendor: z.string().max(200).optional(),
+  vendor_sku: z.string().max(200).optional(),
+  equipment_metadata: z.string().max(8000).optional(),
+  warranty_metadata: z.string().max(8000).optional(),
+}).strict();
+const PricebookItemUpdateInputSchema = PricebookItemInputSchema.partial().strict();
+
+function pricebookErrorResponse(err: PricebookError): { body: { error: string }; status: 400 | 404 | 409 } {
+  if (err.code === "not_found" || err.code === "invalid_category") return { body: { error: err.message }, status: 404 };
+  if (err.code === "duplicate_sku" || err.code === "referenced") return { body: { error: err.message }, status: 409 };
+  return { body: { error: err.message }, status: 400 };
+}
+
+/** Server-side cost stripping (Section 31 — "do not rely on hiding columns
+ *  only"): a dispatcher's response body never contains `cost_cents`/
+ *  `internal_notes`/`preferred_vendor`/`vendor_sku` in the first place. */
+function serializeItem(item: PricebookItem, includeCost: boolean): PricebookItem | PricebookItemPublicView {
+  return includeCost ? item : stripCost(item);
+}
+
+// ── Categories ───────────────────────────────────────────────────────
+
+const listPricebookCategoriesRoute = createRoute({
+  method: "get",
+  path: "/api/pricebook/categories",
+  request: { query: z.object({ active_only: z.string().optional() }) },
+  responses: {
+    200: { description: "Pricebook categories", content: { "application/json": { schema: z.object({ categories: z.array(PricebookCategorySchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listPricebookCategoriesRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPricebook(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const q = c.req.valid("query");
+  const categories = await listPricebookCategories(actorOrganizationId(c), q.active_only === "true");
+  return c.json({ categories }, 200);
+});
+
+const createPricebookCategoryRoute = createRoute({
+  method: "post",
+  path: "/api/pricebook/categories",
+  request: { body: { content: { "application/json": { schema: PricebookCategoryInputSchema } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ category: PricebookCategorySchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Parent category not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(createPricebookCategoryRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePricebook(me.role)) return c.json({ error: "Forbidden" }, 403);
+  try {
+    const category = await createPricebookCategory(actorOrganizationId(c), c.req.valid("json"));
+    return c.json({ category }, 201);
+  } catch (err) {
+    if (err instanceof PricebookError) { const { body, status } = pricebookErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+const updatePricebookCategoryRoute = createRoute({
+  method: "put",
+  path: "/api/pricebook/categories/{id}",
+  request: { params: IdParam, body: { content: { "application/json": { schema: PricebookCategoryUpdateInputSchema } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ category: PricebookCategorySchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(updatePricebookCategoryRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePricebook(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const category = await updatePricebookCategory(actorOrganizationId(c), Number(id), c.req.valid("json"));
+    if (!category) return c.json({ error: "Category not found" }, 404);
+    return c.json({ category }, 200);
+  } catch (err) {
+    if (err instanceof PricebookError) { const { body, status } = pricebookErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+const deletePricebookCategoryRoute = createRoute({
+  method: "delete",
+  path: "/api/pricebook/categories/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Deleted", content: { "application/json": { schema: z.object({ ok: z.boolean() }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Category is referenced", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(deletePricebookCategoryRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePricebook(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const deleted = await deletePricebookCategory(actorOrganizationId(c), Number(id));
+    if (!deleted) return c.json({ error: "Category not found" }, 404);
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof PricebookError) { const { body, status } = pricebookErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+// ── Items ────────────────────────────────────────────────────────────
+
+const listPricebookItemsRoute = createRoute({
+  method: "get",
+  path: "/api/pricebook",
+  request: {
+    query: z.object({
+      type: z.string().optional(),
+      status: z.string().optional(),
+      category_id: z.string().optional(),
+      manufacturer: z.string().max(200).optional(),
+      search: z.string().max(200).optional(),
+      limit: z.string().optional(),
+      offset: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Pricebook items", content: { "application/json": { schema: z.object({ items: z.array(PricebookItemResponseSchema), total: z.number().int() }) } } },
+    400: { description: "Search filter too complex", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listPricebookItemsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPricebook(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const includeCost = canManagePricebook(me.role);
+  const q = c.req.valid("query");
+  const limit = Math.min(Math.max(parseInt(q.limit || "50", 10) || 50, 1), 200);
+  const offset = Math.max(parseInt(q.offset || "0", 10) || 0, 0);
+  try {
+    const { items, total } = await listPricebookItems(
+      actorOrganizationId(c),
+      { type: q.type, status: q.status, category_id: q.category_id ? Number(q.category_id) : undefined, manufacturer: q.manufacturer, search: q.search },
+      limit, offset
+    );
+    return c.json({ items: items.map((i) => serializeItem(i, includeCost)), total }, 200);
+  } catch (err) {
+    if (err instanceof PricebookError && err.code === "invalid_filter") return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+const createPricebookItemRoute = createRoute({
+  method: "post",
+  path: "/api/pricebook",
+  request: { body: { content: { "application/json": { schema: PricebookItemInputSchema } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ item: PricebookItemFullSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Category not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Duplicate SKU", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(createPricebookItemRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePricebook(me.role)) return c.json({ error: "Forbidden" }, 403);
+  try {
+    const item = await createPricebookItem(actorOrganizationId(c), me.id, c.req.valid("json"));
+    return c.json({ item }, 201);
+  } catch (err) {
+    if (err instanceof PricebookError) { const { body, status } = pricebookErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+const getPricebookItemRoute = createRoute({
+  method: "get",
+  path: "/api/pricebook/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Item detail", content: { "application/json": { schema: z.object({ item: PricebookItemResponseSchema }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getPricebookItemRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPricebook(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const item = await getPricebookItem(actorOrganizationId(c), Number(id));
+  if (!item) return c.json({ error: "Item not found" }, 404);
+  return c.json({ item: serializeItem(item, canManagePricebook(me.role)) }, 200);
+});
+
+const updatePricebookItemRoute = createRoute({
+  method: "put",
+  path: "/api/pricebook/{id}",
+  request: { params: IdParam, body: { content: { "application/json": { schema: PricebookItemUpdateInputSchema } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ item: PricebookItemFullSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Duplicate SKU", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(updatePricebookItemRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePricebook(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const item = await updatePricebookItem(actorOrganizationId(c), me.id, Number(id), c.req.valid("json"));
+    if (!item) return c.json({ error: "Item not found" }, 404);
+    return c.json({ item }, 200);
+  } catch (err) {
+    if (err instanceof PricebookError) { const { body, status } = pricebookErrorResponse(err); return c.json(body, status); }
+    throw err;
+  }
+});
+
+const archivePricebookItemRoute = createRoute({
+  method: "post",
+  path: "/api/pricebook/{id}/archive",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Archived", content: { "application/json": { schema: z.object({ item: PricebookItemFullSchema }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(archivePricebookItemRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePricebook(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const item = await updatePricebookItem(actorOrganizationId(c), me.id, Number(id), { status: "inactive" });
+  if (!item) return c.json({ error: "Item not found" }, 404);
+  return c.json({ item }, 200);
+});
+
+const activatePricebookItemRoute = createRoute({
+  method: "post",
+  path: "/api/pricebook/{id}/activate",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Activated", content: { "application/json": { schema: z.object({ item: PricebookItemFullSchema }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(activatePricebookItemRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePricebook(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const item = await updatePricebookItem(actorOrganizationId(c), me.id, Number(id), { status: "active" });
+  if (!item) return c.json({ error: "Item not found" }, 404);
+  return c.json({ item }, 200);
+});
+
+// Price/status change history — admin-only (Section 48: "do not expose
+// internal cost history to unauthorized roles"), reuses canManagePricebook
+// rather than canViewPricebook since audit `details` JSON always contains
+// raw cost_cents values regardless of role.
+const listPricebookItemAuditRoute = createRoute({
+  method: "get",
+  path: "/api/pricebook/{id}/audit",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Audit history", content: { "application/json": { schema: z.object({ audit: z.array(z.object({ id: z.number().int(), event_type: z.string(), actor_user_id: z.number().int().nullable(), details: z.string(), created_at: z.string() })) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listPricebookItemAuditRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePricebook(me.role)) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const item = await getPricebookItem(actorOrganizationId(c), Number(id));
+  if (!item) return c.json({ error: "Item not found" }, 404);
+  const audit = await listPricebookItemAudit(actorOrganizationId(c), Number(id));
+  return c.json({ audit }, 200);
+});
+
 // ── Quotes / Estimates (Phase 12) ─────────────────────────────────────
 //
 // Domain/API term "Quote" (Section 5); UI may say "Quote / Estimate". RBAC
@@ -3943,6 +4338,7 @@ const QuoteLineItemSchema = z.object({
   sort_order: z.number().int(),
   asset_id: z.number().int().nullable(),
   taxable: z.number().int(),
+  pricebook_item_id: z.number().int().nullable(),
 }).openapi("QuoteLineItem");
 
 const QuoteVersionSchema = z.object({
@@ -4006,6 +4402,10 @@ const LineItemInputSchema = z.object({
   // Phase 13D (Section 8): explicit per-line taxability only. Omitted
   // means "use the organization's default taxability."
   taxable: z.boolean().optional(),
+  // Phase 17: providing this alone (no description/unit_price_cents/
+  // taxable) snapshot-copies those fields from the current Pricebook item
+  // at insert time — see resolvePricebookSnapshot in quotes.ts.
+  pricebook_item_id: z.number().int().nullable().optional(),
 }).strict();
 
 /** organization_id, every totals field, version_number, accepted_by/
@@ -4035,7 +4435,7 @@ const UpdateVersionInputSchema = z.object({
 }).strict();
 
 function quoteErrorToResponse(err: QuoteError): { body: { error: string }; status: 400 | 404 | 409 } {
-  if (err.code === "not_found" || err.code === "invalid_customer" || err.code === "invalid_lead" || err.code === "invalid_asset") {
+  if (err.code === "not_found" || err.code === "invalid_customer" || err.code === "invalid_lead" || err.code === "invalid_asset" || err.code === "invalid_pricebook_item") {
     return { body: { error: err.message }, status: 404 };
   }
   if (err.code === "not_draft" || err.code === "referenced" || err.code === "conflict") {

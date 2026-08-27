@@ -23,6 +23,7 @@ import { ServiceTypeList } from "./components/service-type-list";
 import { MaterialList } from "./components/material-list";
 import { InvoiceList } from "./components/invoice-list";
 import { InvoiceDetail } from "./components/invoice-detail";
+import { PricebookList } from "./components/pricebook-list";
 import { UserManagement } from "./components/user-list";
 import { Integrations } from "./components/integrations";
 import { GlobalSettings } from "./components/global-settings";
@@ -93,6 +94,11 @@ export function App() {
       case "services": return <ServiceTypeList />;
       case "materials": return <MaterialList />;
       case "invoices": return user?.role !== "technician" ? <InvoiceList /> : <TechnicianHome />;
+      // Pricebook is a front-office/sales catalog surface (Quote line-item
+      // selection) — same technician split as Leads/Quotes/Contracts above.
+      // The server's own canViewPricebook RBAC (src/server/pricebook.ts) is
+      // what actually enforces this regardless of what renders here.
+      case "pricebook": return user?.role !== "technician" ? <PricebookList /> : <TechnicianHome />;
       case "users": return user?.role === "admin" ? <UserManagement /> : <Dashboard />;
       // Phase 13C RBAC audit: deliberately NOT role-gated. This route is
       // per-user Google Calendar connection (each user links their own

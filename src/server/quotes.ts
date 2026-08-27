@@ -2,6 +2,7 @@ import { get, query, run } from "./db.js";
 import type { Role } from "./auth.js";
 import { resolveTaxProfile, calculateTaxes, createTaxSnapshot, getTaxSnapshot, type TaxProfile, type TaxComponentResult } from "./tax-jurisdiction.js";
 import { getCompanyProfile } from "./company-profile.js";
+import { getItem as getPricebookItemRecord } from "./pricebook.js";
 
 /**
  * Phase 12 — Quotes / Estimates (Core). A Quote is a commercial proposal to
@@ -40,7 +41,7 @@ export const LINE_ITEM_CATEGORIES = ["service", "labor", "material", "equipment"
 export type LineItemCategory = typeof LINE_ITEM_CATEGORIES[number];
 
 export class QuoteError extends Error {
-  code: "not_found" | "invalid_customer" | "invalid_lead" | "invalid_asset" | "not_draft" | "invalid_input" | "referenced" | "conflict";
+  code: "not_found" | "invalid_customer" | "invalid_lead" | "invalid_asset" | "invalid_pricebook_item" | "not_draft" | "invalid_input" | "referenced" | "conflict";
   constructor(code: QuoteError["code"], message: string) {
     super(message);
     this.name = "QuoteError";
@@ -99,6 +100,7 @@ export interface QuoteLineItem {
   sort_order: number;
   asset_id: number | null;
   taxable: number;
+  pricebook_item_id: number | null;
 }
 
 export interface LineItemInput {
@@ -110,6 +112,16 @@ export interface LineItemInput {
   sort_order?: number;
   asset_id?: number | null;
   taxable?: boolean;
+  // Phase 17 — Pricebook integration (Section 36). Providing this alone
+  // (with no description/unit_price_cents/taxable) snapshot-copies those
+  // fields from the CURRENT Pricebook item at insert time — a one-time
+  // copy, never a live reference; a later Pricebook price change never
+  // touches this row (Section 11's historical-integrity invariant).
+  // Explicitly supplying description/unit_price_cents/taxable alongside
+  // pricebook_item_id overrides the snapshot default (Section 37 — the
+  // catalog augments manual entry, it doesn't remove the ability to
+  // customize a line).
+  pricebook_item_id?: number | null;
 }
 
 export interface ComputedQuoteTotals {
@@ -240,19 +252,37 @@ async function assertAssetBelongsToCustomer(organizationId: number, customerId: 
   if (!row) throw new QuoteError("invalid_asset", "This asset does not belong to the quote's customer");
 }
 
-function normalizeLineItem(input: LineItemInput, sortOrder: number, defaultTaxable: boolean): { description: string; category: LineItemCategory; quantity: number; unit: string; unit_price_cents: number; sort_order: number; asset_id: number | null; taxable: boolean } {
+/** Phase 17 — resolves a Pricebook item for snapshot purposes only. Returns
+ *  `null` fields when `pricebookItemId` is absent (an ordinary manual line);
+ *  throws when the id is given but doesn't resolve to a real, same-
+ *  organization item — never silently falls back to a blank line for a bad
+ *  reference. The returned category is intentionally NOT derived from the
+ *  Pricebook item's own `type` (PART/MATERIAL/EQUIPMENT/etc — a different,
+ *  wider vocabulary than Quote's own five-value LINE_ITEM_CATEGORIES) —
+ *  category selection stays exactly as flexible as it already was for a
+ *  manual line, matching Section 37 ("Pricebook should augment, not
+ *  unnecessarily remove flexibility"). */
+async function resolvePricebookSnapshot(organizationId: number, pricebookItemId: number | null | undefined): Promise<{ description?: string; unit?: string; unit_price_cents?: number; taxable?: boolean } | null> {
+  if (pricebookItemId === undefined || pricebookItemId === null) return null;
+  const item = await getPricebookItemRecord(organizationId, pricebookItemId);
+  if (!item) throw new QuoteError("invalid_pricebook_item", "Pricebook item not found");
+  return { description: item.name, unit: item.unit, unit_price_cents: item.sell_price_cents, taxable: item.taxable };
+}
+
+function normalizeLineItem(input: LineItemInput, sortOrder: number, defaultTaxable: boolean, snapshot: { description?: string; unit?: string; unit_price_cents?: number; taxable?: boolean } | null): { description: string; category: LineItemCategory; quantity: number; unit: string; unit_price_cents: number; sort_order: number; asset_id: number | null; taxable: boolean; pricebook_item_id: number | null } {
   const category = LINE_ITEM_CATEGORIES.includes((input.category ?? "other") as LineItemCategory)
     ? (input.category as LineItemCategory) ?? "other"
     : "other";
   return {
-    description: input.description ?? "",
+    description: input.description ?? snapshot?.description ?? "",
     category,
     quantity: input.quantity ?? 1,
-    unit: input.unit ?? "",
-    unit_price_cents: input.unit_price_cents ?? 0,
+    unit: input.unit ?? snapshot?.unit ?? "",
+    unit_price_cents: input.unit_price_cents ?? snapshot?.unit_price_cents ?? 0,
     sort_order: input.sort_order ?? sortOrder,
     asset_id: input.asset_id ?? null,
-    taxable: input.taxable ?? defaultTaxable,
+    taxable: input.taxable ?? snapshot?.taxable ?? defaultTaxable,
+    pricebook_item_id: input.pricebook_item_id ?? null,
   };
 }
 
@@ -381,13 +411,14 @@ async function insertLineItem(organizationId: number, customerId: number, versio
   if (input.asset_id !== undefined && input.asset_id !== null) {
     await assertAssetBelongsToCustomer(organizationId, customerId, input.asset_id);
   }
+  const snapshot = await resolvePricebookSnapshot(organizationId, input.pricebook_item_id);
   const profile = await resolveTaxProfile(organizationId);
-  const normalized = normalizeLineItem(input, sortOrder, profile?.default_taxable ?? true);
+  const normalized = normalizeLineItem(input, sortOrder, profile?.default_taxable ?? true, snapshot);
   const totalCents = Math.round(normalized.quantity * normalized.unit_price_cents);
   const result = await run(
-    `INSERT INTO quote_line_items (quote_version_id, description, category, quantity, unit, unit_price_cents, total_cents, sort_order, asset_id, taxable)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [versionId, normalized.description, normalized.category, normalized.quantity, normalized.unit, normalized.unit_price_cents, totalCents, normalized.sort_order, normalized.asset_id, normalized.taxable ? 1 : 0]
+    `INSERT INTO quote_line_items (quote_version_id, description, category, quantity, unit, unit_price_cents, total_cents, sort_order, asset_id, taxable, pricebook_item_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [versionId, normalized.description, normalized.category, normalized.quantity, normalized.unit, normalized.unit_price_cents, totalCents, normalized.sort_order, normalized.asset_id, normalized.taxable ? 1 : 0, normalized.pricebook_item_id]
   );
   return Number(result.lastInsertRowid);
 }
@@ -567,6 +598,15 @@ export async function updateLineItem(organizationId: number, quoteId: number, li
   if (input.asset_id !== undefined && input.asset_id !== null) {
     await assertAssetBelongsToCustomer(organizationId, quote.customer_id, input.asset_id);
   }
+  // Update stays a plain field-level edit (unlike insertLineItem) — it does
+  // NOT auto-repopulate description/price/taxable from the referenced
+  // Pricebook item, only validates and records the linkage id. Section 37:
+  // Pricebook augments manual entry rather than removing the ability to
+  // freely edit an already-added line, catalog-sourced or not.
+  if (input.pricebook_item_id !== undefined && input.pricebook_item_id !== null) {
+    const item = await getPricebookItemRecord(organizationId, input.pricebook_item_id);
+    if (!item) throw new QuoteError("invalid_pricebook_item", "Pricebook item not found");
+  }
   const fields: string[] = [];
   const vals: unknown[] = [];
   const setIfPresent = (col: keyof LineItemInput, value: unknown) => {
@@ -581,6 +621,7 @@ export async function updateLineItem(organizationId: number, quoteId: number, li
   setIfPresent("unit_price_cents", input.unit_price_cents);
   setIfPresent("sort_order", input.sort_order);
   setIfPresent("asset_id", input.asset_id);
+  setIfPresent("pricebook_item_id", input.pricebook_item_id);
   if (input.taxable !== undefined) { fields.push("taxable = ?"); vals.push(input.taxable ? 1 : 0); }
 
   const newQuantity = input.quantity ?? existing.quantity;
@@ -644,9 +685,9 @@ export async function createQuoteRevision(organizationId: number, quoteId: numbe
   );
   for (const line of sourceLines) {
     await run(
-      `INSERT INTO quote_line_items (quote_version_id, description, category, quantity, unit, unit_price_cents, total_cents, sort_order, asset_id, taxable)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [newVersionId, line.description, line.category, line.quantity, line.unit, line.unit_price_cents, line.total_cents, line.sort_order, line.asset_id, line.taxable]
+      `INSERT INTO quote_line_items (quote_version_id, description, category, quantity, unit, unit_price_cents, total_cents, sort_order, asset_id, taxable, pricebook_item_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [newVersionId, line.description, line.category, line.quantity, line.unit, line.unit_price_cents, line.total_cents, line.sort_order, line.asset_id, line.taxable, line.pricebook_item_id]
     );
   }
 

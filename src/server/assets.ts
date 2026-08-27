@@ -1,5 +1,6 @@
 import { get, query, run } from "./db.js";
 import type { Role } from "./auth.js";
+import { getItem as getPricebookItem } from "./pricebook.js";
 
 /**
  * Phase 11.4 — Assets / Equipment (Core). A generic Core concept ("Asset";
@@ -35,7 +36,7 @@ export type AssetStatus = "active" | "inactive" | "retired";
 export const ASSET_STATUSES: AssetStatus[] = ["active", "inactive", "retired"];
 
 export class AssetError extends Error {
-  code: "not_found" | "invalid_customer" | "invalid_date" | "invalid_filter" | "referenced" | "cross_customer" | "already_linked" | "reparent_blocked";
+  code: "not_found" | "invalid_customer" | "invalid_date" | "invalid_filter" | "referenced" | "cross_customer" | "already_linked" | "reparent_blocked" | "invalid_pricebook_item";
   constructor(code: AssetError["code"], message: string) {
     super(message);
     this.name = "AssetError";
@@ -70,6 +71,7 @@ export interface Asset {
   installation_date: string | null;
   status: AssetStatus;
   notes: string;
+  pricebook_item_id: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -84,6 +86,12 @@ export interface AssetInput {
   installation_date?: string | null;
   status?: string;
   notes?: string;
+  // Phase 17 — Pricebook. Purely a provenance pointer to the catalog
+  // Equipment definition this Asset was sold/installed from (Section 40) —
+  // never re-derives any of the Asset's own manufacturer/model/serial
+  // fields, which stay independently editable. Nullable, no re-validation
+  // once set beyond "belongs to this organization" at write time.
+  pricebook_item_id?: number | null;
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -108,19 +116,27 @@ async function assertCustomerInOrganization(organizationId: number, customerId: 
   if (!row) throw new AssetError("invalid_customer", "Customer not found");
 }
 
+// Same "cross-entity FK reference must be same-org before trust" check as
+// assertCustomerInOrganization above, for the Section 40 provenance link.
+async function assertPricebookItemInOrganization(organizationId: number, pricebookItemId: number): Promise<void> {
+  const item = await getPricebookItem(organizationId, pricebookItemId);
+  if (!item) throw new AssetError("invalid_pricebook_item", "Pricebook item not found");
+}
+
 export async function createAsset(organizationId: number, input: AssetInput): Promise<Asset> {
   if (input.customer_id === undefined) throw new AssetError("invalid_customer", "customer_id is required");
   await assertCustomerInOrganization(organizationId, input.customer_id);
   const installationDate = validateInstallationDate(input.installation_date);
+  if (input.pricebook_item_id != null) await assertPricebookItemInOrganization(organizationId, input.pricebook_item_id);
 
   const result = await run(
     `INSERT INTO assets
-       (organization_id, customer_id, asset_type, display_name, manufacturer, model, serial_number, installation_date, status, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (organization_id, customer_id, asset_type, display_name, manufacturer, model, serial_number, installation_date, status, notes, pricebook_item_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       organizationId, input.customer_id, input.asset_type ?? "", input.display_name ?? "",
       input.manufacturer ?? "", input.model ?? "", input.serial_number ?? "",
-      installationDate, input.status ?? "active", input.notes ?? "",
+      installationDate, input.status ?? "active", input.notes ?? "", input.pricebook_item_id ?? null,
     ]
   );
   const asset = await get<Asset>("SELECT * FROM assets WHERE id = ?", [result.lastInsertRowid]);
@@ -239,6 +255,7 @@ export async function updateAsset(organizationId: number, id: number, input: Ass
   const installationDate = input.installation_date !== undefined
     ? validateInstallationDate(input.installation_date)
     : existing.installation_date;
+  if (input.pricebook_item_id != null) await assertPricebookItemInOrganization(organizationId, input.pricebook_item_id);
 
   const fields: string[] = [];
   const vals: unknown[] = [];
@@ -260,6 +277,7 @@ export async function updateAsset(organizationId: number, id: number, input: Ass
   }
   setIfPresent("status", input.status);
   setIfPresent("notes", input.notes);
+  setIfPresent("pricebook_item_id", input.pricebook_item_id);
 
   if (fields.length > 0) {
     fields.push("updated_at = datetime('now')");

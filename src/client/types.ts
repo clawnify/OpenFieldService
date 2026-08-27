@@ -1,4 +1,4 @@
-export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "quotes" | "contracts" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility" | "phone-operations";
+export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "quotes" | "contracts" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility" | "phone-operations" | "pricebook";
 
 export type Role = "admin" | "dispatcher" | "technician";
 
@@ -217,6 +217,7 @@ export interface QuoteLineItem {
   sort_order: number;
   asset_id: number | null;
   taxable: number;
+  pricebook_item_id: number | null;
 }
 
 export interface QuoteVersion {
@@ -730,4 +731,60 @@ export interface EvidencePackage {
   document_hash: string | null;
   signed_document_hash: string | null;
   requests: (SignatureRequest & { signer?: ContractSigner; events: SignatureEvent[] })[];
+}
+
+// Phase 17 — Pricebook. `PricebookItem` is the full (cost-included) shape an
+// admin sees; a dispatcher's response body is missing cost_cents/
+// internal_notes/preferred_vendor/vendor_sku entirely (server-side
+// stripping, not client-side hiding — see src/server/pricebook.ts's
+// `stripCost`), hence those four fields are optional here rather than a
+// separate public-view type: the client only ever renders what's present.
+export type PricebookItemType = "EQUIPMENT" | "PART" | "MATERIAL" | "SERVICE" | "LABOR" | "OTHER";
+export const PRICEBOOK_ITEM_TYPES: PricebookItemType[] = ["EQUIPMENT", "PART", "MATERIAL", "SERVICE", "LABOR", "OTHER"];
+export type PricebookItemStatus = "active" | "inactive";
+
+export interface PricebookCategory {
+  id: number;
+  organization_id: number;
+  name: string;
+  description: string;
+  active: boolean;
+  sort_order: number;
+  parent_category_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PricebookItem {
+  id: number;
+  organization_id: number;
+  type: PricebookItemType;
+  name: string;
+  description: string;
+  internal_notes?: string;
+  sku: string;
+  category_id: number | null;
+  manufacturer: string;
+  model: string;
+  unit: string;
+  default_quantity: number;
+  cost_cents?: number;
+  sell_price_cents: number;
+  taxable: boolean;
+  status: PricebookItemStatus;
+  preferred_vendor?: string;
+  vendor_sku?: string;
+  equipment_metadata: string;
+  warranty_metadata: string;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PricebookItemAuditEntry {
+  id: number;
+  event_type: string;
+  actor_user_id: number | null;
+  details: string;
+  created_at: string;
 }
