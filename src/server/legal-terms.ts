@@ -96,7 +96,7 @@ async function sha256Hex(text: string): Promise<string> {
  *  export, undercutting the migration's own "these three share one shape"
  *  rationale for the consolidated table — fixed by parameterizing
  *  entity_type here and having every caller use it). */
-export async function recordAdminAudit(organizationId: number, entityType: string, entityId: number, eventType: string, actorUserId: number, details: Record<string, unknown>): Promise<void> {
+export async function recordAdminAudit(organizationId: number, entityType: string, entityId: number, eventType: string, actorUserId: number | null, details: Record<string, unknown>): Promise<void> {
   await run(
     "INSERT INTO maintenance_admin_audit (organization_id, entity_type, entity_id, event_type, actor_user_id, details) VALUES (?, ?, ?, ?, ?, ?)",
     [organizationId, entityType, entityId, eventType, actorUserId, JSON.stringify(details)]

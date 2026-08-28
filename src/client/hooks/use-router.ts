@@ -29,6 +29,7 @@ const VIEW_ROUTES: Record<string, View> = {
   "legal-terms": "legal-terms",
   "checklist-templates": "checklist-templates",
   "maintenance-agreements": "maintenance-agreements",
+  "maintenance-automation": "maintenance-automation",
 };
 
 function parseRoute(path: string): RouteState {

@@ -362,6 +362,28 @@ export async function enqueueAppointmentReminder(
   });
 }
 
+/** Phase 19C — 60/30/14-day maintenance Agreement renewal reminder.
+ *  `discriminator` is the milestone itself ("60"/"30"/"14") — this is
+ *  what makes the dedupe_key naturally idempotent per (agreement,
+ *  milestone): re-running the scan any number of times before or after
+ *  the milestone can never send it twice, and the 3 milestones are 3
+ *  genuinely distinct dedupe_key rows, never colliding with each other. */
+export async function enqueueMaintenanceRenewalReminder(input: {
+  agreementId: number; customerId: number; customerName: string; customerEmail: string; customerPhone: string;
+  planName: string; agreementIdentifier: string; expiresDate: string; milestoneDays: number;
+}): Promise<Record<NotificationChannel, EnqueueResult>> {
+  return enqueueEvent({
+    eventType: "maintenance.renewal_reminder", entityType: "maintenance_agreement", entityId: input.agreementId,
+    recipientType: "customer", recipientId: input.customerId, email: input.customerEmail, phone: input.customerPhone,
+    templateKey: "maintenance_renewal_reminder_v1",
+    payload: {
+      customer_name: input.customerName, plan_name: input.planName, agreement_identifier: input.agreementIdentifier,
+      expires_date: input.expiresDate, milestone_days: String(input.milestoneDays),
+    },
+    discriminator: String(input.milestoneDays),
+  });
+}
+
 export interface InvoiceContactInfo {
   invoiceId: number; invoiceIdentifier: string;
   customerId: number; customerName: string; customerEmail: string; customerPhone: string;

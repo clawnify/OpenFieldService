@@ -1,10 +1,10 @@
 import { get, query, run } from "./db.js";
 import { getCompanyProfile } from "./company-profile.js";
 import { assertPlanInOrganization, buildPlanSnapshot } from "./maintenance-plans.js";
-import { getCurrentPublishedVersion } from "./legal-terms.js";
+import { getCurrentPublishedVersion, getLegalTermsVersion } from "./legal-terms.js";
 import { resolveTaxProfile, calculateTaxes, createTaxSnapshot, getTaxSnapshot, type TaxableLine } from "./tax-jurisdiction.js";
 import { transitionAgreementInternal } from "./maintenance-workflow.js";
-import { activateMembership } from "./maintenance-memberships.js";
+import { activateMembership, getMembershipByAgreement } from "./maintenance-memberships.js";
 import { getObject, putObject, assertUploadAllowed, StorageError, type StorageEnv } from "./storage.js";
 import { renderMaintenanceAgreementPdf } from "./maintenance-agreement-pdf.js";
 
@@ -245,7 +245,7 @@ export interface CreateAgreementInput {
  *  published MAINTENANCE Legal Terms (if any), tax (if the plan is
  *  taxable), and the requested covered equipment — all at creation time
  *  (Section 7/9/19/25). Nothing here is re-derived later. */
-export async function createAgreement(organizationId: number, actorUserId: number, input: CreateAgreementInput): Promise<{ agreement: MaintenanceAgreement; version: MaintenanceAgreementVersion }> {
+export async function createAgreement(organizationId: number, actorUserId: number | null, input: CreateAgreementInput): Promise<{ agreement: MaintenanceAgreement; version: MaintenanceAgreementVersion }> {
   const customer = await get<{ id: number; name: string; address: string; phone: string; email: string }>(
     "SELECT id, name, address, phone, email FROM customers WHERE id = ? AND organization_id = ?", [input.customerId, organizationId]
   );
@@ -584,9 +584,59 @@ async function recalculateAgreementStatus(db: D1Database, env: StorageEnv, agree
     const signedAgreement = { id: agreement.id, status: "signed" as const, organization_id: agreement.organization_id };
     await transitionAgreementInternal(db, signedAgreement, "active", null, "Signed agreement activated");
     await activateMembership(agreement.organization_id, agreement.id, agreement.customer_id, agreement.plan_id, agreement.current_version_id);
+    // Phase 19C: if this Agreement is itself the renewal of an earlier one
+    // (supersedes_agreement_id set — either by supersedeAgreement()'s
+    // immediate-replace path, where the old Agreement is already
+    // superseded by now and this is a safe no-op, or by initiateRenewal()'s
+    // fresh-acceptance renewal path, where the old Agreement has been
+    // deliberately kept ACTIVE throughout the signing ceremony so the
+    // customer is never left without coverage), complete the renewal now —
+    // the exact moment the new Agreement is genuinely active, never
+    // before.
+    await completeRenewalIfApplicable(db, agreement.organization_id, agreement.id);
   } else {
     await transitionAgreementInternal(db, { id: agreement.id, status: agreement.status, organization_id: agreement.organization_id }, "expired", null, "All signature requests expired without completion");
   }
+}
+
+/** Shared by both the fresh-acceptance renewal path above (reached via
+ *  recalculateAgreementStatus once the new Agreement signs) and
+ *  autoRenewAgreement() below (which bypasses signing entirely). Supersedes
+ *  the OLD Agreement/Membership only if the old one is still genuinely
+ *  active/signed — a no-op, not an error, when supersedeAgreement()'s own
+ *  immediate-replace path already handled it. */
+async function completeRenewalIfApplicable(db: D1Database, organizationId: number, newAgreementId: number): Promise<void> {
+  const newAgreement = await get<MaintenanceAgreement>("SELECT * FROM maintenance_agreements WHERE id = ?", [newAgreementId]);
+  if (!newAgreement || !newAgreement.supersedes_agreement_id) return;
+  const oldAgreement = await get<MaintenanceAgreement>("SELECT * FROM maintenance_agreements WHERE id = ?", [newAgreement.supersedes_agreement_id]);
+  if (!oldAgreement || !["signed", "active"].includes(oldAgreement.status)) return;
+
+  // Claim the forward link atomically BEFORE touching old's status — this
+  // is the auto-renew path's real "someone else got here first" guard
+  // (initiateRenewal sets the pointer immediately at initiation time, so
+  // for THAT path this is an idempotent re-confirm of the same value; for
+  // autoRenewAgreement, which never sets the pointer until here, this is
+  // the only guard against racing a concurrent manual/auto renewal trigger
+  // for the same old agreement — Code Review finding, Phase 19C). Losing
+  // the race is a safe no-op: another renewal already claimed this
+  // agreement, so old's status/membership must not be touched by this call.
+  const claim = await run(
+    "UPDATE maintenance_agreements SET superseded_by_agreement_id = ? WHERE id = ? AND (superseded_by_agreement_id IS NULL OR superseded_by_agreement_id = ?)",
+    [newAgreement.id, oldAgreement.id, newAgreement.id]
+  );
+  if (claim.changes === 0) return;
+
+  await transitionAgreementInternal(db, { id: oldAgreement.id, status: oldAgreement.status, organization_id: oldAgreement.organization_id }, "superseded", null, `Superseded by renewal agreement ${newAgreement.identifier}`);
+
+  const oldMembership = await getMembershipByAgreement(organizationId, oldAgreement.id);
+  if (oldMembership && oldMembership.status === "active") {
+    await run("UPDATE maintenance_memberships SET status = 'superseded', updated_at = datetime('now') WHERE id = ?", [oldMembership.id]);
+    await run(
+      "INSERT INTO maintenance_membership_status_history (membership_id, old_status, new_status, actor_user_id, reason) VALUES (?, 'active', 'superseded', NULL, ?)",
+      [oldMembership.id, `Superseded by renewal agreement ${newAgreement.identifier}`]
+    );
+  }
+  await recordAgreementAudit(oldAgreement.id, "renewal_completed", null, { new_agreement_id: newAgreement.id });
 }
 
 /** Rendered exactly once, at the moment every signer completes — never
@@ -670,4 +720,228 @@ export async function supersedeAgreement(db: D1Database, organizationId: number,
     assertAgreement(organizationId, createdAgreement.id),
   ]);
   return { oldAgreement: refreshedOld, newAgreement: refreshedNew, newVersion };
+}
+
+// ── Phase 19C — Renewal ──────────────────────────────────────────────
+// Renewal has NO new status vocabulary or table of its own (see migration
+// 0028's header comment) — it is entirely derived from the
+// supersedes_agreement_id/superseded_by_agreement_id fields Phase 19B
+// already shipped, plus maintenance_agreement_audit events. Two paths:
+//   1. initiateRenewal() — fresh customer acceptance required. Creates a
+//      new DRAFT agreement, links it as a pending renewal, but does NOT
+//      touch the old agreement's status — it stays ACTIVE (customer keeps
+//      coverage) until the new one is actually signed, at which point
+//      completeRenewalIfApplicable() (called from recalculateAgreementStatus
+//      above) finishes the handover.
+//   2. autoRenewAgreement() — no signing ceremony at all, only when valid
+//      standing consent exists AND no material change is detected.
+
+export interface RenewalMaterialChangeCheck {
+  materialChange: boolean;
+  reasons: string[];
+}
+
+/** Compares what a given signed Agreement Version actually promised
+ *  against the CURRENT state of its source Plan/Terms — the single source
+ *  of truth both initiateRenewal() (to explain why fresh acceptance is
+ *  needed) and autoRenewAgreement() (to refuse an unsafe auto-renewal)
+ *  rely on. Never inspects client input — every comparison is server-side
+ *  state only. */
+async function detectMaterialChange(organizationId: number, agreement: MaintenanceAgreement, version: MaintenanceAgreementVersion): Promise<RenewalMaterialChangeCheck> {
+  const reasons: string[] = [];
+  const plan = await assertPlanInOrganization(organizationId, agreement.plan_id).catch(() => null);
+  if (!plan || !plan.active) { reasons.push("plan_unavailable"); return { materialChange: true, reasons }; }
+
+  const priorSnapshot = JSON.parse(version.plan_snapshot || "{}") as Record<string, unknown>;
+  if (plan.price_cents !== priorSnapshot.price_cents) reasons.push("price_changed");
+  if (plan.discount_type !== priorSnapshot.discount_type
+    || plan.discount_percent !== priorSnapshot.discount_percent
+    || plan.discount_fixed_cents !== priorSnapshot.discount_fixed_cents) reasons.push("discount_terms_changed");
+  if (plan.visit_entitlement_count !== priorSnapshot.visit_entitlement_count) reasons.push("visit_entitlement_changed");
+
+  if (version.terms_version_id) {
+    const currentTermsRow = await getLegalTermsVersion(version.terms_version_id);
+    if (!currentTermsRow || currentTermsRow.status === "superseded") reasons.push("terms_republished");
+  }
+
+  return { materialChange: reasons.length > 0, reasons };
+}
+
+const DEFAULT_RENEWAL_TERM_DAYS = 365; // Plans carry no explicit term/duration field — see below.
+
+/** Carries the prior version's term length forward onto the renewed
+ *  agreement. Without this, a renewed agreement's expires_at is left NULL
+ *  (createAgreement defaults it to null when not passed), and every
+ *  renewal-candidate query in maintenance-automation.ts filters
+ *  `expires_at IS NOT NULL` — so the automated renewal/reminder scan would
+ *  silently stop finding this agreement after exactly one cycle (Code
+ *  Review finding, Phase 19C). New term starts where the old one ended
+ *  (coverage continuity), not "today", since renewal is normally initiated
+ *  a few days before expiry. If the old version had no effective_date/
+ *  expires_at (a manually-created agreement with no explicit term — the
+ *  only way to reach this path at all, since automated scans already
+ *  require expires_at IS NOT NULL), falls back to a plain one-year term
+ *  from today; there is no other signal to derive a term length from until
+ *  Maintenance Plans gain their own duration field. */
+function dateOnlyToUtcMs(dateStr: string): number {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return Date.UTC(y, m - 1, d);
+}
+
+function computeRenewalTerm(oldVersion: MaintenanceAgreementVersion): { effectiveDate: string; expiresAt: string } {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const oldEffective = oldVersion.effective_date?.slice(0, 10);
+  const oldExpires = oldVersion.expires_at?.slice(0, 10);
+  const effectiveDate = oldExpires || todayIso;
+  const termDays = oldEffective && oldExpires
+    ? Math.round((dateOnlyToUtcMs(oldExpires) - dateOnlyToUtcMs(oldEffective)) / 86_400_000)
+    : DEFAULT_RENEWAL_TERM_DAYS;
+  const expiresDt = new Date(dateOnlyToUtcMs(effectiveDate));
+  expiresDt.setUTCDate(expiresDt.getUTCDate() + Math.max(1, termDays));
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const expiresAt = `${expiresDt.getUTCFullYear()}-${pad(expiresDt.getUTCMonth() + 1)}-${pad(expiresDt.getUTCDate())}`;
+  return { effectiveDate, expiresAt };
+}
+
+/** Fresh-acceptance renewal — the safe default path. Old agreement stays
+ *  ACTIVE (never loses coverage) until the new one is actually signed. */
+export async function initiateRenewal(db: D1Database, organizationId: number, actorUserId: number | null, agreementId: number): Promise<{ oldAgreement: MaintenanceAgreement; newAgreement: MaintenanceAgreement; newVersion: MaintenanceAgreementVersion; materialChange: RenewalMaterialChangeCheck }> {
+  const oldAgreement = await assertAgreement(organizationId, agreementId);
+  if (oldAgreement.status !== "active") throw new AgreementError("invalid_input", "Only an active agreement can be renewed");
+  if (oldAgreement.superseded_by_agreement_id) throw new AgreementError("conflict", "A renewal is already in progress for this agreement");
+  if (!oldAgreement.current_version_id) throw new AgreementError("not_found", "Agreement has no version to renew");
+  const oldVersion = await getAgreementVersion(oldAgreement.current_version_id);
+  if (!oldVersion) throw new AgreementError("not_found", "Agreement has no version to renew");
+
+  const materialChange = await detectMaterialChange(organizationId, oldAgreement, oldVersion);
+  const coveredEquipment = await listCoveredEquipment(oldVersion.id);
+  const legalTermsDocumentId = oldVersion.terms_version_id ? (await getLegalTermsVersion(oldVersion.terms_version_id))?.document_id ?? null : null;
+  const { effectiveDate, expiresAt } = computeRenewalTerm(oldVersion);
+
+  const { agreement: newAgreement, version: newVersion } = await createAgreement(organizationId, actorUserId, {
+    customerId: oldAgreement.customer_id,
+    planId: oldAgreement.plan_id,
+    renewalPreference: oldVersion.renewal_preference as CreateAgreementInput["renewalPreference"],
+    coveredAssetIds: coveredEquipment.map((ce) => ce.asset_id).filter((id): id is number => id !== null),
+    legalTermsDocumentId, effectiveDate, expiresAt,
+  });
+
+  // Both cross-link pointers are set immediately — this is what makes the
+  // renewal discoverable/queryable and duplicate-prevented (a second
+  // initiateRenewal() call sees old.superseded_by_agreement_id and is
+  // rejected, per the guard above). Deliberately does NOT transition
+  // old's STATUS here — old stays "active" (the customer keeps coverage)
+  // until the new agreement actually reaches active
+  // (completeRenewalIfApplicable), so an initiated-but-unsigned renewal
+  // never interrupts service.
+  //
+  // The old-agreement claim is atomic (WHERE superseded_by_agreement_id IS
+  // NULL): the initial read-check above is not itself race-proof against a
+  // second concurrent initiateRenewal()/autoRenewAgreement() call for the
+  // same agreement — this UPDATE is the real guard. Losing the race means
+  // another renewal already claimed this agreement first; the just-created
+  // draft is cancelled (never left orphaned) and the caller gets 409
+  // (Code Review finding, Phase 19C).
+  await run("UPDATE maintenance_agreements SET supersedes_agreement_id = ? WHERE id = ?", [agreementId, newAgreement.id]);
+  const claim = await run(
+    "UPDATE maintenance_agreements SET superseded_by_agreement_id = ? WHERE id = ? AND superseded_by_agreement_id IS NULL",
+    [newAgreement.id, agreementId]
+  );
+  if (claim.changes === 0) {
+    await transitionAgreementInternal(db, { id: newAgreement.id, status: "draft", organization_id: organizationId }, "cancelled", actorUserId, "Superseded by a concurrent renewal for the same agreement");
+    throw new AgreementError("conflict", "A renewal is already in progress for this agreement");
+  }
+  await recordAgreementAudit(agreementId, "renewal_initiated", actorUserId, { new_agreement_id: newAgreement.id, material_change: materialChange });
+
+  const [refreshedOld, refreshedNew] = await Promise.all([
+    assertAgreement(organizationId, agreementId),
+    assertAgreement(organizationId, newAgreement.id),
+  ]);
+  return { oldAgreement: refreshedOld, newAgreement: refreshedNew, newVersion, materialChange };
+}
+
+export class RenewalError extends Error {
+  code: "not_eligible" | "material_change" | "already_in_progress" | "not_found";
+  constructor(code: RenewalError["code"], message: string) {
+    super(message);
+    this.name = "RenewalError";
+    this.code = code;
+  }
+}
+
+/** Auto-renew — ONLY when valid, still-current standing consent exists
+ *  AND no material change is detected. Never fabricates a signature: the
+ *  new version's signed_at/signed_document_hash stay NULL (it was never
+ *  "signed" — it was renewed under a pre-existing, explicitly recorded
+ *  consent, a materially different and honestly-labeled evidentiary
+ *  basis). Reaches `active` directly (draft -> active is, like signed ->
+ *  active, a DERIVED-only transition — never reachable via the bare
+ *  transitionAgreement() entry point / AGREEMENT_TRANSITIONS matrix). */
+export async function autoRenewAgreement(db: D1Database, organizationId: number, agreementId: number): Promise<{ oldAgreement: MaintenanceAgreement; newAgreement: MaintenanceAgreement }> {
+  const oldAgreement = await assertAgreement(organizationId, agreementId);
+  if (oldAgreement.status !== "active") throw new RenewalError("not_eligible", "Only an active agreement can be auto-renewed");
+  if (oldAgreement.superseded_by_agreement_id) throw new RenewalError("already_in_progress", "A renewal is already in progress for this agreement");
+  if (!oldAgreement.current_version_id) throw new RenewalError("not_found", "Agreement has no version to renew");
+  const oldVersion = await getAgreementVersion(oldAgreement.current_version_id);
+  if (!oldVersion) throw new RenewalError("not_found", "Agreement has no version to renew");
+
+  const autoRenewConsent = JSON.parse(oldVersion.auto_renew_consent || "{}") as { enabled?: boolean; consent_timestamp?: string; consent_text_version?: string; signer?: string };
+  if (!autoRenewConsent.enabled || !autoRenewConsent.consent_timestamp) {
+    throw new RenewalError("not_eligible", "No valid auto-renew consent exists for this agreement");
+  }
+
+  const materialChange = await detectMaterialChange(organizationId, oldAgreement, oldVersion);
+  if (materialChange.materialChange) {
+    await recordAgreementAudit(agreementId, "renewal_material_change_blocked", null, { reasons: materialChange.reasons });
+    throw new RenewalError("material_change", `Auto-renew blocked — material change detected: ${materialChange.reasons.join(", ")}`);
+  }
+
+  const coveredEquipment = await listCoveredEquipment(oldVersion.id);
+  const legalTermsDocumentId = oldVersion.terms_version_id ? (await getLegalTermsVersion(oldVersion.terms_version_id))?.document_id ?? null : null;
+  const { effectiveDate, expiresAt } = computeRenewalTerm(oldVersion);
+
+  const { agreement: newAgreement, version: newVersion } = await createAgreement(organizationId, null, {
+    customerId: oldAgreement.customer_id,
+    planId: oldAgreement.plan_id,
+    renewalPreference: oldVersion.renewal_preference as CreateAgreementInput["renewalPreference"],
+    coveredAssetIds: coveredEquipment.map((ce) => ce.asset_id).filter((id): id is number => id !== null),
+    legalTermsDocumentId, effectiveDate, expiresAt,
+  });
+  await run("UPDATE maintenance_agreements SET supersedes_agreement_id = ? WHERE id = ?", [agreementId, newAgreement.id]);
+
+  // Carry the ORIGINAL consent evidence forward, explicitly labeled as
+  // such — never a fabricated new signature/consent event.
+  const carriedConsent = {
+    enabled: true, carried_forward_from_agreement: oldAgreement.identifier,
+    original_consent_timestamp: autoRenewConsent.consent_timestamp, original_consent_text_version: autoRenewConsent.consent_text_version,
+    original_signer: autoRenewConsent.signer, auto_renewed_at: new Date().toISOString(),
+  };
+  await run("UPDATE maintenance_agreement_versions SET auto_renew_consent = ? WHERE id = ?", [JSON.stringify(carriedConsent), newVersion.id]);
+
+  await transitionAgreementInternal(db, { id: newAgreement.id, status: "draft", organization_id: organizationId }, "active", null, `Auto-renewed under standing consent from agreement ${oldAgreement.identifier}`);
+  await activateMembership(organizationId, newAgreement.id, oldAgreement.customer_id, oldAgreement.plan_id, newVersion.id);
+  await completeRenewalIfApplicable(db, organizationId, newAgreement.id);
+  await recordAgreementAudit(agreementId, "renewal_auto_executed", null, { new_agreement_id: newAgreement.id });
+
+  const refreshedNew = await assertAgreement(organizationId, newAgreement.id);
+  return { oldAgreement, newAgreement: refreshedNew };
+}
+
+export type RenewalStatus = "not_applicable" | "eligible" | "awaiting_customer" | "renewed" | "expired_unrenewed";
+
+/** Read-only, entirely derived — no stored renewal status anywhere (see
+ *  migration 0028's header comment). */
+export async function getRenewalStatus(organizationId: number, agreementId: number): Promise<{ status: RenewalStatus; pendingAgreementId: number | null }> {
+  const agreement = await assertAgreement(organizationId, agreementId);
+  if (agreement.status === "superseded" && agreement.superseded_by_agreement_id) {
+    return { status: "renewed", pendingAgreementId: agreement.superseded_by_agreement_id };
+  }
+  if (agreement.status !== "active") return { status: "not_applicable", pendingAgreementId: null };
+  if (agreement.superseded_by_agreement_id) {
+    const pending = await get<{ status: string }>("SELECT status FROM maintenance_agreements WHERE id = ?", [agreement.superseded_by_agreement_id]);
+    if (pending?.status === "active") return { status: "renewed", pendingAgreementId: agreement.superseded_by_agreement_id };
+    if (pending && ["draft", "sent", "viewed", "signed"].includes(pending.status)) return { status: "awaiting_customer", pendingAgreementId: agreement.superseded_by_agreement_id };
+    return { status: "expired_unrenewed", pendingAgreementId: agreement.superseded_by_agreement_id };
+  }
+  return { status: "eligible", pendingAgreementId: null };
 }

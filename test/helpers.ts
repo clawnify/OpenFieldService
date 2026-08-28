@@ -345,6 +345,20 @@ export async function resetDatabase() {
     "DELETE FROM legal_terms_documents",
     "DELETE FROM legal_terms_versions",
     "DELETE FROM maintenance_admin_audit",
+    // Phase 19C — maintenance_occurrences/maintenance_schedules are both
+    // already empty by cascade at this point (schedules.membership_id ->
+    // memberships ON DELETE CASCADE, and memberships were already deleted
+    // above via maintenance_agreements' own cascade), but get explicit
+    // entries anyway per this file's established convention.
+    // maintenance_automation_runs has NO foreign key at all
+    // (organization_id is a plain nullable int, matching a global cron
+    // run's own "spans every org" shape) — org id=1 is never deleted, so
+    // this table needs a real explicit entry or a run row from one test
+    // would leak into the next, same reasoning as organization_profiles/
+    // tax_profiles/pricebook_items above.
+    "DELETE FROM maintenance_occurrences",
+    "DELETE FROM maintenance_schedules",
+    "DELETE FROM maintenance_automation_runs",
     "DELETE FROM organizations WHERE id != 1",
     "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter', 'quote_counter', 'contract_counter', 'maintenance_agreement_counter')",
     "DELETE FROM sqlite_sequence",

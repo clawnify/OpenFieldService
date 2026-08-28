@@ -6,7 +6,7 @@ import { ChangeMyPassword } from "./change-my-password";
 import {
   CalendarClock, LayoutDashboard, Briefcase, Users, Wrench, Settings, CalendarDays,
   FileText, Package, UserCog, KeyRound, LogOut, CalendarSync, SlidersHorizontal, BadgeCheck, Target, Calculator, FileSignature, Phone, Menu, X, Tags,
-  ClipboardList, ScrollText, ListChecks,
+  ClipboardList, ScrollText, ListChecks, RefreshCw,
 } from "lucide-preact";
 import type { View } from "../types";
 
@@ -35,6 +35,11 @@ const navItems: { view: View; path: string; label: string; icon: typeof LayoutDa
   // (canManageAgreements/canViewPlans/canViewLegalTerms in the server are
   // admin+dispatcher only, technician gets no route access at all).
   { view: "maintenance-agreements", path: "/maintenance-agreements", label: "Maintenance Agreements", icon: ClipboardList, hideFromTechnician: true },
+  // Phase 19C — recurring schedules/occurrences visible to admin+dispatcher
+  // (canManageSchedules); the execution ledger, manual runner, and preview
+  // inside this page are additionally gated admin-only client-side, and
+  // independently enforced admin-only server-side regardless.
+  { view: "maintenance-automation", path: "/maintenance-automation", label: "Maintenance Automation", icon: RefreshCw, hideFromTechnician: true },
   // Plans/Terms/Checklist Templates are visible to dispatcher too (the
   // server's canViewPlans/canViewLegalTerms allow admin+dispatcher reads;
   // only write/publish/version actions are admin-only, enforced server-

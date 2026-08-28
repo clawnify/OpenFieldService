@@ -61,12 +61,17 @@ export interface JobForServiceReport { id: number; organization_id: number; cust
 /** The "manually associate a maintenance Job" act (Section 19/29). Admin/
  *  dispatcher only — a technician fills in an existing report, doesn't
  *  create the association itself. Idempotent: returns the existing report
- *  if one already exists for this job (one report per job, by design). */
+ *  if one already exists for this job (one report per job, by design).
+ *  `actor: null` (Phase 19C) means system-triggered automation — pre-
+ *  authorized by construction (recurring occurrence generation, not a
+ *  client request), so the technician RBAC gate is simply not applicable;
+ *  every other validation (organization/customer ownership of every
+ *  reference) still runs unconditionally regardless of actor. */
 export async function createOrGetServiceReport(
-  organizationId: number, actor: WorkflowActor, job: JobForServiceReport,
+  organizationId: number, actor: WorkflowActor | null, job: JobForServiceReport,
   input: { agreementId?: number | null; membershipId?: number | null; assetId?: number | null; checklistTemplateVersionId?: number | null }
 ): Promise<ServiceReportRow> {
-  if (actor.role === "technician") throw new ServiceReportError("forbidden", "Only admin/dispatcher can associate a job with maintenance work");
+  if (actor?.role === "technician") throw new ServiceReportError("forbidden", "Only admin/dispatcher can associate a job with maintenance work");
   if (job.organization_id !== organizationId) throw new ServiceReportError("not_found", "Job not found in this organization");
 
   const existing = await get<ServiceReportRow>("SELECT * FROM maintenance_service_reports WHERE job_id = ?", [job.id]);

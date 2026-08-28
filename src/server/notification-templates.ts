@@ -125,6 +125,23 @@ const EMAIL_TEMPLATES: Record<string, (p: Payload) => EmailContent> = {
     const { text, html } = emailWrap(`Hi ${name},`, [`Reminder: your appointment (${job}) is tomorrow, ${date} at ${time}.`]);
     return { subject: `Reminder: appointment tomorrow — ${date}`, text, html };
   },
+  // Phase 19C — 60/30/14-day maintenance Agreement renewal reminder.
+  // `milestone_days` is a plain informational number (e.g. "60"), never
+  // used for anything beyond display — the actual dedupe/idempotency
+  // guarantee comes from notifications.ts's dedupe_key (entity+milestone),
+  // not from anything in this template.
+  maintenance_renewal_reminder_v1: (p) => {
+    const name = str(p, "customer_name", "there");
+    const plan = str(p, "plan_name");
+    const agreement = str(p, "agreement_identifier");
+    const expires = str(p, "expires_date");
+    const days = str(p, "milestone_days");
+    const { text, html } = emailWrap(`Hi ${name},`, [
+      `Your ${plan} maintenance agreement (${agreement}) is coming up for renewal in about ${days} days, on ${expires}.`,
+      "No action is needed if you'd like your plan to continue as-is — otherwise, please contact us to discuss your renewal options.",
+    ]);
+    return { subject: `Your maintenance plan renews in ${days} days`, text, html };
+  },
   contract_signed_copy_v1: (p) => {
     const name = str(p, "signer_name", "there");
     const contract = str(p, "contract_identifier");
@@ -182,6 +199,7 @@ const SMS_TEMPLATES: Record<string, (p: Payload) => SmsContent> = {
   payment_received_v1: (p) => ({ text: `Payment of ${formatCents(p, "amount_cents")} received for invoice ${str(p, "invoice_identifier")}. Thank you.` }),
   post_job_survey_v1: (p) => ({ text: `Thanks for choosing us for ${str(p, "job_identifier")}! We'd love your feedback.` }),
   appointment_reminder_v1: (p) => ({ text: `Reminder: appointment ${str(p, "job_identifier")} tomorrow, ${str(p, "scheduled_date")} at ${str(p, "scheduled_time")}.` }),
+  maintenance_renewal_reminder_v1: (p) => ({ text: `Your ${str(p, "plan_name")} maintenance plan (${str(p, "agreement_identifier")}) renews in ~${str(p, "milestone_days")} days, on ${str(p, "expires_date")}.` }),
 };
 
 export function renderEmail(templateKey: string, payload: Payload): EmailContent {

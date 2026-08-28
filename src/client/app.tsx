@@ -29,6 +29,7 @@ import { LegalTerms } from "./components/legal-terms";
 import { ChecklistTemplates } from "./components/checklist-templates";
 import { MaintenanceAgreementList } from "./components/maintenance-agreement-list";
 import { MaintenanceAgreementDetail } from "./components/maintenance-agreement-detail";
+import { MaintenanceAutomation } from "./components/maintenance-automation";
 import { UserManagement } from "./components/user-list";
 import { Integrations } from "./components/integrations";
 import { GlobalSettings } from "./components/global-settings";
@@ -112,6 +113,7 @@ export function App() {
       case "pricebook": return user?.role !== "technician" ? <PricebookList /> : <TechnicianHome />;
       case "maintenance-agreements": return user?.role !== "technician" ? <MaintenanceAgreementList navigate={navigate} /> : <TechnicianHome />;
       case "maintenance-plans": return user?.role !== "technician" ? <MaintenancePlans /> : <TechnicianHome />;
+      case "maintenance-automation": return user?.role !== "technician" ? <MaintenanceAutomation navigate={navigate} /> : <TechnicianHome />;
       case "legal-terms": return user?.role !== "technician" ? <LegalTerms /> : <TechnicianHome />;
       case "checklist-templates": return user?.role !== "technician" ? <ChecklistTemplates /> : <TechnicianHome />;
       case "users": return user?.role === "admin" ? <UserManagement /> : <Dashboard />;

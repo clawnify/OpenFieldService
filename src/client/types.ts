@@ -1,4 +1,4 @@
-export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "quotes" | "contracts" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility" | "phone-operations" | "pricebook" | "maintenance-plans" | "legal-terms" | "checklist-templates" | "maintenance-agreements";
+export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "quotes" | "contracts" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility" | "phone-operations" | "pricebook" | "maintenance-plans" | "legal-terms" | "checklist-templates" | "maintenance-agreements" | "maintenance-automation";
 
 // ── Phase 19B — Maintenance Plans / Memberships / Agreements ───────────
 
@@ -126,6 +126,55 @@ export interface MaintenanceMembership {
   visits_included: number | null;
   cancelled_at: string | null;
   cancel_reason: string;
+}
+
+export interface MaintenanceSchedule {
+  id: number;
+  membership_id: number;
+  recurrence_type: string;
+  custom_interval_days: number | null;
+  checklist_template_id: number | null;
+  status: string;
+  next_due_date: string;
+  cycles_generated: number;
+  automation_enabled: number;
+  paused_at: string | null;
+  pause_reason: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MaintenanceOccurrence {
+  id: number;
+  schedule_id: number;
+  membership_id: number;
+  cycle_number: number;
+  due_date: string;
+  status: string;
+  job_id: number | null;
+  service_report_id: number | null;
+  skip_reason: string;
+  generated_at: string | null;
+  created_at: string;
+}
+
+export interface MaintenanceAutomationRun {
+  id: number;
+  organization_id: number | null;
+  run_type: string;
+  triggered_by: string;
+  actor_user_id: number | null;
+  started_at: string;
+  finished_at: string | null;
+  status: string;
+  organizations_scanned: number;
+  occurrences_processed: number;
+  jobs_generated: number;
+  renewals_processed: number;
+  reminders_sent: number;
+  errored_count: number;
+  error_summary: string;
+  created_at: string;
 }
 
 export interface ChecklistTemplate {

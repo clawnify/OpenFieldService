@@ -260,6 +260,8 @@ import {
   supersedeAgreement,
   listAgreementAudit,
   AGREEMENT_SIGNATURE_METHODS,
+  initiateRenewal,
+  getRenewalStatus,
 } from "./maintenance-agreements.js";
 import {
   MembershipError,
@@ -291,6 +293,25 @@ import {
   finalizeServiceReport,
   getServiceReportDocument,
 } from "./maintenance-service-reports.js";
+import {
+  RECURRENCE_TYPES,
+  AutomationError,
+  canManageSchedules,
+  createSchedule,
+  getSchedule as getMaintenanceSchedule,
+  getScheduleByMembership,
+  listSchedules,
+  pauseSchedule,
+  resumeSchedule,
+  cancelSchedule,
+  listOccurrences,
+  listAutomationRuns,
+  runMaintenanceAutomationCycle,
+  previewDueOccurrences,
+  previewRenewals,
+  type AutomationDeps,
+  type AutomationJobResult,
+} from "./maintenance-automation.js";
 import {
   CUSTOMER_REBATE_PROFILE_JOIN,
   CUSTOMER_REBATE_PROFILE_OVERRIDE_COLUMNS,
@@ -1238,6 +1259,35 @@ async function createJobRecord(organizationId: number, actorUserId: number | nul
     [job!.id, initialStatus, actorUserId, "Job created"]
   );
   return { ok: true, job: job! };
+}
+
+// Phase 19C — the dependency-injection adapter maintenance-automation.ts's
+// AutomationDeps.createJobRecord needs (mirrors phone-operations-crm.ts's
+// own established deps.createJobRecord pattern for the identical "a Core
+// module needs the composition root's canonical Job-creation logic
+// without inverting the import direction" problem — see that file's own
+// header comment). Deliberately does NOT run runJobCreationSideEffects()
+// (Google Calendar sync + appointment-confirmation email) — those need a
+// real Hono `Context` (googleEnv(c)) that doesn't exist in the Cloudflare
+// `scheduled()` cron context this adapter is built for, and doubly so
+// since the customer already received a 60/30/14-day renewal reminder;
+// a dispatcher opening the auto-generated Job through the normal UI still
+// triggers calendar sync on their first edit, same as any other Job.
+// Disclosed as a known limitation in the Phase 19C docs, not a silent gap.
+function buildAutomationDeps(): AutomationDeps {
+  return {
+    createJobRecord: async (organizationId, actorUserId, data): Promise<AutomationJobResult> => {
+      const jobType: JobType = data.job_type && isJobType(data.job_type) ? data.job_type : "STANDARD";
+      const result = await createJobRecord(organizationId, actorUserId, {
+        customer_id: data.customer_id,
+        job_type: jobType,
+        scheduled_date: data.scheduled_date,
+        notes: data.notes,
+      });
+      if (!result.ok) return { ok: false, error: result.error };
+      return { ok: true, job: { id: result.job.id, identifier: result.job.identifier, organization_id: organizationId, customer_id: result.job.customer_id, technician_id: result.job.technician_id } };
+    },
+  };
 }
 
 /** The two side effects every job-creation call site runs identically after
@@ -8046,6 +8096,383 @@ app.get("/api/jobs/:id/maintenance-report/:reportId/document", async (c) => {
   }
 });
 
+// ── Maintenance Automation — recurring schedules (Phase 19C) ──────────
+// Server-authoritative throughout — no input schema accepts
+// organization_id/status/cycles_generated/job_id/service_report_id/actor
+// fields from the client.
+
+const MaintenanceScheduleSchema = z.object({
+  id: z.number().int(),
+  membership_id: z.number().int(),
+  recurrence_type: z.string(),
+  custom_interval_days: z.number().int().nullable(),
+  checklist_template_id: z.number().int().nullable(),
+  status: z.string(),
+  next_due_date: z.string(),
+  cycles_generated: z.number().int(),
+  automation_enabled: z.number().int(),
+  paused_at: z.string().nullable(),
+  pause_reason: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).openapi("MaintenanceSchedule");
+
+function automationErrorToResponse(err: AutomationError): { body: { error: string }; status: 400 | 404 | 409 } {
+  if (err.code === "not_found") return { body: { error: err.message }, status: 404 };
+  if (err.code === "invalid_state" || err.code === "conflict") return { body: { error: err.message }, status: 409 };
+  return { body: { error: err.message }, status: 400 };
+}
+
+const createScheduleRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/memberships/{id}/schedule",
+  request: { params: IdParam, body: { content: { "application/json": { schema: z.object({
+    recurrence_type: z.enum(RECURRENCE_TYPES), custom_interval_days: z.number().int().min(1).optional(),
+    checklist_template_id: z.number().int().optional(), start_date: z.string().optional(),
+  }).strict() } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ schedule: MaintenanceScheduleSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createScheduleRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageSchedules({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const body = c.req.valid("json");
+  try {
+    const schedule = await createSchedule(actorOrganizationId(c), me.id, Number(id), {
+      recurrenceType: body.recurrence_type, customIntervalDays: body.custom_interval_days,
+      checklistTemplateId: body.checklist_template_id, startDate: body.start_date,
+    });
+    return c.json({ schedule }, 201);
+  } catch (err) {
+    if (err instanceof AutomationError) { const r = automationErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const getScheduleByMembershipRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/memberships/{id}/schedule",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Schedule", content: { "application/json": { schema: z.object({ schedule: MaintenanceScheduleSchema.nullable() }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getScheduleByMembershipRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageSchedules({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const schedule = await getScheduleByMembership(actorOrganizationId(c), Number(id));
+  return c.json({ schedule }, 200);
+});
+
+const listSchedulesRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/schedules",
+  request: { query: z.object({ status: z.string().optional() }) },
+  responses: {
+    200: { description: "Schedules", content: { "application/json": { schema: z.object({ schedules: z.array(MaintenanceScheduleSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listSchedulesRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageSchedules({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { status } = c.req.valid("query");
+  const schedules = await listSchedules(actorOrganizationId(c), { status });
+  return c.json({ schedules }, 200);
+});
+
+const getScheduleRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/schedules/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Schedule", content: { "application/json": { schema: z.object({ schedule: MaintenanceScheduleSchema }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getScheduleRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageSchedules({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const schedule = await getMaintenanceSchedule(actorOrganizationId(c), Number(id));
+  if (!schedule) return c.json({ error: "Schedule not found" }, 404);
+  return c.json({ schedule }, 200);
+});
+
+const ScheduleReasonInputSchema = z.object({ reason: z.string().min(1).max(2000) }).strict();
+
+const pauseScheduleRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/schedules/{id}/pause",
+  request: { params: IdParam, body: { content: { "application/json": { schema: ScheduleReasonInputSchema } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ schedule: MaintenanceScheduleSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(pauseScheduleRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageSchedules({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const { reason } = c.req.valid("json");
+  try {
+    const schedule = await pauseSchedule(actorOrganizationId(c), me.id, Number(id), reason);
+    return c.json({ schedule }, 200);
+  } catch (err) {
+    if (err instanceof AutomationError) { const r = automationErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const resumeScheduleRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/schedules/{id}/resume",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ schedule: MaintenanceScheduleSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(resumeScheduleRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageSchedules({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const schedule = await resumeSchedule(actorOrganizationId(c), me.id, Number(id));
+    return c.json({ schedule }, 200);
+  } catch (err) {
+    if (err instanceof AutomationError) { const r = automationErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const cancelScheduleRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/schedules/{id}/cancel",
+  request: { params: IdParam, body: { content: { "application/json": { schema: ScheduleReasonInputSchema } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ schedule: MaintenanceScheduleSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(cancelScheduleRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageSchedules({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const { reason } = c.req.valid("json");
+  try {
+    const schedule = await cancelSchedule(actorOrganizationId(c), me.id, Number(id), reason);
+    return c.json({ schedule }, 200);
+  } catch (err) {
+    if (err instanceof AutomationError) { const r = automationErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+// ── Occurrences ──────────────────────────────────────────────────────
+
+const MaintenanceOccurrenceSchema = z.object({
+  id: z.number().int(),
+  schedule_id: z.number().int(),
+  membership_id: z.number().int(),
+  cycle_number: z.number().int(),
+  due_date: z.string(),
+  status: z.string(),
+  job_id: z.number().int().nullable(),
+  service_report_id: z.number().int().nullable(),
+  skip_reason: z.string(),
+  generated_at: z.string().nullable(),
+  created_at: z.string(),
+}).openapi("MaintenanceOccurrence");
+
+const listOccurrencesRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/occurrences",
+  request: { query: z.object({ schedule_id: z.string().optional(), membership_id: z.string().optional() }) },
+  responses: {
+    200: { description: "Occurrences", content: { "application/json": { schema: z.object({ occurrences: z.array(MaintenanceOccurrenceSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listOccurrencesRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageSchedules({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const q = c.req.valid("query");
+  const occurrences = await listOccurrences(actorOrganizationId(c), {
+    scheduleId: q.schedule_id ? Number(q.schedule_id) : undefined, membershipId: q.membership_id ? Number(q.membership_id) : undefined,
+  });
+  return c.json({ occurrences }, 200);
+});
+
+// ── Renewal ──────────────────────────────────────────────────────────
+
+const RenewalStatusSchema = z.object({ status: z.string(), pending_agreement_id: z.number().int().nullable() });
+
+const getRenewalStatusRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/agreements/{id}/renewal-status",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Renewal status", content: { "application/json": { schema: RenewalStatusSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getRenewalStatusRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const result = await getRenewalStatus(actorOrganizationId(c), Number(id));
+    return c.json({ status: result.status, pending_agreement_id: result.pendingAgreementId }, 200);
+  } catch (err) {
+    if (err instanceof AgreementError) return c.json({ error: err.message }, err.code === "not_found" ? 404 : 400);
+    throw err;
+  }
+});
+
+const initiateRenewalRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/agreements/{id}/renewal/initiate",
+  request: { params: IdParam },
+  responses: {
+    201: {
+      description: "Renewal initiated", content: { "application/json": { schema: z.object({
+        newAgreement: AgreementSchema, materialChange: z.object({ materialChange: z.boolean(), reasons: z.array(z.string()) }),
+      }) } },
+    },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(initiateRenewalRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const result = await initiateRenewal(c.env.DB, actorOrganizationId(c), me.id, Number(id));
+    return c.json({ newAgreement: result.newAgreement, materialChange: result.materialChange }, 201);
+  } catch (err) {
+    if (err instanceof AgreementError) { const r = agreementErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+// ── Automation execution ledger + manual runner + preview (Admin only) ──
+
+const AutomationRunSchema = z.object({
+  id: z.number().int(),
+  organization_id: z.number().int().nullable(),
+  run_type: z.string(),
+  triggered_by: z.string(),
+  actor_user_id: z.number().int().nullable(),
+  started_at: z.string(),
+  finished_at: z.string().nullable(),
+  status: z.string(),
+  organizations_scanned: z.number().int(),
+  occurrences_processed: z.number().int(),
+  jobs_generated: z.number().int(),
+  renewals_processed: z.number().int(),
+  reminders_sent: z.number().int(),
+  errored_count: z.number().int(),
+  error_summary: z.string(),
+  created_at: z.string(),
+}).openapi("MaintenanceAutomationRun");
+
+const listAutomationRunsRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/automation/runs",
+  responses: {
+    200: { description: "Runs", content: { "application/json": { schema: z.object({ runs: z.array(AutomationRunSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listAutomationRunsRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const runs = await listAutomationRuns(actorOrganizationId(c));
+  return c.json({ runs }, 200);
+});
+
+const runAutomationRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/automation/run",
+  request: { body: { content: { "application/json": { schema: z.object({}).strict() } } } },
+  responses: {
+    200: {
+      description: "Run summary", content: { "application/json": { schema: z.object({
+        organizationsScanned: z.number().int(), occurrencesProcessed: z.number().int(), jobsGenerated: z.number().int(),
+        renewalsProcessed: z.number().int(), remindersSent: z.number().int(), erroredCount: z.number().int(), errorSummary: z.string(),
+      }) } },
+    },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+// Admin-only, always scoped to the actor's own organization only — never
+// an arbitrary cron-expression or cross-org run from client input
+// (Section 33's explicit "no arbitrary cron-expression execution from
+// client input" requirement). Uses the EXACT SAME production function the
+// real Cloudflare cron tick calls — no separate "preview logic" that
+// could silently drift from what actually runs in production.
+app.openapi(runAutomationRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const summary = await runMaintenanceAutomationCycle(c.env.DB, buildAutomationDeps(), actorOrganizationId(c), "manual", me.id);
+  return c.json(summary, 200);
+});
+
+const previewAutomationRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/automation/preview",
+  responses: {
+    200: {
+      description: "Preview", content: { "application/json": { schema: z.object({
+        occurrences: z.array(z.object({ scheduleId: z.number().int(), membershipId: z.number().int(), dueDate: z.string(), dueState: z.string() })),
+        renewals: z.array(z.object({ agreementId: z.number().int(), identifier: z.string(), expiresAt: z.string(), daysUntilExpiry: z.number().int(), autoRenewEligible: z.boolean() })),
+      }) } },
+    },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(previewAutomationRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const organizationId = actorOrganizationId(c);
+  const [occurrences, renewals] = await Promise.all([previewDueOccurrences(organizationId), previewRenewals(organizationId)]);
+  return c.json({ occurrences, renewals }, 200);
+});
+
 // ── Service Types ──────────────────────────────────────────────────
 
 const listServiceTypes = createRoute({
@@ -11667,6 +12094,22 @@ app.openapi(retryJobSync, async (c) => {
 async function scheduled(_controller: ScheduledController, env: Env["Bindings"]): Promise<void> {
   initDB(env);
   await runCronCycle(env);
+  // Phase 19C — same single Cron trigger now also drives recurring-
+  // maintenance occurrence generation, renewal evaluation, and 60/30/14
+  // reminder scanning, matching this codebase's own established "one Cron
+  // trigger doing both reminder-scan and dispatch-drain" precedent (Phase
+  // 9.2) rather than adding a second wrangler.toml cron entry. Best-effort:
+  // a failure here must never prevent the notification cron cycle above
+  // (already committed by the time this runs) from having succeeded.
+  try {
+    await runMaintenanceAutomationCycle(env.DB, buildAutomationDeps(), null, "cron", null);
+  } catch {
+    // swallowed deliberately — same convention as safeEnqueue()/
+    // generateInvoiceForJob()'s other best-effort background calls; a
+    // real error is still captured per-organization inside
+    // runMaintenanceAutomationCycle's own error_summary/errored_count and
+    // persisted to maintenance_automation_runs when it does something.
+  }
 }
 
 export default { fetch: app.fetch, scheduled };
