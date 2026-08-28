@@ -7,6 +7,7 @@ import { JOB_TYPE_LABELS } from "../job-type-labels";
 import { ConfirmDialog } from "./confirm-dialog";
 import { GoogleSyncBadge } from "./google-sync-badge";
 import { JobCompliance } from "./job-compliance";
+import { JobMaintenanceReport } from "./job-maintenance-report";
 import { ScheduleEditModal } from "./schedule-edit-modal";
 import { NotificationHistory } from "./notification-history";
 import { JobAssets } from "./job-assets";
@@ -525,6 +526,8 @@ export function JobDetail() {
           {allowedTransitions.includes("completed") && (
             <JobCompliance job={job} completion={completion} onChange={refreshCompletion} />
           )}
+
+          <JobMaintenanceReport jobId={job.id} customerId={job.customer_id} canAssociate={!isFieldTechnician} />
 
           {!isFieldTechnician && (
             <div class="detail-sidebar-section">

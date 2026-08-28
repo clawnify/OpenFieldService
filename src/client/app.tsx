@@ -24,6 +24,11 @@ import { MaterialList } from "./components/material-list";
 import { InvoiceList } from "./components/invoice-list";
 import { InvoiceDetail } from "./components/invoice-detail";
 import { PricebookList } from "./components/pricebook-list";
+import { MaintenancePlans } from "./components/maintenance-plans";
+import { LegalTerms } from "./components/legal-terms";
+import { ChecklistTemplates } from "./components/checklist-templates";
+import { MaintenanceAgreementList } from "./components/maintenance-agreement-list";
+import { MaintenanceAgreementDetail } from "./components/maintenance-agreement-detail";
 import { UserManagement } from "./components/user-list";
 import { Integrations } from "./components/integrations";
 import { GlobalSettings } from "./components/global-settings";
@@ -82,6 +87,12 @@ export function App() {
     if (view === "contracts" && id) {
       return user?.role !== "technician" ? <ContractDetail id={parseInt(id, 10)} navigate={navigate} /> : <TechnicianHome />;
     }
+    // Maintenance Agreements is self-contained (own fetch, not AppContext)
+    // for the same reason as Quotes/Leads/Contracts above — irrelevant to
+    // the technician role.
+    if (view === "maintenance-agreements" && id) {
+      return user?.role !== "technician" ? <MaintenanceAgreementDetail id={parseInt(id, 10)} navigate={navigate} /> : <TechnicianHome />;
+    }
     switch (view) {
       case "schedule": return <ScheduleView />;
       case "jobs": return <JobList />;
@@ -99,6 +110,10 @@ export function App() {
       // The server's own canViewPricebook RBAC (src/server/pricebook.ts) is
       // what actually enforces this regardless of what renders here.
       case "pricebook": return user?.role !== "technician" ? <PricebookList /> : <TechnicianHome />;
+      case "maintenance-agreements": return user?.role !== "technician" ? <MaintenanceAgreementList navigate={navigate} /> : <TechnicianHome />;
+      case "maintenance-plans": return user?.role !== "technician" ? <MaintenancePlans /> : <TechnicianHome />;
+      case "legal-terms": return user?.role !== "technician" ? <LegalTerms /> : <TechnicianHome />;
+      case "checklist-templates": return user?.role !== "technician" ? <ChecklistTemplates /> : <TechnicianHome />;
       case "users": return user?.role === "admin" ? <UserManagement /> : <Dashboard />;
       // Phase 13C RBAC audit: deliberately NOT role-gated. This route is
       // per-user Google Calendar connection (each user links their own

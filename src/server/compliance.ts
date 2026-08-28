@@ -10,8 +10,13 @@ import { get, query, run } from "./db.js";
  * audit trail.
  */
 
-export type MediaKind = "pre_work_photo" | "post_work_photo";
-export const MEDIA_KINDS: MediaKind[] = ["pre_work_photo", "post_work_photo"];
+// "maintenance_report_photo" (Phase 19B) reuses this same generic,
+// R2-backed, content-type-allowlisted, soft-deletable media table for
+// Digital Maintenance Service Report photos — a genuinely generic "photo
+// attached to a job" concept, not a parallel photos system (Shared Kernel
+// Minimalism).
+export type MediaKind = "pre_work_photo" | "post_work_photo" | "maintenance_report_photo";
+export const MEDIA_KINDS: MediaKind[] = ["pre_work_photo", "post_work_photo", "maintenance_report_photo"];
 
 export interface JobMediaRow {
   id: number;

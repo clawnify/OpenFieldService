@@ -5,6 +5,7 @@ import { LoginPage } from "./components/login";
 import { SignContract } from "./components/sign-contract";
 import { PublicPay } from "./components/public-pay";
 import { EstimateSelection } from "./components/estimate-selection";
+import { SignMaintenanceAgreement } from "./components/sign-maintenance-agreement";
 import "./styles.css";
 
 function Root() {
@@ -31,6 +32,11 @@ const payMatch = window.location.pathname.match(/^\/pay\/([^/]+)$/);
 // Best estimate comparison/selection link (see estimate-selection.tsx's
 // own doc comment).
 const estimateMatch = window.location.pathname.match(/^\/estimate\/([^/]+)$/);
+// Phase 19B — same standalone-page precedent, for the public Maintenance
+// Agreement e-sign link (see sign-maintenance-agreement.tsx's own doc
+// comment). Deliberately a distinct path from /sign/:token (Contracts) —
+// Maintenance Agreements are a separate parallel domain, not a Contract.
+const signMaintenanceMatch = window.location.pathname.match(/^\/sign-maintenance\/([^/]+)$/);
 
 render(
   signMatch ? (
@@ -39,6 +45,8 @@ render(
     <PublicPay token={decodeURIComponent(payMatch[1])} />
   ) : estimateMatch ? (
     <EstimateSelection token={decodeURIComponent(estimateMatch[1])} />
+  ) : signMaintenanceMatch ? (
+    <SignMaintenanceAgreement token={decodeURIComponent(signMaintenanceMatch[1])} />
   ) : (
     <AuthProvider>
       <Root />

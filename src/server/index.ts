@@ -211,6 +211,87 @@ import {
   transitionContract,
 } from "./contract-workflow.js";
 import {
+  LEGAL_TERMS_TYPES,
+  LegalTermsError,
+  canManageLegalTerms,
+  canViewLegalTerms,
+  listLegalTermsDocuments,
+  getLegalTermsDocument,
+  listLegalTermsVersions,
+  createLegalTermsDocument,
+  updateDraftVersionContent,
+  createNextDraftVersion,
+  publishLegalTermsVersion,
+} from "./legal-terms.js";
+import {
+  MaintenancePlanError,
+  canManagePlans,
+  canViewPlans,
+  listMaintenancePlans,
+  getMaintenancePlan,
+  createMaintenancePlan,
+  updateMaintenancePlan,
+} from "./maintenance-plans.js";
+import {
+  AGREEMENT_STATUSES,
+  AgreementWorkflowError,
+  transitionAgreement,
+  getAgreementStatusHistory,
+} from "./maintenance-workflow.js";
+import {
+  AgreementError,
+  canManageAgreements,
+  listAgreements,
+  getAgreement,
+  getAgreementVersion,
+  listCoveredEquipment,
+  listAgreementSigners,
+  listSignatureRequests as listAgreementSignatureRequests,
+  createAgreement,
+  attachCoveredEquipment,
+  removeCoveredEquipment,
+  addAgreementSigner,
+  removeAgreementSigner,
+  sendAgreementForSignature,
+  getAgreementSignatureRequestByToken,
+  recordAgreementConsent,
+  submitAgreementSignature,
+  getSignedAgreementArtifact,
+  supersedeAgreement,
+  listAgreementAudit,
+  AGREEMENT_SIGNATURE_METHODS,
+} from "./maintenance-agreements.js";
+import {
+  MembershipError,
+  canManageMemberships,
+  listMemberships,
+  getMembership,
+  getMembershipByAgreement,
+  getEntitlement,
+  cancelMembership,
+  getMembershipStatusHistory,
+} from "./maintenance-memberships.js";
+import {
+  CHECKLIST_ITEM_TYPES,
+  ChecklistTemplateError,
+  canManageChecklistTemplates,
+  listChecklistTemplates,
+  getChecklistTemplate,
+  listChecklistTemplateVersions,
+  createChecklistTemplate,
+  createNextChecklistTemplateVersion,
+  updateChecklistTemplateMeta,
+} from "./maintenance-checklists.js";
+import {
+  ServiceReportError,
+  createOrGetServiceReport,
+  getServiceReportByJob,
+  updateServiceReportDraft,
+  captureCustomerAcknowledgement,
+  finalizeServiceReport,
+  getServiceReportDocument,
+} from "./maintenance-service-reports.js";
+import {
   CUSTOMER_REBATE_PROFILE_JOIN,
   CUSTOMER_REBATE_PROFILE_OVERRIDE_COLUMNS,
   getCustomerRebateProfile,
@@ -6506,6 +6587,1461 @@ app.openapi(declineRoute, async (c) => {
       if (err.code === "conflict") return c.json({ error: err.message }, 409);
       return c.json({ error: err.message }, 400);
     }
+    throw err;
+  }
+});
+
+// ── Maintenance Plans (Phase 19B) ─────────────────────────────────────
+// Server-authoritative throughout — no input schema accepts
+// organization_id/created_by/timestamps from the client. Money is integer
+// cents (standing rule).
+
+const MaintenancePlanSchema = z.object({
+  id: z.number().int(),
+  code: z.string(),
+  name: z.string(),
+  description: z.string(),
+  tier: z.string(),
+  active: z.number().int(),
+  price_cents: z.number().int(),
+  currency: z.string(),
+  taxable: z.number().int(),
+  visit_entitlement_count: z.number().int().nullable(),
+  frequency_description: z.string(),
+  priority_benefit: z.string(),
+  discount_type: z.string(),
+  discount_percent: z.number().nullable(),
+  discount_fixed_cents: z.number().int().nullable(),
+  included_services: z.string(),
+  excluded_services: z.string(),
+  other_benefits: z.string(),
+  equipment_eligibility: z.string(),
+  effective_from: z.string().nullable(),
+  effective_until: z.string().nullable(),
+  sort_order: z.number().int(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).openapi("MaintenancePlan");
+
+const PlanInputSchema = z.object({
+  code: z.string().min(1).max(50),
+  name: z.string().min(1).max(200),
+  description: z.string().max(2000).optional(),
+  tier: z.string().max(50).optional(),
+  active: z.boolean().optional(),
+  price_cents: z.number().int().min(0).optional(),
+  currency: z.string().max(10).optional(),
+  taxable: z.boolean().optional(),
+  visit_entitlement_count: z.number().int().min(0).nullable().optional(),
+  frequency_description: z.string().max(200).optional(),
+  priority_benefit: z.string().max(500).optional(),
+  discount_type: z.enum(["none", "percent", "fixed"]).optional(),
+  discount_percent: z.number().min(0).max(100).nullable().optional(),
+  discount_fixed_cents: z.number().int().min(0).nullable().optional(),
+  included_services: z.array(z.string().max(200)).max(50).optional(),
+  excluded_services: z.array(z.string().max(200)).max(50).optional(),
+  other_benefits: z.array(z.string().max(200)).max(50).optional(),
+  equipment_eligibility: z.array(z.string().max(100)).max(50).optional(),
+  effective_from: z.string().nullable().optional(),
+  effective_until: z.string().nullable().optional(),
+  sort_order: z.number().int().optional(),
+}).strict();
+
+function planErrorToResponse(err: MaintenancePlanError): { body: { error: string }; status: 400 | 404 | 409 } {
+  if (err.code === "not_found") return { body: { error: err.message }, status: 404 };
+  if (err.code === "conflict") return { body: { error: err.message }, status: 409 };
+  return { body: { error: err.message }, status: 400 };
+}
+
+const listPlansRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/plans",
+  request: { query: z.object({ include_inactive: z.string().optional() }) },
+  responses: {
+    200: { description: "Plans", content: { "application/json": { schema: z.object({ plans: z.array(MaintenancePlanSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listPlansRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPlans({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { include_inactive } = c.req.valid("query");
+  const plans = await listMaintenancePlans(actorOrganizationId(c), include_inactive === "true");
+  return c.json({ plans }, 200);
+});
+
+const getPlanRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/plans/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Plan", content: { "application/json": { schema: z.object({ plan: MaintenancePlanSchema }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getPlanRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewPlans({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const plan = await getMaintenancePlan(actorOrganizationId(c), Number(id));
+  if (!plan) return c.json({ error: "Plan not found" }, 404);
+  return c.json({ plan }, 200);
+});
+
+const createPlanRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/plans",
+  request: { body: { content: { "application/json": { schema: PlanInputSchema } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ plan: MaintenancePlanSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createPlanRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePlans({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  try {
+    const plan = await createMaintenancePlan(actorOrganizationId(c), me.id, c.req.valid("json"));
+    return c.json({ plan }, 201);
+  } catch (err) {
+    if (err instanceof MaintenancePlanError) { const r = planErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const updatePlanRoute = createRoute({
+  method: "put",
+  path: "/api/maintenance/plans/{id}",
+  request: { params: IdParam, body: { content: { "application/json": { schema: PlanInputSchema.partial() } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ plan: MaintenancePlanSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(updatePlanRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManagePlans({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const plan = await updateMaintenancePlan(actorOrganizationId(c), me.id, Number(id), c.req.valid("json"));
+    return c.json({ plan }, 200);
+  } catch (err) {
+    if (err instanceof MaintenancePlanError) { const r = planErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+// ── Legal Terms Library (Phase 19B) ───────────────────────────────────
+
+const LegalTermsDocumentSchema = z.object({
+  id: z.number().int(),
+  type: z.string(),
+  title: z.string(),
+  current_published_version_id: z.number().int().nullable(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).openapi("LegalTermsDocument");
+
+const LegalTermsVersionSchema = z.object({
+  id: z.number().int(),
+  document_id: z.number().int(),
+  version_number: z.number().int(),
+  status: z.string(),
+  content: z.string(),
+  content_hash: z.string().nullable(),
+  effective_from: z.string().nullable(),
+  published_at: z.string().nullable(),
+  published_by: z.number().int().nullable(),
+  superseded_at: z.string().nullable(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+}).openapi("LegalTermsVersion");
+
+function legalTermsErrorToResponse(err: LegalTermsError): { body: { error: string }; status: 400 | 404 | 409 } {
+  if (err.code === "not_found") return { body: { error: err.message }, status: 404 };
+  if (err.code === "invalid_state") return { body: { error: err.message }, status: 409 };
+  return { body: { error: err.message }, status: 400 };
+}
+
+const listLegalTermsRoute = createRoute({
+  method: "get",
+  path: "/api/legal-terms",
+  request: { query: z.object({ type: z.string().optional() }) },
+  responses: {
+    200: { description: "Documents", content: { "application/json": { schema: z.object({ documents: z.array(LegalTermsDocumentSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listLegalTermsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewLegalTerms({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { type } = c.req.valid("query");
+  const documents = await listLegalTermsDocuments(actorOrganizationId(c), type);
+  return c.json({ documents }, 200);
+});
+
+const getLegalTermsDocumentRoute = createRoute({
+  method: "get",
+  path: "/api/legal-terms/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Document with versions", content: { "application/json": { schema: z.object({ document: LegalTermsDocumentSchema, versions: z.array(LegalTermsVersionSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getLegalTermsDocumentRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewLegalTerms({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const document = await getLegalTermsDocument(actorOrganizationId(c), Number(id));
+  if (!document) return c.json({ error: "Terms document not found" }, 404);
+  const versions = await listLegalTermsVersions(document.id);
+  return c.json({ document, versions }, 200);
+});
+
+const createLegalTermsDocumentRoute = createRoute({
+  method: "post",
+  path: "/api/legal-terms",
+  request: { body: { content: { "application/json": { schema: z.object({ type: z.enum(LEGAL_TERMS_TYPES), title: z.string().min(1).max(200) }).strict() } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ document: LegalTermsDocumentSchema, version: LegalTermsVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createLegalTermsDocumentRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageLegalTerms({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { type, title } = c.req.valid("json");
+  try {
+    const { document, version } = await createLegalTermsDocument(actorOrganizationId(c), me.id, type, title);
+    return c.json({ document, version }, 201);
+  } catch (err) {
+    if (err instanceof LegalTermsError) { const r = legalTermsErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const updateLegalTermsDraftRoute = createRoute({
+  method: "put",
+  path: "/api/legal-terms/{id}/versions/{versionId}",
+  request: {
+    params: z.object({ id: z.string(), versionId: z.string() }),
+    body: { content: { "application/json": { schema: z.object({ content: z.string().max(100000), effective_from: z.string().nullable().optional() }).strict() } } },
+  },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ version: LegalTermsVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Not editable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(updateLegalTermsDraftRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageLegalTerms({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id, versionId } = c.req.valid("param");
+  const { content, effective_from } = c.req.valid("json");
+  try {
+    const version = await updateDraftVersionContent(actorOrganizationId(c), me.id, Number(id), Number(versionId), content, effective_from);
+    return c.json({ version }, 200);
+  } catch (err) {
+    if (err instanceof LegalTermsError) { const r = legalTermsErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const createNextTermsDraftRoute = createRoute({
+  method: "post",
+  path: "/api/legal-terms/{id}/versions",
+  request: { params: IdParam },
+  responses: {
+    201: { description: "Draft created", content: { "application/json": { schema: z.object({ version: LegalTermsVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Draft already exists", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createNextTermsDraftRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageLegalTerms({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const version = await createNextDraftVersion(actorOrganizationId(c), me.id, Number(id));
+    return c.json({ version }, 201);
+  } catch (err) {
+    if (err instanceof LegalTermsError) { const r = legalTermsErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const publishTermsVersionRoute = createRoute({
+  method: "post",
+  path: "/api/legal-terms/{id}/versions/{versionId}/publish",
+  request: { params: z.object({ id: z.string(), versionId: z.string() }) },
+  responses: {
+    200: { description: "Published", content: { "application/json": { schema: z.object({ version: LegalTermsVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Not publishable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(publishTermsVersionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageLegalTerms({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id, versionId } = c.req.valid("param");
+  try {
+    const version = await publishLegalTermsVersion(actorOrganizationId(c), me.id, Number(id), Number(versionId));
+    return c.json({ version }, 200);
+  } catch (err) {
+    if (err instanceof LegalTermsError) { const r = legalTermsErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+// ── Maintenance Agreements (Phase 19B) ────────────────────────────────
+// Mirrors Contracts' server-authoritative discipline: no input schema
+// accepts organization_id/status/hash/signed_*/token/token_hash/
+// created_by/actor fields from the client.
+
+const AgreementSchema = z.object({
+  id: z.number().int(),
+  identifier: z.string(),
+  customer_id: z.number().int(),
+  plan_id: z.number().int(),
+  status: z.string(),
+  current_version_id: z.number().int().nullable(),
+  supersedes_agreement_id: z.number().int().nullable(),
+  superseded_by_agreement_id: z.number().int().nullable(),
+  cancelled_at: z.string().nullable(),
+  cancel_reason: z.string(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  customer_name: z.string().nullable().optional(),
+  plan_name: z.string().nullable().optional(),
+}).openapi("MaintenanceAgreement");
+
+const AgreementVersionSchema = z.object({
+  id: z.number().int(),
+  agreement_id: z.number().int(),
+  version_number: z.number().int(),
+  plan_snapshot: z.string(),
+  customer_snapshot: z.string(),
+  company_snapshot: z.string(),
+  terms_version_id: z.number().int().nullable(),
+  terms_snapshot_hash: z.string().nullable(),
+  effective_date: z.string().nullable(),
+  expires_at: z.string().nullable(),
+  renewal_preference: z.string(),
+  auto_renew_consent: z.string(),
+  tax_breakdown: z.string(),
+  total_price_cents: z.number().int(),
+  document_hash: z.string().nullable(),
+  hash_algorithm: z.string(),
+  signed_document_hash: z.string().nullable(),
+  signed_at: z.string().nullable(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+}).openapi("MaintenanceAgreementVersion");
+
+const CoveredEquipmentSchema = z.object({
+  id: z.number().int(),
+  agreement_version_id: z.number().int(),
+  asset_id: z.number().int().nullable(),
+  asset_snapshot: z.string(),
+  created_at: z.string(),
+}).openapi("CoveredEquipment");
+
+const AgreementSignerSchema = z.object({
+  id: z.number().int(),
+  agreement_id: z.number().int(),
+  name: z.string(),
+  email: z.string(),
+  phone: z.string(),
+  role: z.string(),
+  sort_order: z.number().int(),
+  created_at: z.string(),
+}).openapi("AgreementSigner");
+
+// token_hash deliberately never in this schema, same discipline as
+// Contracts' SignatureRequestSchema.
+const AgreementSignatureRequestSchema = z.object({
+  id: z.number().int(),
+  agreement_id: z.number().int(),
+  agreement_version_id: z.number().int(),
+  signer_id: z.number().int(),
+  status: z.string(),
+  expires_at: z.string(),
+  consent_text_version: z.string(),
+  consent_at: z.string().nullable(),
+  signed_at: z.string().nullable(),
+  signature_method: z.string().nullable(),
+  signer_ip: z.string().nullable(),
+  signer_user_agent: z.string().nullable(),
+  declined_reason: z.string(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).openapi("AgreementSignatureRequest");
+
+const AgreementStatusHistorySchema = z.object({
+  id: z.number().int(),
+  agreement_id: z.number().int(),
+  old_status: z.string().nullable(),
+  new_status: z.string(),
+  actor_user_id: z.number().int().nullable(),
+  reason: z.string(),
+  created_at: z.string(),
+}).openapi("AgreementStatusHistory");
+
+const CreateAgreementInputSchema = z.object({
+  customer_id: z.number().int(),
+  plan_id: z.number().int(),
+  effective_date: z.string().nullable().optional(),
+  expires_at: z.string().nullable().optional(),
+  renewal_preference: z.enum(["auto", "manual", "none"]).optional(),
+  covered_asset_ids: z.array(z.number().int()).max(50).optional(),
+  legal_terms_document_id: z.number().int().nullable().optional(),
+}).strict();
+
+const AttachEquipmentInputSchema = z.object({ asset_ids: z.array(z.number().int()).min(1).max(50) }).strict();
+
+const AddAgreementSignerInputSchema = z.object({
+  name: z.string().min(1).max(200),
+  email: z.string().max(200).optional(),
+  phone: z.string().max(50).optional(),
+  role: z.string().max(50).optional(),
+  sort_order: z.number().int().optional(),
+}).strict();
+
+const SendAgreementInputSchema = z.object({ consent_text_version: z.string().min(1).max(50) }).strict();
+
+const TransitionAgreementInputSchema = z.object({ to_status: z.enum(AGREEMENT_STATUSES), reason: z.string().max(2000).optional() }).strict();
+
+function agreementErrorToResponse(err: AgreementError): { body: { error: string }; status: 400 | 404 | 409 } {
+  if (err.code === "not_found" || err.code === "not_signed") return { body: { error: err.message }, status: 404 };
+  if (err.code === "not_draft" || err.code === "conflict") return { body: { error: err.message }, status: 409 };
+  return { body: { error: err.message }, status: 400 };
+}
+
+const listAgreementsRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/agreements",
+  request: { query: z.object({ customer_id: z.string().optional(), status: z.string().optional() }) },
+  responses: {
+    200: { description: "Agreements", content: { "application/json": { schema: z.object({ agreements: z.array(AgreementSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listAgreementsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const q = c.req.valid("query");
+  const agreements = await listAgreements(actorOrganizationId(c), { customerId: q.customer_id ? Number(q.customer_id) : undefined, status: q.status });
+  return c.json({ agreements }, 200);
+});
+
+const getAgreementRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/agreements/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: {
+      description: "Agreement detail", content: { "application/json": { schema: z.object({
+        agreement: AgreementSchema, version: AgreementVersionSchema.nullable(), coveredEquipment: z.array(CoveredEquipmentSchema),
+        signers: z.array(AgreementSignerSchema), signatureRequests: z.array(AgreementSignatureRequestSchema),
+      }) } },
+    },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getAgreementRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const agreement = await getAgreement(actorOrganizationId(c), Number(id));
+  if (!agreement) return c.json({ error: "Agreement not found" }, 404);
+  const version = agreement.current_version_id ? await getAgreementVersion(agreement.current_version_id) : null;
+  const coveredEquipment = version ? await listCoveredEquipment(version.id) : [];
+  const signers = await listAgreementSigners(agreement.id);
+  const signatureRequests = await listAgreementSignatureRequests(agreement.id);
+  return c.json({ agreement, version, coveredEquipment, signers, signatureRequests }, 200);
+});
+
+const createAgreementRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/agreements",
+  request: { body: { content: { "application/json": { schema: CreateAgreementInputSchema } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ agreement: AgreementSchema, version: AgreementVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createAgreementRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const body = c.req.valid("json");
+  try {
+    const { agreement, version } = await createAgreement(actorOrganizationId(c), me.id, {
+      customerId: body.customer_id, planId: body.plan_id, effectiveDate: body.effective_date, expiresAt: body.expires_at,
+      renewalPreference: body.renewal_preference, coveredAssetIds: body.covered_asset_ids, legalTermsDocumentId: body.legal_terms_document_id,
+    });
+    return c.json({ agreement, version }, 201);
+  } catch (err) {
+    if (err instanceof AgreementError) { const r = agreementErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const attachEquipmentRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/agreements/{id}/covered-equipment",
+  request: { params: IdParam, body: { content: { "application/json": { schema: AttachEquipmentInputSchema } } } },
+  responses: {
+    200: { description: "Attached", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Not a draft", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(attachEquipmentRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const { asset_ids } = c.req.valid("json");
+  try {
+    const agreement = await getAgreement(actorOrganizationId(c), Number(id));
+    if (!agreement || !agreement.current_version_id) return c.json({ error: "Agreement not found" }, 404);
+    await attachCoveredEquipment(actorOrganizationId(c), Number(id), agreement.current_version_id, asset_ids);
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof AgreementError) { const r = agreementErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const removeEquipmentRoute = createRoute({
+  method: "delete",
+  path: "/api/maintenance/agreements/{id}/covered-equipment/{equipmentId}",
+  request: { params: z.object({ id: z.string(), equipmentId: z.string() }) },
+  responses: {
+    200: { description: "Removed", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Not a draft", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(removeEquipmentRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id, equipmentId } = c.req.valid("param");
+  try {
+    await removeCoveredEquipment(actorOrganizationId(c), Number(id), Number(equipmentId));
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof AgreementError) { const r = agreementErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const addAgreementSignerRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/agreements/{id}/signers",
+  request: { params: IdParam, body: { content: { "application/json": { schema: AddAgreementSignerInputSchema } } } },
+  responses: {
+    201: { description: "Added", content: { "application/json": { schema: z.object({ signer: AgreementSignerSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Not a draft", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(addAgreementSignerRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const body = c.req.valid("json");
+  try {
+    const signer = await addAgreementSigner(actorOrganizationId(c), me.id, Number(id), { name: body.name, email: body.email, phone: body.phone, role: body.role, sortOrder: body.sort_order });
+    return c.json({ signer }, 201);
+  } catch (err) {
+    if (err instanceof AgreementError) { const r = agreementErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const removeAgreementSignerRoute = createRoute({
+  method: "delete",
+  path: "/api/maintenance/agreements/{id}/signers/{signerId}",
+  request: { params: z.object({ id: z.string(), signerId: z.string() }) },
+  responses: {
+    200: { description: "Removed", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Not a draft", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(removeAgreementSignerRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id, signerId } = c.req.valid("param");
+  try {
+    await removeAgreementSigner(actorOrganizationId(c), me.id, Number(id), Number(signerId));
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof AgreementError) { const r = agreementErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const sendAgreementRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/agreements/{id}/send",
+  request: { params: IdParam, body: { content: { "application/json": { schema: SendAgreementInputSchema } } } },
+  responses: {
+    200: { description: "Sent", content: { "application/json": { schema: z.object({ signingLinks: z.array(z.object({ signerId: z.number().int(), signerName: z.string(), token: z.string() })) }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Not a draft", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(sendAgreementRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const { consent_text_version } = c.req.valid("json");
+  try {
+    const results = await sendAgreementForSignature(c.env.DB, actorOrganizationId(c), me.id, Number(id), consent_text_version);
+    return c.json({ signingLinks: results.map((r) => ({ signerId: r.signerId, signerName: r.signerName, token: r.token })) }, 200);
+  } catch (err) {
+    if (err instanceof AgreementError) { const r = agreementErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const transitionAgreementRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/agreements/{id}/transition",
+  request: { params: IdParam, body: { content: { "application/json": { schema: TransitionAgreementInputSchema } } } },
+  responses: {
+    200: { description: "Transitioned", content: { "application/json": { schema: z.object({ agreement: AgreementSchema }) } } },
+    400: { description: "Invalid transition", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(transitionAgreementRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const { to_status, reason } = c.req.valid("json");
+  try {
+    await transitionAgreement(c.env.DB, Number(id), { toStatus: to_status, actorUserId: me.id, organizationId: actorOrganizationId(c), reason });
+    const agreement = await getAgreement(actorOrganizationId(c), Number(id));
+    if (!agreement) return c.json({ error: "Agreement not found" }, 404);
+    return c.json({ agreement }, 200);
+  } catch (err) {
+    if (err instanceof AgreementWorkflowError) {
+      if (err.code === "not_found") return c.json({ error: err.message }, 404);
+      if (err.code === "conflict") return c.json({ error: err.message }, 409);
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
+});
+
+const agreementStatusHistoryRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/agreements/{id}/status-history",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "History", content: { "application/json": { schema: z.object({ history: z.array(AgreementStatusHistorySchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(agreementStatusHistoryRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const agreement = await getAgreement(actorOrganizationId(c), Number(id));
+  if (!agreement) return c.json({ error: "Agreement not found" }, 404);
+  const history = await getAgreementStatusHistory(agreement.id);
+  return c.json({ history }, 200);
+});
+
+const AgreementAuditSchema = z.object({
+  id: z.number().int(),
+  agreement_id: z.number().int(),
+  event_type: z.string(),
+  actor_user_id: z.number().int().nullable(),
+  details: z.string(),
+  created_at: z.string(),
+}).openapi("AgreementAudit");
+
+const agreementAuditRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/agreements/{id}/audit",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Audit trail", content: { "application/json": { schema: z.object({ audit: z.array(AgreementAuditSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(agreementAuditRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const agreement = await getAgreement(actorOrganizationId(c), Number(id));
+  if (!agreement) return c.json({ error: "Agreement not found" }, 404);
+  const audit = await listAgreementAudit(agreement.id);
+  return c.json({ audit }, 200);
+});
+
+const supersedeAgreementRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/agreements/{id}/supersede",
+  request: { params: IdParam, body: { content: { "application/json": { schema: CreateAgreementInputSchema } } } },
+  responses: {
+    201: { description: "Superseded", content: { "application/json": { schema: z.object({ oldAgreement: AgreementSchema, newAgreement: AgreementSchema, newVersion: AgreementVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(supersedeAgreementRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const body = c.req.valid("json");
+  try {
+    const result = await supersedeAgreement(c.env.DB, actorOrganizationId(c), me.id, Number(id), {
+      customerId: body.customer_id, planId: body.plan_id, effectiveDate: body.effective_date, expiresAt: body.expires_at,
+      renewalPreference: body.renewal_preference, coveredAssetIds: body.covered_asset_ids, legalTermsDocumentId: body.legal_terms_document_id,
+    });
+    return c.json(result, 201);
+  } catch (err) {
+    if (err instanceof AgreementError) { const r = agreementErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+// Plain app.get (not app.openapi/createRoute) — binary response, mirrors
+// Contracts' own signed-document route precedent exactly.
+app.get("/api/maintenance/agreements/:id/signed-document", async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Agreement not found" }, 404);
+  try {
+    const { bytes } = await getSignedAgreementArtifact(c.env, actorOrganizationId(c), id);
+    const disposition = c.req.query("mode") === "download" ? `attachment; filename="agreement-${id}.pdf"` : "inline";
+    return new Response(bytes, {
+      headers: {
+        "Content-Type": "application/pdf", "Content-Disposition": disposition,
+        "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox", "Cache-Control": "private, no-store",
+      },
+    });
+  } catch (err) {
+    if (err instanceof AgreementError) { const r = agreementErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+// ── Public Agreement signing routes (token-gated, UNAUTHENTICATED) ─────
+// Same "/api/public/*" prefix exemption Contracts already established.
+
+const AGREEMENT_SIGNING_LINK_ERROR = "This signing link is invalid or has expired";
+
+const PublicAgreementSigningViewSchema = z.object({
+  agreement_identifier: z.string(),
+  agreement_status: z.string(),
+  plan_snapshot: z.string(),
+  customer_snapshot: z.string(),
+  company_snapshot: z.string(),
+  effective_date: z.string().nullable(),
+  expires_at: z.string().nullable(),
+  renewal_preference: z.string(),
+  total_price_cents: z.number().int(),
+  tax_breakdown: z.string(),
+  signer_name: z.string(),
+  signer_email: z.string(),
+  signer_role: z.string(),
+  request_status: z.string(),
+  consent_at: z.string().nullable(),
+  signed_at: z.string().nullable(),
+});
+
+const getPublicAgreementSigningViewRoute = createRoute({
+  method: "get",
+  path: "/api/public/maintenance-agreements/sign/{token}",
+  request: { params: z.object({ token: z.string() }) },
+  responses: {
+    200: { description: "Signing view", content: { "application/json": { schema: z.object({ view: PublicAgreementSigningViewSchema }) } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getPublicAgreementSigningViewRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const view = await getAgreementSignatureRequestByToken(token);
+  if (!view) return c.json({ error: AGREEMENT_SIGNING_LINK_ERROR }, 404);
+  return c.json({
+    view: {
+      agreement_identifier: view.agreement.identifier, agreement_status: view.agreement.status,
+      plan_snapshot: view.version.plan_snapshot, customer_snapshot: view.version.customer_snapshot, company_snapshot: view.version.company_snapshot,
+      effective_date: view.version.effective_date, expires_at: view.version.expires_at, renewal_preference: view.version.renewal_preference,
+      total_price_cents: view.version.total_price_cents, tax_breakdown: view.version.tax_breakdown,
+      signer_name: view.signer.name, signer_email: view.signer.email, signer_role: view.signer.role,
+      request_status: view.request.status, consent_at: view.request.consent_at, signed_at: view.request.signed_at,
+    },
+  }, 200);
+});
+
+const agreementConsentRoute = createRoute({
+  method: "post",
+  path: "/api/public/maintenance-agreements/sign/{token}/consent",
+  request: { params: z.object({ token: z.string() }), body: { content: { "application/json": { schema: z.object({ consent_text_version: z.string().min(1).max(50) }).strict() } } } },
+  responses: {
+    200: { description: "Consent recorded", content: { "application/json": { schema: OkSchema } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(agreementConsentRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const { consent_text_version } = c.req.valid("json");
+  try {
+    await recordAgreementConsent(token, consent_text_version, clientIp(c), clientUserAgent(c));
+    return c.json({ ok: true }, 200);
+  } catch {
+    return c.json({ error: AGREEMENT_SIGNING_LINK_ERROR }, 404);
+  }
+});
+
+const SubmitAgreementSignatureInputSchema = z.object({
+  signer_name: z.string().min(1).max(200),
+  signature_method: z.enum(AGREEMENT_SIGNATURE_METHODS as unknown as [string, ...string[]]),
+  signature_image_data_url: z.string().max(2_900_000).optional(),
+  auto_renew_enabled: z.boolean(),
+  auto_renew_consent_text_version: z.string().min(1).max(50),
+}).strict();
+
+const submitAgreementSignatureRoute = createRoute({
+  method: "post",
+  path: "/api/public/maintenance-agreements/sign/{token}/sign",
+  request: { params: z.object({ token: z.string() }), body: { content: { "application/json": { schema: SubmitAgreementSignatureInputSchema } } } },
+  responses: {
+    200: { description: "Signed", content: { "application/json": { schema: OkSchema } } },
+    400: { description: "Consent required or invalid input", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Link already used", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(submitAgreementSignatureRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const body = c.req.valid("json");
+  try {
+    await submitAgreementSignature(
+      c.env.DB, c.env, token,
+      {
+        signerName: body.signer_name, signatureMethod: body.signature_method, signatureImageDataUrl: body.signature_image_data_url,
+        autoRenewEnabled: body.auto_renew_enabled, autoRenewConsentTextVersion: body.auto_renew_consent_text_version,
+      },
+      clientIp(c), clientUserAgent(c)
+    );
+    return c.json({ ok: true }, 200);
+  } catch (err) {
+    if (err instanceof AgreementError) {
+      if (err.code === "invalid_token") return c.json({ error: AGREEMENT_SIGNING_LINK_ERROR }, 404);
+      if (err.code === "conflict") return c.json({ error: err.message }, 409);
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
+});
+
+// ── Maintenance Memberships (Phase 19B) ───────────────────────────────
+
+const MembershipSchema = z.object({
+  id: z.number().int(),
+  agreement_id: z.number().int(),
+  customer_id: z.number().int(),
+  plan_id: z.number().int(),
+  status: z.string(),
+  effective_start: z.string().nullable(),
+  effective_end: z.string().nullable(),
+  visits_included: z.number().int().nullable(),
+  cancelled_at: z.string().nullable(),
+  cancel_reason: z.string(),
+  cancelled_by: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).openapi("MaintenanceMembership");
+
+const MembershipStatusHistorySchema = z.object({
+  id: z.number().int(),
+  membership_id: z.number().int(),
+  old_status: z.string().nullable(),
+  new_status: z.string(),
+  actor_user_id: z.number().int().nullable(),
+  reason: z.string(),
+  created_at: z.string(),
+}).openapi("MembershipStatusHistory");
+
+function membershipErrorToResponse(err: MembershipError): { body: { error: string }; status: 400 | 404 | 409 } {
+  if (err.code === "not_found") return { body: { error: err.message }, status: 404 };
+  if (err.code === "invalid_state") return { body: { error: err.message }, status: 409 };
+  return { body: { error: err.message }, status: 400 };
+}
+
+const listMembershipsRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/memberships",
+  request: { query: z.object({ customer_id: z.string().optional(), status: z.string().optional() }) },
+  responses: {
+    200: { description: "Memberships", content: { "application/json": { schema: z.object({ memberships: z.array(MembershipSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listMembershipsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageMemberships({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const q = c.req.valid("query");
+  const memberships = await listMemberships(actorOrganizationId(c), { customerId: q.customer_id ? Number(q.customer_id) : undefined, status: q.status });
+  return c.json({ memberships }, 200);
+});
+
+const getMembershipRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/memberships/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: {
+      description: "Membership with entitlement", content: { "application/json": { schema: z.object({
+        membership: MembershipSchema, visitsIncluded: z.number().int().nullable(), visitsConsumed: z.number().int(), visitsRemaining: z.number().int().nullable(),
+      }) } },
+    },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getMembershipRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageMemberships({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const entitlement = await getEntitlement(actorOrganizationId(c), Number(id));
+    return c.json({ membership: entitlement.membership, visitsIncluded: entitlement.visitsIncluded, visitsConsumed: entitlement.visitsConsumed, visitsRemaining: entitlement.visitsRemaining }, 200);
+  } catch (err) {
+    if (err instanceof MembershipError) { const r = membershipErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const cancelMembershipRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/memberships/{id}/cancel",
+  request: { params: IdParam, body: { content: { "application/json": { schema: z.object({ reason: z.string().min(1).max(2000) }).strict() } } } },
+  responses: {
+    200: { description: "Cancelled", content: { "application/json": { schema: z.object({ membership: MembershipSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Not cancellable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(cancelMembershipRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageMemberships({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const { reason } = c.req.valid("json");
+  try {
+    const membership = await cancelMembership(actorOrganizationId(c), me.id, Number(id), reason);
+    return c.json({ membership }, 200);
+  } catch (err) {
+    if (err instanceof MembershipError) { const r = membershipErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const membershipStatusHistoryRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/memberships/{id}/status-history",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "History", content: { "application/json": { schema: z.object({ history: z.array(MembershipStatusHistorySchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(membershipStatusHistoryRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageMemberships({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const membership = await getMembership(actorOrganizationId(c), Number(id));
+  if (!membership) return c.json({ error: "Membership not found" }, 404);
+  const history = await getMembershipStatusHistory(membership.id);
+  return c.json({ history }, 200);
+});
+
+const getMembershipByAgreementRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/agreements/{id}/membership",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Membership", content: { "application/json": { schema: z.object({ membership: MembershipSchema.nullable() }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getMembershipByAgreementRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageAgreements({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const membership = await getMembershipByAgreement(actorOrganizationId(c), Number(id));
+  return c.json({ membership }, 200);
+});
+
+// ── Maintenance Checklist Templates (Phase 19B) ───────────────────────
+
+const ChecklistItemInputSchema = z.object({
+  id: z.string().min(1).max(100),
+  label: z.string().min(1).max(200),
+  input_type: z.enum(CHECKLIST_ITEM_TYPES),
+  required: z.boolean(),
+  options: z.array(z.string().max(100)).max(50).optional(),
+}).strict();
+
+const ChecklistSectionInputSchema = z.object({ title: z.string().min(1).max(200), items: z.array(ChecklistItemInputSchema).min(1).max(50) }).strict();
+
+const ChecklistTemplateSchema = z.object({
+  id: z.number().int(),
+  name: z.string(),
+  applicability: z.string(),
+  active: z.number().int(),
+  current_version_id: z.number().int().nullable(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).openapi("ChecklistTemplate");
+
+const ChecklistTemplateVersionSchema = z.object({
+  id: z.number().int(),
+  template_id: z.number().int(),
+  version_number: z.number().int(),
+  sections: z.string(),
+  created_by: z.number().int().nullable(),
+  created_at: z.string(),
+}).openapi("ChecklistTemplateVersion");
+
+function checklistErrorToResponse(err: ChecklistTemplateError): { body: { error: string }; status: 400 | 404 | 409 } {
+  if (err.code === "not_found") return { body: { error: err.message }, status: 404 };
+  if (err.code === "invalid_state") return { body: { error: err.message }, status: 409 };
+  return { body: { error: err.message }, status: 400 };
+}
+
+const listChecklistTemplatesRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/checklist-templates",
+  request: { query: z.object({ include_inactive: z.string().optional() }) },
+  responses: {
+    200: { description: "Templates", content: { "application/json": { schema: z.object({ templates: z.array(ChecklistTemplateSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listChecklistTemplatesRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
+  const { include_inactive } = c.req.valid("query");
+  const templates = await listChecklistTemplates(actorOrganizationId(c), include_inactive === "true");
+  return c.json({ templates }, 200);
+});
+
+const getChecklistTemplateRoute = createRoute({
+  method: "get",
+  path: "/api/maintenance/checklist-templates/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Template with versions", content: { "application/json": { schema: z.object({ template: ChecklistTemplateSchema, versions: z.array(ChecklistTemplateVersionSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getChecklistTemplateRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const template = await getChecklistTemplate(actorOrganizationId(c), Number(id));
+  if (!template) return c.json({ error: "Checklist template not found" }, 404);
+  const versions = await listChecklistTemplateVersions(template.id);
+  return c.json({ template, versions }, 200);
+});
+
+const createChecklistTemplateRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/checklist-templates",
+  request: { body: { content: { "application/json": { schema: z.object({
+    name: z.string().min(1).max(200), applicability: z.array(z.string().max(100)).max(50).optional(), sections: z.array(ChecklistSectionInputSchema).min(1).max(30),
+  }).strict() } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ template: ChecklistTemplateSchema, version: ChecklistTemplateVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createChecklistTemplateRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageChecklistTemplates({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { name, applicability, sections } = c.req.valid("json");
+  try {
+    const { template, version } = await createChecklistTemplate(actorOrganizationId(c), me.id, name, applicability ?? [], sections);
+    return c.json({ template, version }, 201);
+  } catch (err) {
+    if (err instanceof ChecklistTemplateError) { const r = checklistErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const createNextChecklistVersionRoute = createRoute({
+  method: "post",
+  path: "/api/maintenance/checklist-templates/{id}/versions",
+  request: { params: IdParam, body: { content: { "application/json": { schema: z.object({ sections: z.array(ChecklistSectionInputSchema).min(1).max(30) }).strict() } } } },
+  responses: {
+    201: { description: "Version created", content: { "application/json": { schema: z.object({ version: ChecklistTemplateVersionSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createNextChecklistVersionRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageChecklistTemplates({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const { sections } = c.req.valid("json");
+  try {
+    const version = await createNextChecklistTemplateVersion(actorOrganizationId(c), me.id, Number(id), sections);
+    return c.json({ version }, 201);
+  } catch (err) {
+    if (err instanceof ChecklistTemplateError) { const r = checklistErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const updateChecklistTemplateMetaRoute = createRoute({
+  method: "put",
+  path: "/api/maintenance/checklist-templates/{id}",
+  request: { params: IdParam, body: { content: { "application/json": { schema: z.object({
+    name: z.string().min(1).max(200).optional(), applicability: z.array(z.string().max(100)).max(50).optional(), active: z.boolean().optional(),
+  }).strict() } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ template: ChecklistTemplateSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(updateChecklistTemplateMetaRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageChecklistTemplates({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const template = await updateChecklistTemplateMeta(actorOrganizationId(c), me.id, Number(id), c.req.valid("json"));
+    return c.json({ template }, 200);
+  } catch (err) {
+    if (err instanceof ChecklistTemplateError) { const r = checklistErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+// ── Maintenance Service Reports (Phase 19B) ───────────────────────────
+// RBAC reuses canActorAccessJobCompliance()/actorTechnicianId() from
+// workflow.ts verbatim — the same ownership rule Phase 4's compliance
+// photos/report/signature already established.
+
+interface JobForMaintenanceRoute { id: number; organization_id: number; customer_id: number; technician_id: number | null }
+
+async function loadJobForMaintenance(organizationId: number, jobId: number): Promise<JobForMaintenanceRoute | null> {
+  const row = await get<JobForMaintenanceRoute>(
+    "SELECT id, organization_id, customer_id, technician_id FROM jobs WHERE id = ? AND organization_id = ?", [jobId, organizationId]
+  );
+  return row ?? null;
+}
+
+const ServiceReportSchema = z.object({
+  id: z.number().int(),
+  job_id: z.number().int(),
+  agreement_id: z.number().int().nullable(),
+  membership_id: z.number().int().nullable(),
+  asset_id: z.number().int().nullable(),
+  technician_id: z.number().int().nullable(),
+  checklist_template_version_id: z.number().int().nullable(),
+  checklist_snapshot: z.string(),
+  checklist_results: z.string(),
+  measurements: z.string(),
+  work_performed: z.string(),
+  findings: z.string(),
+  recommendations: z.string(),
+  notes: z.string(),
+  internal_notes: z.string(),
+  customer_acknowledgement: z.string(),
+  status: z.string(),
+  finalized_at: z.string().nullable(),
+  finalized_by: z.number().int().nullable(),
+  document_hash: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).openapi("MaintenanceServiceReport");
+
+function serviceReportErrorToResponse(err: ServiceReportError): { body: { error: string }; status: 400 | 403 | 404 | 409 } {
+  if (err.code === "not_found") return { body: { error: err.message }, status: 404 };
+  if (err.code === "forbidden") return { body: { error: err.message }, status: 403 };
+  if (err.code === "invalid_state") return { body: { error: err.message }, status: 409 };
+  return { body: { error: err.message }, status: 400 };
+}
+
+const getServiceReportRoute = createRoute({
+  method: "get",
+  path: "/api/jobs/{id}/maintenance-report",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Report", content: { "application/json": { schema: z.object({ report: ServiceReportSchema.nullable() }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Job not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(getServiceReportRoute, async (c) => {
+  const me = currentUser(c);
+  const { id } = c.req.valid("param");
+  const job = await loadJobForMaintenance(actorOrganizationId(c), Number(id));
+  if (!job) return c.json({ error: "Job not found" }, 404);
+  try {
+    const report = await getServiceReportByJob(actorOrganizationId(c), { id: me.id, role: me.role }, job);
+    return c.json({ report }, 200);
+  } catch (err) {
+    if (err instanceof ServiceReportError) { const r = serviceReportErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const createServiceReportRoute = createRoute({
+  method: "post",
+  path: "/api/jobs/{id}/maintenance-report",
+  request: { params: IdParam, body: { content: { "application/json": { schema: z.object({
+    agreement_id: z.number().int().nullable().optional(), membership_id: z.number().int().nullable().optional(),
+    asset_id: z.number().int().nullable().optional(), checklist_template_version_id: z.number().int().nullable().optional(),
+  }).strict() } } } },
+  responses: {
+    201: { description: "Created or existing", content: { "application/json": { schema: z.object({ report: ServiceReportSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Job not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(createServiceReportRoute, async (c) => {
+  const me = currentUser(c);
+  const { id } = c.req.valid("param");
+  const job = await loadJobForMaintenance(actorOrganizationId(c), Number(id));
+  if (!job) return c.json({ error: "Job not found" }, 404);
+  const body = c.req.valid("json");
+  try {
+    const report = await createOrGetServiceReport(actorOrganizationId(c), { id: me.id, role: me.role }, job, {
+      agreementId: body.agreement_id, membershipId: body.membership_id, assetId: body.asset_id, checklistTemplateVersionId: body.checklist_template_version_id,
+    });
+    return c.json({ report }, 201);
+  } catch (err) {
+    if (err instanceof ServiceReportError) { const r = serviceReportErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const updateServiceReportRoute = createRoute({
+  method: "put",
+  path: "/api/jobs/{id}/maintenance-report/{reportId}",
+  request: { params: z.object({ id: z.string(), reportId: z.string() }), body: { content: { "application/json": { schema: z.object({
+    checklist_results: z.record(z.string(), z.unknown()).optional(),
+    measurements: z.record(z.string(), z.unknown()).optional(),
+    work_performed: z.string().max(5000).optional(),
+    findings: z.string().max(5000).optional(),
+    recommendations: z.string().max(5000).optional(),
+    notes: z.string().max(5000).optional(),
+    internal_notes: z.string().max(5000).optional(),
+  }).strict() } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ report: ServiceReportSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Not editable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(updateServiceReportRoute, async (c) => {
+  const me = currentUser(c);
+  const { id, reportId } = c.req.valid("param");
+  const job = await loadJobForMaintenance(actorOrganizationId(c), Number(id));
+  if (!job) return c.json({ error: "Job not found" }, 404);
+  const body = c.req.valid("json");
+  try {
+    const report = await updateServiceReportDraft(actorOrganizationId(c), { id: me.id, role: me.role }, job, Number(reportId), {
+      checklistResults: body.checklist_results, measurements: body.measurements, workPerformed: body.work_performed,
+      findings: body.findings, recommendations: body.recommendations, notes: body.notes, internalNotes: body.internal_notes,
+    });
+    return c.json({ report }, 200);
+  } catch (err) {
+    if (err instanceof ServiceReportError) { const r = serviceReportErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const ackRoute = createRoute({
+  method: "post",
+  path: "/api/jobs/{id}/maintenance-report/{reportId}/acknowledgement",
+  request: { params: z.object({ id: z.string(), reportId: z.string() }), body: { content: { "application/json": { schema: z.object({
+    signer_name: z.string().min(1).max(200), relationship: z.string().max(100).optional(), signature_image_data_url: z.string().max(2_900_000).optional(),
+  }).strict() } } } },
+  responses: {
+    200: { description: "Recorded", content: { "application/json": { schema: z.object({ report: ServiceReportSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Not editable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(ackRoute, async (c) => {
+  const me = currentUser(c);
+  const { id, reportId } = c.req.valid("param");
+  const job = await loadJobForMaintenance(actorOrganizationId(c), Number(id));
+  if (!job) return c.json({ error: "Job not found" }, 404);
+  const body = c.req.valid("json");
+  try {
+    const report = await captureCustomerAcknowledgement(c.env, actorOrganizationId(c), { id: me.id, role: me.role }, job, Number(reportId), {
+      signerName: body.signer_name, relationship: body.relationship, signatureImageDataUrl: body.signature_image_data_url,
+    });
+    return c.json({ report }, 200);
+  } catch (err) {
+    if (err instanceof ServiceReportError) { const r = serviceReportErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+const finalizeServiceReportRoute = createRoute({
+  method: "post",
+  path: "/api/jobs/{id}/maintenance-report/{reportId}/finalize",
+  request: { params: z.object({ id: z.string(), reportId: z.string() }) },
+  responses: {
+    200: { description: "Finalized", content: { "application/json": { schema: z.object({ report: ServiceReportSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Not editable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(finalizeServiceReportRoute, async (c) => {
+  const me = currentUser(c);
+  const { id, reportId } = c.req.valid("param");
+  const job = await loadJobForMaintenance(actorOrganizationId(c), Number(id));
+  if (!job) return c.json({ error: "Job not found" }, 404);
+  try {
+    const report = await finalizeServiceReport(c.env, actorOrganizationId(c), me.id, { id: me.id, role: me.role }, job, Number(reportId));
+    return c.json({ report }, 200);
+  } catch (err) {
+    if (err instanceof ServiceReportError) { const r = serviceReportErrorToResponse(err); return c.json(r.body, r.status); }
+    throw err;
+  }
+});
+
+// Plain app.get (binary response) — mirrors Contracts' signed-document
+// route precedent, same as the Agreement PDF route above.
+app.get("/api/jobs/:id/maintenance-report/:reportId/document", async (c) => {
+  const me = currentUser(c);
+  const id = Number(c.req.param("id"));
+  const reportId = Number(c.req.param("reportId"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Job not found" }, 404);
+  const job = await loadJobForMaintenance(actorOrganizationId(c), id);
+  if (!job) return c.json({ error: "Job not found" }, 404);
+  try {
+    const { bytes } = await getServiceReportDocument(c.env, actorOrganizationId(c), { id: me.id, role: me.role }, job, reportId);
+    const disposition = c.req.query("mode") === "download" ? `attachment; filename="service-report-${reportId}.pdf"` : "inline";
+    return new Response(bytes, {
+      headers: {
+        "Content-Type": "application/pdf", "Content-Disposition": disposition,
+        "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox", "Cache-Control": "private, no-store",
+      },
+    });
+  } catch (err) {
+    if (err instanceof ServiceReportError) { const r = serviceReportErrorToResponse(err); return c.json(r.body, r.status); }
     throw err;
   }
 });

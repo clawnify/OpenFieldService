@@ -303,8 +303,50 @@ export async function resetDatabase() {
     "DELETE FROM pricebook_item_audit",
     "DELETE FROM pricebook_items",
     "DELETE FROM pricebook_categories",
+    // Maintenance Plans / Agreements / Memberships / Legal Terms /
+    // Checklists / Service Reports (Phase 19B) — org id=1 is never deleted,
+    // so every one of these must be cleared explicitly or leak into the
+    // next test, same reasoning as tax_profiles/pricebook_items above.
+    // maintenance_service_reports MUST be deleted before
+    // maintenance_agreements: agreement_id/membership_id on that table have
+    // NO ON DELETE action (a still-referencing report row would block
+    // deleting the agreement/membership it references), same ordering
+    // constraint contracts.accepted_quote_version_id already established
+    // for quotes above. Deleting maintenance_agreements first also cascades
+    // away maintenance_agreement_versions/covered_equipment/signers/
+    // signature_requests/signature_events/status_history/audit AND
+    // maintenance_memberships (agreement_id ON DELETE CASCADE) automatically
+    // — the explicit entries below are redundant no-ops by the time they
+    // run, kept anyway per this file's established convention.
+    "DELETE FROM maintenance_entitlement_events",
+    "DELETE FROM maintenance_service_reports",
+    "DELETE FROM maintenance_agreements",
+    "DELETE FROM maintenance_agreement_versions",
+    "DELETE FROM maintenance_agreement_covered_equipment",
+    "DELETE FROM maintenance_agreement_signers",
+    "DELETE FROM maintenance_agreement_signature_requests",
+    "DELETE FROM maintenance_agreement_signature_events",
+    "DELETE FROM maintenance_agreement_status_history",
+    "DELETE FROM maintenance_agreement_audit",
+    "DELETE FROM maintenance_memberships",
+    "DELETE FROM maintenance_membership_status_history",
+    // maintenance_plans deleted after agreements/memberships above (both
+    // reference plan_id with NO ON DELETE action).
+    "DELETE FROM maintenance_plans",
+    // maintenance_checklist_templates MUST be deleted before
+    // maintenance_checklist_template_versions — same forward-reference
+    // ordering contract_templates/contract_template_versions already
+    // established (current_version_id points forward at a versions row).
+    "DELETE FROM maintenance_checklist_templates",
+    "DELETE FROM maintenance_checklist_template_versions",
+    // legal_terms_documents MUST be deleted before legal_terms_versions —
+    // same forward-reference ordering (current_published_version_id points
+    // forward at a versions row).
+    "DELETE FROM legal_terms_documents",
+    "DELETE FROM legal_terms_versions",
+    "DELETE FROM maintenance_admin_audit",
     "DELETE FROM organizations WHERE id != 1",
-    "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter', 'quote_counter', 'contract_counter')",
+    "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter', 'quote_counter', 'contract_counter', 'maintenance_agreement_counter')",
     "DELETE FROM sqlite_sequence",
   ]);
   await reseedBaselineData();

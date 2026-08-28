@@ -1,4 +1,181 @@
-export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "quotes" | "contracts" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility" | "phone-operations" | "pricebook";
+export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "quotes" | "contracts" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility" | "phone-operations" | "pricebook" | "maintenance-plans" | "legal-terms" | "checklist-templates" | "maintenance-agreements";
+
+// ── Phase 19B — Maintenance Plans / Memberships / Agreements ───────────
+
+export interface MaintenancePlan {
+  id: number;
+  code: string;
+  name: string;
+  description: string;
+  tier: string;
+  active: number;
+  price_cents: number;
+  currency: string;
+  taxable: number;
+  visit_entitlement_count: number | null;
+  frequency_description: string;
+  priority_benefit: string;
+  discount_type: string;
+  discount_percent: number | null;
+  discount_fixed_cents: number | null;
+  included_services: string;
+  excluded_services: string;
+  other_benefits: string;
+  equipment_eligibility: string;
+  effective_from: string | null;
+  effective_until: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LegalTermsDocument {
+  id: number;
+  type: string;
+  title: string;
+  current_published_version_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LegalTermsVersion {
+  id: number;
+  document_id: number;
+  version_number: number;
+  status: string;
+  content: string;
+  content_hash: string | null;
+  effective_from: string | null;
+  published_at: string | null;
+  superseded_at: string | null;
+  created_at: string;
+}
+
+export interface MaintenanceAgreement {
+  id: number;
+  identifier: string;
+  customer_id: number;
+  plan_id: number;
+  status: string;
+  current_version_id: number | null;
+  supersedes_agreement_id: number | null;
+  superseded_by_agreement_id: number | null;
+  cancel_reason: string;
+  created_at: string;
+  updated_at: string;
+  customer_name?: string | null;
+  plan_name?: string | null;
+}
+
+export interface MaintenanceAgreementVersion {
+  id: number;
+  agreement_id: number;
+  version_number: number;
+  plan_snapshot: string;
+  customer_snapshot: string;
+  company_snapshot: string;
+  terms_version_id: number | null;
+  terms_snapshot_hash: string | null;
+  effective_date: string | null;
+  expires_at: string | null;
+  renewal_preference: string;
+  auto_renew_consent: string;
+  tax_breakdown: string;
+  total_price_cents: number;
+  signed_document_hash: string | null;
+  signed_at: string | null;
+  created_at: string;
+}
+
+export interface CoveredEquipment {
+  id: number;
+  agreement_version_id: number;
+  asset_id: number | null;
+  asset_snapshot: string;
+}
+
+export interface AgreementSigner {
+  id: number;
+  agreement_id: number;
+  name: string;
+  email: string;
+  phone: string;
+  role: string;
+  sort_order: number;
+}
+
+export interface AgreementSignatureRequest {
+  id: number;
+  agreement_id: number;
+  signer_id: number;
+  status: string;
+  expires_at: string;
+  consent_at: string | null;
+  signed_at: string | null;
+  signature_method: string | null;
+}
+
+export interface MaintenanceMembership {
+  id: number;
+  agreement_id: number;
+  customer_id: number;
+  plan_id: number;
+  status: string;
+  effective_start: string | null;
+  effective_end: string | null;
+  visits_included: number | null;
+  cancelled_at: string | null;
+  cancel_reason: string;
+}
+
+export interface ChecklistTemplate {
+  id: number;
+  name: string;
+  applicability: string;
+  active: number;
+  current_version_id: number | null;
+}
+
+export interface ChecklistItem19B {
+  id: string;
+  label: string;
+  input_type: "PASS_FAIL" | "YES_NO" | "TEXT" | "NUMBER" | "MEASUREMENT" | "SELECT" | "PHOTO_REQUIRED";
+  required: boolean;
+  options?: string[];
+}
+
+export interface ChecklistSection19B {
+  title: string;
+  items: ChecklistItem19B[];
+}
+
+export interface ChecklistTemplateVersion {
+  id: number;
+  template_id: number;
+  version_number: number;
+  sections: string;
+}
+
+export interface MaintenanceServiceReport {
+  id: number;
+  job_id: number;
+  agreement_id: number | null;
+  membership_id: number | null;
+  asset_id: number | null;
+  checklist_template_version_id: number | null;
+  checklist_snapshot: string;
+  checklist_results: string;
+  measurements: string;
+  work_performed: string;
+  findings: string;
+  recommendations: string;
+  notes: string;
+  internal_notes: string;
+  customer_acknowledgement: string;
+  status: string;
+  finalized_at: string | null;
+  document_hash: string | null;
+}
 
 export type Role = "admin" | "dispatcher" | "technician";
 
