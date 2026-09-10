@@ -1,0 +1,2 @@
+ALTER TABLE "maintenance_plans" ADD COLUMN "row_version" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE "maintenance_plans" ADD CONSTRAINT "maintenance_plan_row_version_valid" CHECK ("maintenance_plans"."row_version">=0);

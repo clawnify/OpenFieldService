@@ -1,0 +1,16 @@
+import { z } from "zod";
+export const targetTypeSchema = z.enum(["customer", "contact", "company", "lead", "deal"]);
+export const targetSchema = z.strictObject({ targetType: targetTypeSchema, targetId: z.uuid() });
+const optionalText = (max: number) => z.string().trim().max(max).optional().or(z.literal(""));
+const optionalDateTime = z.iso.datetime({ offset: true }).nullable().optional();
+export const createTaskSchema = z.strictObject({ title: z.string().trim().min(1).max(200), description: optionalText(5_000), priority: z.enum(["low", "normal", "high", "urgent"]).default("normal"), dueAt: optionalDateTime, assigneeUserId: z.uuid().nullable().optional(), ...targetSchema.shape });
+export const updateTaskSchema = z.strictObject({ title: z.string().trim().min(1).max(200).optional(), description: optionalText(5_000), priority: z.enum(["low", "normal", "high", "urgent"]).optional(), dueAt: optionalDateTime });
+export const assignTaskSchema = z.strictObject({ assigneeUserId: z.uuid().nullable() });
+export const changeTaskStatusSchema = z.strictObject({ status: z.enum(["open", "in_progress", "completed"]) });
+export const taskFilterSchema = z.strictObject({ query: z.string().trim().max(200).optional(), status: z.enum(["open", "in_progress", "completed"]).optional(), priority: z.enum(["low", "normal", "high", "urgent"]).optional(), assigneeUserId: z.uuid().nullable().optional(), targetType: targetTypeSchema.optional(), targetId: z.uuid().optional(), dueBefore: z.iso.datetime({ offset: true }).optional(), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(25) }).refine((v) => !v.targetId || v.targetType, { path: ["targetType"], message: "Target type is required with target ID" });
+export const createActivitySchema = z.strictObject({ type: z.enum(["call", "email", "meeting", "visit", "other"]), subject: z.string().trim().min(1).max(200), details: optionalText(5_000), occurredAt: z.iso.datetime({ offset: true }), ...targetSchema.shape });
+export const updateActivitySchema = z.strictObject({ subject: z.string().trim().min(1).max(200).optional(), details: optionalText(5_000), occurredAt: z.iso.datetime({ offset: true }).optional() });
+export const createNoteSchema = z.strictObject({ body: z.string().trim().min(1).max(10_000), ...targetSchema.shape });
+export const updateNoteSchema = z.strictObject({ body: z.string().trim().min(1).max(10_000) });
+export const timelineFilterSchema = targetSchema.extend({ limit: z.coerce.number().int().min(1).max(100).default(50) });
+export type Target = z.infer<typeof targetSchema>; export type CreateTaskInput = z.input<typeof createTaskSchema>; export type UpdateTaskInput = z.input<typeof updateTaskSchema>; export type TaskFilter = z.input<typeof taskFilterSchema>; export type CreateActivityInput = z.input<typeof createActivitySchema>; export type UpdateActivityInput = z.input<typeof updateActivitySchema>; export type CreateNoteInput = z.input<typeof createNoteSchema>; export type UpdateNoteInput = z.input<typeof updateNoteSchema>;

@@ -186,6 +186,38 @@ const EMAIL_TEMPLATES: Record<string, (p: Payload) => EmailContent> = {
     ]);
     return { subject: `Receipt for your payment — ${invoice}`, text, html };
   },
+  // Phase 19D — the delayed, stateful satisfaction follow-up (distinct
+  // from Phase 9's immediate, one-way post_job_survey_v1 above — that one
+  // still fires unchanged at the moment of completion; this one fires
+  // days later via retention-automation.ts and links to a real response
+  // page). response_url is empty when APP_PUBLIC_URL is unconfigured —
+  // never a broken/fabricated link (see getAppPublicUrl's doc comment).
+  follow_up_request_v1: (p) => {
+    const name = str(p, "customer_name", "there");
+    const url = str(p, "response_url");
+    const lines = [
+      "We'd love to know how your recent service went.",
+      url ? `Please take a moment to let us know: ${url}` : "Please reply to this email or give us a call to let us know.",
+    ];
+    const { text, html } = emailWrap(`Hi ${name},`, lines);
+    return { subject: "How did we do?", text, html };
+  },
+  // Phase 19D — seasonal/retention campaign send. subject/body are
+  // admin-authored free text — routed through emailWrap()'s existing
+  // escapeHtml(), never rendered as raw HTML (Section 29's explicit
+  // "no unsafe arbitrary script/HTML execution" rule).
+  campaign_send_v1: (p) => {
+    const subject = str(p, "subject", "An update from us");
+    const body = str(p, "body");
+    const ctaLink = str(p, "ctaLink");
+    const unsubscribeUrl = str(p, "unsubscribeUrl");
+    const lines = [
+      body, ctaLink || "",
+      unsubscribeUrl ? `No longer want these emails? Unsubscribe: ${unsubscribeUrl}` : "",
+    ].filter(Boolean);
+    const { text, html } = emailWrap("Hi,", lines);
+    return { subject, text, html };
+  },
 };
 
 const SMS_TEMPLATES: Record<string, (p: Payload) => SmsContent> = {
@@ -200,6 +232,15 @@ const SMS_TEMPLATES: Record<string, (p: Payload) => SmsContent> = {
   post_job_survey_v1: (p) => ({ text: `Thanks for choosing us for ${str(p, "job_identifier")}! We'd love your feedback.` }),
   appointment_reminder_v1: (p) => ({ text: `Reminder: appointment ${str(p, "job_identifier")} tomorrow, ${str(p, "scheduled_date")} at ${str(p, "scheduled_time")}.` }),
   maintenance_renewal_reminder_v1: (p) => ({ text: `Your ${str(p, "plan_name")} maintenance plan (${str(p, "agreement_identifier")}) renews in ~${str(p, "milestone_days")} days, on ${str(p, "expires_date")}.` }),
+  follow_up_request_v1: (p) => {
+    const url = str(p, "response_url");
+    return { text: `We'd love your feedback on your recent service.${url ? ` ${url}` : " Please give us a call."}` };
+  },
+  campaign_send_v1: (p) => {
+    const unsubscribeUrl = str(p, "unsubscribeUrl");
+    const body = str(p, "body").slice(0, 240);
+    return { text: unsubscribeUrl ? `${body} Unsubscribe: ${unsubscribeUrl}` : body };
+  },
 };
 
 export function renderEmail(templateKey: string, payload: Payload): EmailContent {

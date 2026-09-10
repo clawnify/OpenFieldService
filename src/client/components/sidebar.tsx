@@ -6,7 +6,7 @@ import { ChangeMyPassword } from "./change-my-password";
 import {
   CalendarClock, LayoutDashboard, Briefcase, Users, Wrench, Settings, CalendarDays,
   FileText, Package, UserCog, KeyRound, LogOut, CalendarSync, SlidersHorizontal, BadgeCheck, Target, Calculator, FileSignature, Phone, Menu, X, Tags,
-  ClipboardList, ScrollText, ListChecks, RefreshCw,
+  ClipboardList, ScrollText, ListChecks, RefreshCw, Heart, Megaphone,
 } from "lucide-preact";
 import type { View } from "../types";
 
@@ -40,6 +40,14 @@ const navItems: { view: View; path: string; label: string; icon: typeof LayoutDa
   // inside this page are additionally gated admin-only client-side, and
   // independently enforced admin-only server-side regardless.
   { view: "maintenance-automation", path: "/maintenance-automation", label: "Maintenance Automation", icon: RefreshCw, hideFromTechnician: true },
+  // Phase 19D — customer retention (post-job follow-up, referrals, loyalty
+  // credit) and seasonal campaigns. Same hideFromTechnician split as
+  // everything else in this front-office section — canManageRetention/
+  // canViewCampaigns are admin+dispatcher server-side; campaign/referral-
+  // program CONFIGURATION is additionally admin-only, enforced server-side
+  // regardless of what renders here.
+  { view: "retention", path: "/retention", label: "Retention", icon: Heart, hideFromTechnician: true },
+  { view: "campaigns", path: "/campaigns", label: "Campaigns", icon: Megaphone, hideFromTechnician: true },
   // Plans/Terms/Checklist Templates are visible to dispatcher too (the
   // server's canViewPlans/canViewLegalTerms allow admin+dispatcher reads;
   // only write/publish/version actions are admin-only, enforced server-

@@ -121,11 +121,15 @@ export function GlobalSettings() {
     if (!editingThreshold) return;
     setSavingThreshold(true);
     try {
-      const numeric = parseFloat(thresholdDraft);
-      if (!Number.isFinite(numeric)) throw new Error("Enter a valid number");
-      const storedValue = editingThreshold.kind === "money_cents"
-        ? String(Math.round(numeric * 100))
-        : String(numeric);
+      let storedValue: string;
+      if (editingThreshold.kind === "text") {
+        if (!thresholdDraft.trim()) throw new Error("Enter a value");
+        storedValue = thresholdDraft.trim();
+      } else {
+        const numeric = parseFloat(thresholdDraft);
+        if (!Number.isFinite(numeric)) throw new Error("Enter a valid number");
+        storedValue = editingThreshold.kind === "money_cents" ? String(Math.round(numeric * 100)) : String(numeric);
+      }
       await api("POST", "/api/settings", {
         key: editingThreshold.key,
         value: storedValue,
@@ -497,7 +501,7 @@ export function GlobalSettings() {
               <div class="form-group full-width">
                 <label>Value{editingThreshold.unit ? ` (${editingThreshold.unit === "$" ? "dollars" : editingThreshold.unit})` : ""} *</label>
                 <input
-                  type="number" step="any" value={thresholdDraft}
+                  type={editingThreshold.kind === "text" ? "text" : "number"} step={editingThreshold.kind === "text" ? undefined : "any"} value={thresholdDraft}
                   onInput={(e) => setThresholdDraft((e.target as HTMLInputElement).value)}
                   autoFocus required
                 />

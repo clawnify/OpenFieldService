@@ -6,6 +6,7 @@ import { ConfirmDialog } from "./confirm-dialog";
 import { CustomerSearchSelect } from "./customer-search-select";
 import { StatusBadge } from "./status-badge";
 import { NotificationPreferences } from "./notification-preferences";
+import { CustomerRetentionPanel } from "./customer-retention-panel";
 import { NotificationHistory } from "./notification-history";
 import { CustomerAssets } from "./customer-assets";
 import { RelatedQuotes } from "./related-quotes";
@@ -341,6 +342,7 @@ export function CustomerDetail() {
 
         <div class="detail-sidebar">
           <NotificationPreferences recipientType="customer" recipientId={customer.id} role={user?.role} />
+          <CustomerRetentionPanel customerId={customer.id} role={user?.role} />
         </div>
       </div>
 

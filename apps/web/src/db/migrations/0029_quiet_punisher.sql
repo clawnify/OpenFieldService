@@ -1,0 +1,1 @@
+ALTER TABLE "phone_calls" ADD COLUMN "placement_started_at" timestamp with time zone;

@@ -1,0 +1,4 @@
+import { NextResponse } from "next/server";
+import { ApplicationError } from "@/lib/errors";
+import { PhoneOperationsService } from "@/modules/phone-operations/phone.service";
+export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) { try { const { id } = await params, token = request.headers.get("authorization")?.match(/^Bearer (.+)$/)?.[1] ?? "", result = await new PhoneOperationsService().addTranscript(token, id, await request.json()); return NextResponse.json(result); } catch (error) { if (error instanceof ApplicationError) return NextResponse.json({ error: error.message }, { status: error.code === "UNAUTHORIZED" ? 401 : error.code === "NOT_FOUND" ? 404 : 409 }); return NextResponse.json({ error: "Transcript could not be recorded" }, { status: 500 }); } }

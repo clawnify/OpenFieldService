@@ -1,0 +1,18 @@
+import { authorize } from "@/auth/authorization";
+import { getDb } from "@/db";
+import { ConflictError, NotFoundError } from "@/lib/errors";
+import { parseInput } from "@/lib/validation";
+import { AuditRepository } from "@/modules/audit/audit.repository";
+import type { RequestActor } from "@/modules/customers/customer.service";
+import { categoryInputSchema, pricebookFilterSchema, pricebookItemInputSchema, type PricebookItemInput } from "./pricebook.schema";
+import { PricebookRepository } from "./pricebook.repository";
+export class PricebookService {
+  constructor(private readonly repo=new PricebookRepository()){}
+  async listCategories(actor:RequestActor){await authorize(actor,"pricebook.read");return this.repo.listCategories(actor.organizationId)}
+  async createCategory(actor:RequestActor,raw:unknown){await authorize(actor,"pricebook.manage");const i=parseInput(categoryInputSchema,raw);return getDb().transaction(async tx=>{const r=new PricebookRepository(tx);if(i.parentId&&!await r.findCategory(actor.organizationId,i.parentId))throw new NotFoundError("Parent category not found");const value=await r.createCategory({...i,organizationId:actor.organizationId});await new AuditRepository(tx).record({organizationId:actor.organizationId,actorUserId:actor.userId,action:"pricebook_category.created",entityType:"pricebook_category",entityId:value.id,metadata:{name:value.name}});return value})}
+  async listItems(actor:RequestActor,raw:unknown){await authorize(actor,"pricebook.read");const i=parseInput(pricebookFilterSchema,raw);const result=await this.repo.list(actor.organizationId,{...i,limit:i.pageSize,offset:(i.page-1)*i.pageSize});return{...result,items:result.items.map(item=>this.project(actor,item)),page:i.page,pageSize:i.pageSize}}
+  async getItem(actor:RequestActor,id:string){await authorize(actor,"pricebook.read");const value=await this.repo.findItem(actor.organizationId,id);if(!value)throw new NotFoundError("Pricebook item not found");return this.project(actor,value)}
+  async createItem(actor:RequestActor,raw:PricebookItemInput){await authorize(actor,"pricebook.manage");const i=parseInput(pricebookItemInputSchema,raw);return getDb().transaction(async tx=>{const r=new PricebookRepository(tx);if(i.categoryId&&!await r.findCategory(actor.organizationId,i.categoryId))throw new NotFoundError("Category not found");let value;try{value=await r.createItem({...i,sku:i.sku||null,organizationId:actor.organizationId,createdBy:actor.userId,updatedBy:actor.userId})}catch(e){if(String(e).includes("pricebook_items_org_sku_unique"))throw new ConflictError("SKU is already in use");throw e}await new AuditRepository(tx).record({organizationId:actor.organizationId,actorUserId:actor.userId,action:"pricebook_item.created",entityType:"pricebook_item",entityId:value.id,metadata:{name:value.name,type:value.type}});return value})}
+  async archiveItem(actor:RequestActor,id:string){await authorize(actor,"pricebook.manage");return getDb().transaction(async tx=>{const r=new PricebookRepository(tx);const item=await r.lockItem(actor.organizationId,id);if(!item)throw new NotFoundError("Pricebook item not found");await r.updateItem(actor.organizationId,id,{status:"inactive",updatedBy:actor.userId});await new AuditRepository(tx).record({organizationId:actor.organizationId,actorUserId:actor.userId,action:"pricebook_item.archived",entityType:"pricebook_item",entityId:id,metadata:{}})})}
+  private project(actor:RequestActor,item:NonNullable<Awaited<ReturnType<PricebookRepository["findItem"]>>>){if(actor.role==="owner"||actor.role==="admin")return item;const{costCents,...publicItem}=item;void costCents;return publicItem}
+}

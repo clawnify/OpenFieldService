@@ -94,9 +94,14 @@ describe("catalog completeness — every entry is genuinely used by production c
     "REFERRAL_SOURCE_OPTIONS",
     "HEATING_SOURCE_OPTIONS",
     "BUSINESS_TIMEZONE",
+    // Phase 19D — read by src/server/retention-followup.ts
+    // (getFollowUpDelayDays/getReviewRequestUrl/getAppPublicUrl).
+    "POST_JOB_FOLLOWUP_DAYS",
+    "REVIEW_REQUEST_URL",
+    "APP_PUBLIC_URL",
   ];
 
-  it("contains exactly the keys read by src/server/rebate.ts, src/server/financial.ts, reference-data, and src/server/business-timezone.ts — no more, no fewer", () => {
+  it("contains exactly the keys read by src/server/rebate.ts, src/server/financial.ts, reference-data, src/server/business-timezone.ts, and src/server/retention-followup.ts — no more, no fewer", () => {
     expect(SETTINGS_CATALOG.map((e) => e.key).sort()).toEqual(EXPECTED_KEYS.sort());
   });
 

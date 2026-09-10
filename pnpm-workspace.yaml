@@ -1,6 +1,10 @@
+packages:
+  - apps/*
+
 allowBuilds:
   esbuild: true
-  sharp: false
+  sharp: true
+  unrs-resolver: true
   workerd: true
 minimumReleaseAgeExclude:
   - '@clawnify/app@0.1.0'

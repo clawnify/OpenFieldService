@@ -1,0 +1,11 @@
+import { sql } from "drizzle-orm";
+import { bigint, check, foreignKey, index, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { organizationMembers, organizations, users } from "./identity";
+export const attachmentTargetType = pgEnum("attachment_target_type", ["customer", "contact", "company", "lead", "deal", "note", "job"]);
+export const attachments = pgTable("attachments", {
+  id: uuid("id").defaultRandom().primaryKey(), organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }), targetType: attachmentTargetType("target_type").notNull(), targetId: uuid("target_id").notNull(), objectKey: text("object_key").notNull(), filename: text("filename").notNull(), contentType: text("content_type").notNull(), sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(), sha256: text("sha256").notNull(), uploadedBy: uuid("uploaded_by").notNull(), clientMutationId: uuid("client_mutation_id"), createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(), archivedAt: timestamp("archived_at", { withTimezone: true }), archivedBy: uuid("archived_by").references(() => users.id, { onDelete: "set null" }), storageDeletedAt: timestamp("storage_deleted_at", { withTimezone: true }),
+}, (table) => [
+  uniqueIndex("attachments_organization_id_unique").on(table.organizationId, table.id), uniqueIndex("attachments_object_key_unique").on(table.objectKey), uniqueIndex("attachments_sync_mutation_unique").on(table.organizationId, table.uploadedBy, table.clientMutationId), index("attachments_organization_target_idx").on(table.organizationId, table.targetType, table.targetId, table.createdAt),
+  foreignKey({ columns: [table.organizationId, table.uploadedBy], foreignColumns: [organizationMembers.organizationId, organizationMembers.userId], name: "attachments_uploader_tenant_fk" }).onDelete("restrict"),
+  check("attachments_size_positive", sql`${table.sizeBytes} > 0 and ${table.sizeBytes} <= 15728640`), check("attachments_sha256_format", sql`${table.sha256} ~ '^[0-9a-f]{64}$'`), check("attachments_storage_delete_requires_archive", sql`${table.storageDeletedAt} is null or ${table.archivedAt} is not null`),
+]);

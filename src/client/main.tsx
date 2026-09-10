@@ -6,6 +6,9 @@ import { SignContract } from "./components/sign-contract";
 import { PublicPay } from "./components/public-pay";
 import { EstimateSelection } from "./components/estimate-selection";
 import { SignMaintenanceAgreement } from "./components/sign-maintenance-agreement";
+import { FollowUpResponse } from "./components/follow-up-response";
+import { Refer } from "./components/refer";
+import { Unsubscribe } from "./components/unsubscribe";
 import "./styles.css";
 
 function Root() {
@@ -37,6 +40,11 @@ const estimateMatch = window.location.pathname.match(/^\/estimate\/([^/]+)$/);
 // comment). Deliberately a distinct path from /sign/:token (Contracts) —
 // Maintenance Agreements are a separate parallel domain, not a Contract.
 const signMaintenanceMatch = window.location.pathname.match(/^\/sign-maintenance\/([^/]+)$/);
+// Phase 19D — same standalone-page precedent, for the public post-job
+// follow-up response link and the public referral-landing link.
+const followUpMatch = window.location.pathname.match(/^\/follow-up\/([^/]+)$/);
+const referMatch = window.location.pathname.match(/^\/refer\/([^/]+)$/);
+const unsubscribeMatch = window.location.pathname.match(/^\/unsubscribe\/([^/]+)$/);
 
 render(
   signMatch ? (
@@ -47,6 +55,12 @@ render(
     <EstimateSelection token={decodeURIComponent(estimateMatch[1])} />
   ) : signMaintenanceMatch ? (
     <SignMaintenanceAgreement token={decodeURIComponent(signMaintenanceMatch[1])} />
+  ) : followUpMatch ? (
+    <FollowUpResponse token={decodeURIComponent(followUpMatch[1])} />
+  ) : referMatch ? (
+    <Refer code={decodeURIComponent(referMatch[1])} />
+  ) : unsubscribeMatch ? (
+    <Unsubscribe token={decodeURIComponent(unsubscribeMatch[1])} />
   ) : (
     <AuthProvider>
       <Root />

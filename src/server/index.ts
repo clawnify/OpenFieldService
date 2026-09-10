@@ -328,7 +328,30 @@ import {
   getCustomerContact, latestPaymentId, latestScheduleHistoryId, latestStatusHistoryId, safeEnqueue,
 } from "./notifications.js";
 import { runCronCycle, type NotificationProviderBindings } from "./notification-dispatcher.js";
-import { CONSENT_SOURCES, PreferenceUpdateError, getPreferencesView, updatePreferences } from "./notification-preferences.js";
+import {
+  CONSENT_SOURCES, PreferenceUpdateError, getPreferencesView, updatePreferences, updateMarketingPreferences,
+  unsubscribeFromMarketing, findRecipientByUnsubscribeToken,
+} from "./notification-preferences.js";
+import {
+  canManageRetention, FollowUpError,
+  listFollowUps as listCustomerFollowUps, getFollowUp, closeFollowUp,
+  getFollowUpByToken, respondToFollowUp, markReviewClicked,
+} from "./retention-followup.js";
+import {
+  ReferralError,
+  getReferralProgram, upsertReferralProgram, createReferralCode, listReferrals,
+  getReferralByCode, claimReferralCode,
+  listCreditLedger, issueLoyaltyGrant, voidCredit, markCreditRedeemed, getAvailableCreditBalance,
+} from "./retention-referral.js";
+import {
+  canManageCampaigns, canViewCampaigns, CampaignError,
+  getCampaign, listCampaigns, createCampaign, updateCampaign, scheduleCampaign,
+  pauseCampaign, resumeCampaign, cancelCampaign, previewAudience, listCampaignRecipients,
+  type AudienceFilter,
+} from "./retention-campaigns.js";
+import {
+  runRetentionAutomationCycle, listRetentionRuns, computeRetentionSignals,
+} from "./retention-automation.js";
 import {
   getCustomerNotificationHistory, getInvoiceNotificationHistory, getJobNotificationHistory, getLeadNotificationHistory,
 } from "./notification-history.js";
@@ -8473,6 +8496,864 @@ app.openapi(previewAutomationRoute, async (c) => {
   return c.json({ occurrences, renewals }, 200);
 });
 
+// ── Retention / Referral / Loyalty / Campaigns (Phase 19D) ──────────────
+// Server-authoritative throughout — no input schema accepts organization_id/
+// customer ownership/reward qualification/reward amount/ledger balance/
+// campaign or send status/provider ids/system actor/suppression bypass
+// from the client.
+
+const MarketingPreferenceBody = z.object({
+  marketing_email_opt_in: z.boolean().optional(),
+  marketing_sms_opt_in: z.boolean().optional(),
+  consent_source: z.string().optional(),
+}).strict();
+
+const updateMarketingPreferencesRoute = createRoute({
+  method: "put",
+  path: "/api/customers/{id}/marketing-preferences",
+  request: { params: IdParam, body: { content: { "application/json": { schema: MarketingPreferenceBody } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.any() } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(updateMarketingPreferencesRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role === "technician") return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const customer = await get<{ id: number }>("SELECT id FROM customers WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
+  if (!customer) return c.json({ error: "Customer not found" }, 404);
+  const data = c.req.valid("json");
+  try {
+    const preferences = await updateMarketingPreferences("customer", Number(id), {
+      emailOptIn: data.marketing_email_opt_in, smsOptIn: data.marketing_sms_opt_in, consentSource: data.consent_source,
+    });
+    return c.json({ preferences, sms_consent_sources: CONSENT_SOURCES }, 200);
+  } catch (err) {
+    if (err instanceof PreferenceUpdateError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+// ── Post-job follow-up / satisfaction / review request ──────────────────
+
+const FollowUpSchema = z.object({
+  id: z.number().int(), organization_id: z.number().int(), job_id: z.number().int(), customer_id: z.number().int(),
+  status: z.string(), due_date: z.string(), sent_at: z.string().nullable(), response: z.string(), response_notes: z.string(),
+  responded_at: z.string().nullable(), review_status: z.string(), review_sent_at: z.string().nullable(),
+  review_clicked_at: z.string().nullable(), maintenance_offer_shown: z.number().int(), closed_at: z.string().nullable(),
+  created_at: z.string(), updated_at: z.string(),
+}).openapi("CustomerFollowUp");
+
+const listCustomerFollowUpsRoute = createRoute({
+  method: "get",
+  path: "/api/retention/follow-ups",
+  request: { query: z.object({ status: z.string().optional() }) },
+  responses: {
+    200: { description: "Follow-ups", content: { "application/json": { schema: z.object({ followUps: z.array(FollowUpSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listCustomerFollowUpsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageRetention({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { status } = c.req.valid("query");
+  const followUps = await listCustomerFollowUps(actorOrganizationId(c), { status });
+  return c.json({ followUps }, 200);
+});
+
+const getFollowUpRoute = createRoute({
+  method: "get",
+  path: "/api/retention/follow-ups/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Follow-up", content: { "application/json": { schema: z.object({ followUp: FollowUpSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getFollowUpRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageRetention({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const followUp = await getFollowUp(actorOrganizationId(c), Number(id));
+    return c.json({ followUp }, 200);
+  } catch (err) {
+    if (err instanceof FollowUpError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+const closeFollowUpRoute = createRoute({
+  method: "post",
+  path: "/api/retention/follow-ups/{id}/close",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Closed", content: { "application/json": { schema: z.object({ followUp: FollowUpSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(closeFollowUpRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageRetention({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const followUp = await closeFollowUp(actorOrganizationId(c), Number(id), me.id);
+    return c.json({ followUp }, 200);
+  } catch (err) {
+    if (err instanceof FollowUpError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+// Public, token-scoped — no auth, mirrors the established public
+// signing-link security pattern (opaque bearer token, hashed at rest,
+// expiring, never exposes anything beyond what this one flow needs).
+const PUBLIC_FOLLOWUP_LINK_ERROR = "This link is invalid or has expired";
+
+const getPublicFollowUpRoute = createRoute({
+  method: "get",
+  path: "/api/public/follow-up/{token}",
+  request: { params: z.object({ token: z.string() }) },
+  responses: {
+    200: { description: "Follow-up view", content: { "application/json": { schema: z.object({ status: z.string(), jobIdentifier: z.string(), customerName: z.string() }) } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getPublicFollowUpRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  try {
+    const view = await getFollowUpByToken(token);
+    // Explicit whitelist, never the full internal view — followUpId/
+    // organizationId must never reach an unauthenticated caller, matching
+    // every other public view in this codebase (e.g.
+    // getPublicSigningViewRoute's own explicit reshape).
+    return c.json({ status: view.status, jobIdentifier: view.jobIdentifier, customerName: view.customerName }, 200);
+  } catch {
+    return c.json({ error: PUBLIC_FOLLOWUP_LINK_ERROR }, 404);
+  }
+});
+
+const respondFollowUpRoute = createRoute({
+  method: "post",
+  path: "/api/public/follow-up/{token}/respond",
+  request: {
+    params: z.object({ token: z.string() }),
+    body: { content: { "application/json": { schema: z.object({ response: z.enum(["satisfied", "needs_attention"]), notes: z.string().max(2000).optional() }).strict() } } },
+  },
+  responses: {
+    200: {
+      description: "Response recorded", content: { "application/json": { schema: z.object({
+        status: z.string(), reviewUrl: z.string().nullable(),
+        planOffer: z.array(z.object({ id: z.number().int(), name: z.string(), description: z.string(), tier: z.string(), priceCents: z.number().int() })).nullable(),
+      }) } },
+    },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(respondFollowUpRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const body = c.req.valid("json");
+  try {
+    const view = await getFollowUpByToken(token);
+    const result = await respondToFollowUp(view.organizationId, token, body.response, body.notes ?? "");
+    return c.json(result, 200);
+  } catch (err) {
+    if (err instanceof FollowUpError) return c.json({ error: PUBLIC_FOLLOWUP_LINK_ERROR }, 404);
+    throw err;
+  }
+});
+
+const reviewClickRoute = createRoute({
+  method: "post",
+  path: "/api/public/follow-up/{token}/review-click",
+  request: { params: z.object({ token: z.string() }) },
+  responses: {
+    200: { description: "Recorded", content: { "application/json": { schema: OkSchema } } },
+    404: { description: "Invalid or expired link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(reviewClickRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  try {
+    const view = await getFollowUpByToken(token);
+    await markReviewClicked(view.organizationId, token);
+    return c.json({ ok: true }, 200);
+  } catch {
+    return c.json({ error: PUBLIC_FOLLOWUP_LINK_ERROR }, 404);
+  }
+});
+
+// ── Referral program / attribution / rewards ─────────────────────────────
+
+const ReferralProgramSchema = z.object({
+  id: z.number().int(), organization_id: z.number().int(), enabled: z.number().int(),
+  reward_type: z.string(), reward_value_cents: z.number().int().nullable(), reward_description: z.string(),
+  qualification_rule: z.string(), created_at: z.string(), updated_at: z.string(),
+}).openapi("ReferralProgram");
+
+const getReferralProgramRoute = createRoute({
+  method: "get",
+  path: "/api/retention/referral-program",
+  responses: {
+    200: { description: "Program", content: { "application/json": { schema: z.object({ program: ReferralProgramSchema }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getReferralProgramRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageRetention({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const program = await getReferralProgram(actorOrganizationId(c));
+  return c.json({ program }, 200);
+});
+
+const ReferralProgramInputSchema = z.object({
+  enabled: z.boolean(), reward_type: z.enum(["account_credit", "fixed_reward", "service_credit", "future_discount", "non_cash"]),
+  reward_value_cents: z.number().int().min(0).nullable().optional(), reward_description: z.string().max(500).optional(),
+  qualification_rule: z.enum(["first_completed_job", "first_paid_invoice"]),
+}).strict();
+
+const updateReferralProgramRoute = createRoute({
+  method: "put",
+  path: "/api/retention/referral-program",
+  request: { body: { content: { "application/json": { schema: ReferralProgramInputSchema } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ program: ReferralProgramSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(updateReferralProgramRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const body = c.req.valid("json");
+  try {
+    const program = await upsertReferralProgram(actorOrganizationId(c), me.id, {
+      enabled: body.enabled, rewardType: body.reward_type, rewardValueCents: body.reward_value_cents,
+      rewardDescription: body.reward_description, qualificationRule: body.qualification_rule,
+    });
+    return c.json({ program }, 200);
+  } catch (err) {
+    if (err instanceof ReferralError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
+
+const ReferralSchema = z.object({
+  id: z.number().int(), organization_id: z.number().int(), referrer_customer_id: z.number().int(),
+  referred_customer_id: z.number().int().nullable(), referred_lead_id: z.number().int().nullable(),
+  referral_code: z.string(), status: z.string(), qualifying_job_id: z.number().int().nullable(),
+  qualifying_invoice_id: z.number().int().nullable(), qualified_at: z.string().nullable(), rejected_reason: z.string(),
+  created_at: z.string(), updated_at: z.string(),
+}).openapi("CustomerReferral");
+
+const createReferralRoute = createRoute({
+  method: "post",
+  path: "/api/customers/{id}/referrals",
+  request: { params: IdParam, body: { content: { "application/json": { schema: z.object({}).strict() } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ referral: ReferralSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(createReferralRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageRetention({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const referral = await createReferralCode(actorOrganizationId(c), me.id, Number(id));
+    return c.json({ referral }, 201);
+  } catch (err) {
+    if (err instanceof ReferralError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+const listCustomerReferralsRoute = createRoute({
+  method: "get",
+  path: "/api/customers/{id}/referrals",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Referrals", content: { "application/json": { schema: z.object({ referrals: z.array(ReferralSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listCustomerReferralsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageRetention({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const customer = await get<{ id: number }>("SELECT id FROM customers WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
+  if (!customer) return c.json({ error: "Customer not found" }, 404);
+  const referrals = await listReferrals(actorOrganizationId(c), { referrerCustomerId: Number(id) });
+  return c.json({ referrals }, 200);
+});
+
+const listAllReferralsRoute = createRoute({
+  method: "get",
+  path: "/api/retention/referrals",
+  request: { query: z.object({ status: z.string().optional() }) },
+  responses: {
+    200: { description: "Referrals", content: { "application/json": { schema: z.object({ referrals: z.array(ReferralSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listAllReferralsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageRetention({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { status } = c.req.valid("query");
+  const referrals = await listReferrals(actorOrganizationId(c), { status });
+  return c.json({ referrals }, 200);
+});
+
+// Public — opaque code lookup only, never reveals raw customer ids.
+const getPublicReferralRoute = createRoute({
+  method: "get",
+  path: "/api/public/refer/{code}",
+  request: { params: z.object({ code: z.string() }) },
+  responses: {
+    200: { description: "Referral landing view", content: { "application/json": { schema: z.object({ referrerName: z.string() }) } } },
+    404: { description: "Invalid link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getPublicReferralRoute, async (c) => {
+  const { code } = c.req.valid("param");
+  const view = await getReferralByCode(code);
+  if (!view) return c.json({ error: "This referral link is invalid or has already been used" }, 404);
+  return c.json({ referrerName: view.referrerName }, 200);
+});
+
+const claimReferralRoute = createRoute({
+  method: "post",
+  path: "/api/public/refer/{code}/claim",
+  request: {
+    params: z.object({ code: z.string() }),
+    body: { content: { "application/json": { schema: z.object({ name: z.string().min(1).max(200), phone: z.string().max(50).optional(), email: z.string().email().max(200).optional() }).strict() } } },
+  },
+  responses: {
+    201: { description: "Claimed", content: { "application/json": { schema: OkSchema } } },
+    404: { description: "Invalid link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(claimReferralRoute, async (c) => {
+  const { code } = c.req.valid("param");
+  const body = c.req.valid("json");
+  const result = await claimReferralCode(code, { name: body.name, phone: body.phone, email: body.email });
+  if (!result) return c.json({ error: "This referral link is invalid or has already been used" }, 404);
+  return c.json({ ok: true }, 201);
+});
+
+// Public — the mandatory opt-out for marketing sends (Security/Code review
+// finding: opt-in existed with no reachable opt-out). Token-scoped, same
+// public-page shape as the other Phase 19D links; never touches the
+// transactional email_enabled/sms_enabled toggle (unsubscribeFromMarketing's
+// own contract).
+const getPublicUnsubscribeRoute = createRoute({
+  method: "get",
+  path: "/api/public/marketing-unsubscribe/{token}",
+  request: { params: z.object({ token: z.string() }) },
+  responses: {
+    200: { description: "Valid token", content: { "application/json": { schema: OkSchema } } },
+    404: { description: "Invalid link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getPublicUnsubscribeRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const recipient = await findRecipientByUnsubscribeToken(token);
+  if (!recipient) return c.json({ error: "This link is invalid." }, 404);
+  return c.json({ ok: true }, 200);
+});
+
+const postPublicUnsubscribeRoute = createRoute({
+  method: "post",
+  path: "/api/public/marketing-unsubscribe/{token}",
+  request: { params: z.object({ token: z.string() }) },
+  responses: {
+    200: { description: "Unsubscribed", content: { "application/json": { schema: OkSchema } } },
+    404: { description: "Invalid link", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(postPublicUnsubscribeRoute, async (c) => {
+  const { token } = c.req.valid("param");
+  const recipient = await findRecipientByUnsubscribeToken(token);
+  if (!recipient) return c.json({ error: "This link is invalid." }, 404);
+  await unsubscribeFromMarketing(recipient.recipientType, recipient.recipientId);
+  return c.json({ ok: true }, 200);
+});
+
+// ── Unified reward / loyalty credit ledger ──────────────────────────────
+
+const CreditLedgerSchema = z.object({
+  id: z.number().int(), organization_id: z.number().int(), customer_id: z.number().int(), source_type: z.string(),
+  source_id: z.number().int().nullable(), amount_cents: z.number().int().nullable(), value_description: z.string(),
+  status: z.string(), reason: z.string(), issued_at: z.string(), voided_at: z.string().nullable(), void_reason: z.string(),
+  redeemed_at: z.string().nullable(), redeemed_reason: z.string(), actor_user_id: z.number().int().nullable(), created_at: z.string(),
+}).openapi("CustomerCreditLedgerEntry");
+
+const listCustomerCreditsRoute = createRoute({
+  method: "get",
+  path: "/api/customers/{id}/credits",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Credits", content: { "application/json": { schema: z.object({ credits: z.array(CreditLedgerSchema), availableBalanceCents: z.number().int() }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listCustomerCreditsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageRetention({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const customer = await get<{ id: number }>("SELECT id FROM customers WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
+  if (!customer) return c.json({ error: "Customer not found" }, 404);
+  const [credits, availableBalanceCents] = await Promise.all([
+    listCreditLedger(actorOrganizationId(c), Number(id)),
+    getAvailableCreditBalance(actorOrganizationId(c), Number(id)),
+  ]);
+  return c.json({ credits, availableBalanceCents }, 200);
+});
+
+const IssueCreditBody = z.object({
+  amount_cents: z.number().int().min(0).nullable().optional(), value_description: z.string().max(500).optional(),
+  reason: z.string().min(1).max(500),
+}).strict();
+
+const issueCreditRoute = createRoute({
+  method: "post",
+  path: "/api/customers/{id}/credits",
+  request: { params: IdParam, body: { content: { "application/json": { schema: IssueCreditBody } } } },
+  responses: {
+    201: { description: "Issued", content: { "application/json": { schema: z.object({ credit: CreditLedgerSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(issueCreditRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const body = c.req.valid("json");
+  try {
+    const credit = await issueLoyaltyGrant(actorOrganizationId(c), me.id, Number(id), body.amount_cents ?? null, body.value_description ?? "", body.reason);
+    return c.json({ credit }, 201);
+  } catch (err) {
+    if (err instanceof ReferralError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+const CreditReasonBody = z.object({ reason: z.string().min(1).max(500) }).strict();
+
+const voidCreditRoute = createRoute({
+  method: "post",
+  path: "/api/credits/{id}/void",
+  request: { params: IdParam, body: { content: { "application/json": { schema: CreditReasonBody } } } },
+  responses: {
+    200: { description: "Voided", content: { "application/json": { schema: z.object({ credit: CreditLedgerSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(voidCreditRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const { reason } = c.req.valid("json");
+  try {
+    const credit = await voidCredit(actorOrganizationId(c), Number(id), me.id, reason);
+    return c.json({ credit }, 200);
+  } catch (err) {
+    if (err instanceof ReferralError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+const redeemCreditRoute = createRoute({
+  method: "post",
+  path: "/api/credits/{id}/redeem",
+  request: { params: IdParam, body: { content: { "application/json": { schema: CreditReasonBody } } } },
+  responses: {
+    200: { description: "Marked redeemed", content: { "application/json": { schema: z.object({ credit: CreditLedgerSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(redeemCreditRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const { reason } = c.req.valid("json");
+  try {
+    const credit = await markCreditRedeemed(actorOrganizationId(c), Number(id), me.id, reason);
+    return c.json({ credit }, 200);
+  } catch (err) {
+    if (err instanceof ReferralError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+// ── Seasonal / retention campaigns ──────────────────────────────────────
+
+const CampaignSchema = z.object({
+  id: z.number().int(), organization_id: z.number().int(), name: z.string(), campaign_type: z.string(), status: z.string(),
+  channel: z.string(), subject: z.string(), body: z.string(), cta_link: z.string(), audience_filter: z.string(),
+  scheduled_for: z.string().nullable(), started_at: z.string().nullable(), completed_at: z.string().nullable(),
+  cancelled_at: z.string().nullable(), cancel_reason: z.string(), created_by: z.number().int().nullable(),
+  created_at: z.string(), updated_at: z.string(),
+}).openapi("Campaign");
+
+const AudienceFilterSchema = z.object({
+  hasActiveMembership: z.boolean().optional(), minDaysSinceLastJob: z.number().int().min(0).optional(),
+  maxDaysSinceLastJob: z.number().int().min(0).optional(), city: z.string().max(100).optional(),
+}).strict();
+
+const CampaignInputSchema = z.object({
+  name: z.string().min(1).max(200), campaign_type: z.string().max(50).optional(), channel: z.enum(["email", "sms", "both"]),
+  subject: z.string().max(200).optional(), body: z.string().min(1).max(10000), cta_link: z.string().max(2000).optional(),
+  audience_filter: AudienceFilterSchema.optional(),
+}).strict();
+
+const listCampaignsRoute = createRoute({
+  method: "get",
+  path: "/api/campaigns",
+  request: { query: z.object({ status: z.string().optional() }) },
+  responses: {
+    200: { description: "Campaigns", content: { "application/json": { schema: z.object({ campaigns: z.array(CampaignSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listCampaignsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewCampaigns({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { status } = c.req.valid("query");
+  const campaigns = await listCampaigns(actorOrganizationId(c), { status });
+  return c.json({ campaigns }, 200);
+});
+
+const createCampaignRoute = createRoute({
+  method: "post",
+  path: "/api/campaigns",
+  request: { body: { content: { "application/json": { schema: CampaignInputSchema } } } },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ campaign: CampaignSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(createCampaignRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageCampaigns({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const body = c.req.valid("json");
+  try {
+    const campaign = await createCampaign(actorOrganizationId(c), me.id, {
+      name: body.name, campaignType: body.campaign_type, channel: body.channel, subject: body.subject,
+      body: body.body, ctaLink: body.cta_link, audienceFilter: body.audience_filter as AudienceFilter | undefined,
+    });
+    return c.json({ campaign }, 201);
+  } catch (err) {
+    if (err instanceof CampaignError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+const getCampaignRoute = createRoute({
+  method: "get",
+  path: "/api/campaigns/{id}",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Campaign", content: { "application/json": { schema: z.object({ campaign: CampaignSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getCampaignRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewCampaigns({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const campaign = await getCampaign(actorOrganizationId(c), Number(id));
+    return c.json({ campaign }, 200);
+  } catch (err) {
+    if (err instanceof CampaignError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+const updateCampaignRoute = createRoute({
+  method: "put",
+  path: "/api/campaigns/{id}",
+  request: { params: IdParam, body: { content: { "application/json": { schema: CampaignInputSchema.partial() } } } },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.object({ campaign: CampaignSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(updateCampaignRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageCampaigns({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const body = c.req.valid("json");
+  try {
+    const campaign = await updateCampaign(actorOrganizationId(c), me.id, Number(id), {
+      name: body.name, campaignType: body.campaign_type, channel: body.channel, subject: body.subject,
+      body: body.body, ctaLink: body.cta_link, audienceFilter: body.audience_filter as AudienceFilter | undefined,
+    });
+    return c.json({ campaign }, 200);
+  } catch (err) {
+    if (err instanceof CampaignError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+const ScheduleCampaignBody = z.object({ scheduled_for: z.string().min(1) }).strict();
+
+const scheduleCampaignRoute = createRoute({
+  method: "post",
+  path: "/api/campaigns/{id}/schedule",
+  request: { params: IdParam, body: { content: { "application/json": { schema: ScheduleCampaignBody } } } },
+  responses: {
+    200: { description: "Scheduled", content: { "application/json": { schema: z.object({ campaign: CampaignSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(scheduleCampaignRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageCampaigns({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const { scheduled_for } = c.req.valid("json");
+  try {
+    const campaign = await scheduleCampaign(actorOrganizationId(c), me.id, Number(id), scheduled_for);
+    return c.json({ campaign }, 200);
+  } catch (err) {
+    if (err instanceof CampaignError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+const pauseCampaignRoute = createRoute({
+  method: "post",
+  path: "/api/campaigns/{id}/pause",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Paused", content: { "application/json": { schema: z.object({ campaign: CampaignSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(pauseCampaignRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageCampaigns({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const campaign = await pauseCampaign(actorOrganizationId(c), me.id, Number(id));
+    return c.json({ campaign }, 200);
+  } catch (err) {
+    if (err instanceof CampaignError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+const resumeCampaignRoute = createRoute({
+  method: "post",
+  path: "/api/campaigns/{id}/resume",
+  request: { params: IdParam },
+  responses: {
+    200: { description: "Resumed", content: { "application/json": { schema: z.object({ campaign: CampaignSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(resumeCampaignRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageCampaigns({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const campaign = await resumeCampaign(actorOrganizationId(c), me.id, Number(id));
+    return c.json({ campaign }, 200);
+  } catch (err) {
+    if (err instanceof CampaignError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+const cancelCampaignRoute = createRoute({
+  method: "post",
+  path: "/api/campaigns/{id}/cancel",
+  request: { params: IdParam, body: { content: { "application/json": { schema: CreditReasonBody } } } },
+  responses: {
+    200: { description: "Cancelled", content: { "application/json": { schema: z.object({ campaign: CampaignSchema }) } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(cancelCampaignRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageCampaigns({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const { reason } = c.req.valid("json");
+  try {
+    const campaign = await cancelCampaign(actorOrganizationId(c), me.id, Number(id), reason);
+    return c.json({ campaign }, 200);
+  } catch (err) {
+    if (err instanceof CampaignError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+const previewCampaignAudienceRoute = createRoute({
+  method: "post",
+  path: "/api/campaigns/{id}/preview-audience",
+  request: { params: IdParam, body: { content: { "application/json": { schema: z.object({}).strict() } } } },
+  responses: {
+    200: {
+      description: "Preview", content: { "application/json": { schema: z.object({
+        totalCandidates: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(),
+        suppressedByReason: z.record(z.string(), z.number().int()),
+      }) } },
+    },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(previewCampaignAudienceRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageCampaigns({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  try {
+    const campaign = await getCampaign(actorOrganizationId(c), Number(id));
+    const filter = JSON.parse(campaign.audience_filter || "{}") as AudienceFilter;
+    const channel = campaign.channel === "sms" ? "sms" : "email";
+    const preview = await previewAudience(actorOrganizationId(c), filter, channel);
+    return c.json(preview, 200);
+  } catch (err) {
+    if (err instanceof CampaignError) { if (err.code === "not_found") return c.json({ error: err.message }, 404); return c.json({ error: err.message }, 400); }
+    throw err;
+  }
+});
+
+const listCampaignRecipientsRoute = createRoute({
+  method: "get",
+  path: "/api/campaigns/{id}/recipients",
+  request: { params: IdParam },
+  responses: {
+    200: {
+      description: "Recipients", content: { "application/json": { schema: z.object({ recipients: z.array(z.object({
+        id: z.number().int(), campaign_id: z.number().int(), customer_id: z.number().int(), channel: z.string(),
+        status: z.string(), reason: z.string(), queued_at: z.string(), sent_at: z.string().nullable(),
+        failed_at: z.string().nullable(), suppressed_at: z.string().nullable(),
+      })) }) } },
+    },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listCampaignRecipientsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canViewCampaigns({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const recipients = await listCampaignRecipients(actorOrganizationId(c), Number(id));
+  return c.json({ recipients }, 200);
+});
+
+// ── Automation execution ledger + manual runner (Admin only) ────────────
+
+const RetentionAutomationRunSchema = z.object({
+  id: z.number().int(), organization_id: z.number().int().nullable(), run_type: z.string(), triggered_by: z.string(),
+  actor_user_id: z.number().int().nullable(), started_at: z.string(), finished_at: z.string().nullable(), status: z.string(),
+  organizations_scanned: z.number().int(), follow_ups_created: z.number().int(), review_requests_sent: z.number().int(),
+  referrals_qualified: z.number().int(), rewards_issued: z.number().int(), campaign_recipients_queued: z.number().int(),
+  campaign_sends: z.number().int(), errored_count: z.number().int(), error_summary: z.string(), created_at: z.string(),
+}).openapi("RetentionAutomationRun");
+
+const listRetentionRunsRoute = createRoute({
+  method: "get",
+  path: "/api/retention/automation/runs",
+  responses: {
+    200: { description: "Runs", content: { "application/json": { schema: z.object({ runs: z.array(RetentionAutomationRunSchema) }) } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(listRetentionRunsRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const runs = await listRetentionRuns(actorOrganizationId(c));
+  return c.json({ runs }, 200);
+});
+
+const runRetentionAutomationRoute = createRoute({
+  method: "post",
+  path: "/api/retention/automation/run",
+  request: { body: { content: { "application/json": { schema: z.object({}).strict() } } } },
+  responses: {
+    200: {
+      description: "Run summary", content: { "application/json": { schema: z.object({
+        organizationsScanned: z.number().int(), followUpsCreated: z.number().int(), followUpsSent: z.number().int(),
+        referralsQualified: z.number().int(), rewardsIssued: z.number().int(), campaignRecipientsQueued: z.number().int(),
+        campaignSends: z.number().int(), erroredCount: z.number().int(), errorSummary: z.string(),
+      }) } },
+    },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+// Admin-only, always scoped to the actor's own organization only — never
+// an arbitrary org/cron-expression from client input (same discipline as
+// Phase 19C's own manual runner). Uses the EXACT SAME production function
+// the real Cloudflare cron tick calls.
+app.openapi(runRetentionAutomationRoute, async (c) => {
+  const me = currentUser(c);
+  if (me.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+  const summary = await runRetentionAutomationCycle(actorOrganizationId(c), "manual", me.id);
+  return c.json(summary, 200);
+});
+
+// ── Retention signals ────────────────────────────────────────────────────
+
+const getRetentionSignalsRoute = createRoute({
+  method: "get",
+  path: "/api/customers/{id}/retention-signals",
+  request: { params: IdParam },
+  responses: {
+    200: {
+      description: "Signals", content: { "application/json": { schema: z.object({
+        activeCustomer: z.boolean(), activeMember: z.boolean(), repeatCustomer: z.boolean(), atRisk: z.boolean(),
+        followUpDue: z.boolean(), renewalDue: z.boolean(), inactive: z.boolean(), referralAdvocate: z.boolean(),
+      }) } },
+    },
+    403: { description: "Forbidden", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(getRetentionSignalsRoute, async (c) => {
+  const me = currentUser(c);
+  if (!canManageRetention({ id: me.id, role: me.role })) return c.json({ error: "Forbidden" }, 403);
+  const { id } = c.req.valid("param");
+  const customer = await get<{ id: number }>("SELECT id FROM customers WHERE id = ? AND organization_id = ?", [id, actorOrganizationId(c)]);
+  if (!customer) return c.json({ error: "Customer not found" }, 404);
+  const signals = await computeRetentionSignals(actorOrganizationId(c), Number(id));
+  return c.json(signals, 200);
+});
+
 // ── Service Types ──────────────────────────────────────────────────
 
 const listServiceTypes = createRoute({
@@ -12109,6 +12990,19 @@ async function scheduled(_controller: ScheduledController, env: Env["Bindings"])
     // real error is still captured per-organization inside
     // runMaintenanceAutomationCycle's own error_summary/errored_count and
     // persisted to maintenance_automation_runs when it does something.
+  }
+  // Phase 19D — same single Cron trigger now also drives post-job
+  // follow-up scanning/sending, referral qualification, and seasonal
+  // campaign processing. Independent try/catch, same best-effort
+  // discipline as the Phase 19C call above — a failure here must never
+  // prevent either the notification cycle or the maintenance cycle from
+  // having already succeeded.
+  try {
+    await runRetentionAutomationCycle(null, "cron", null);
+  } catch {
+    // swallowed deliberately — see the Phase 19C comment above for the
+    // exact same reasoning; retention_automation_runs captures the real
+    // error per-organization when this does something.
   }
 }
 

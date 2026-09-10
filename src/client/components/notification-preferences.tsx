@@ -5,7 +5,10 @@ import { emailPreferenceSummary, smsConsentSummary, type ChannelPreferenceView }
 import { X } from "lucide-preact";
 
 interface PreferencesResponse {
-  preferences: { hasRow: boolean; email: ChannelPreferenceView; sms: ChannelPreferenceView };
+  preferences: {
+    hasRow: boolean; email: ChannelPreferenceView; sms: ChannelPreferenceView;
+    marketingEmail?: ChannelPreferenceView; marketingSms?: ChannelPreferenceView; marketingUnsubscribedAt?: string | null;
+  };
   sms_consent_sources: string[];
 }
 
@@ -50,6 +53,14 @@ export function NotificationPreferences({
   const [showEnableSms, setShowEnableSms] = useState(false);
   const [consentSourceDraft, setConsentSourceDraft] = useState("");
   const [enablingSms, setEnablingSms] = useState(false);
+
+  // Phase 19D — marketing consent, a SEPARATE tier from the transactional
+  // email/SMS above (default-off, requires its own consent capture on
+  // opt-in). Customer-only — Leads have no marketing-preferences route.
+  const [showEnableMarketing, setShowEnableMarketing] = useState<"email" | "sms" | null>(null);
+  const [marketingConsentDraft, setMarketingConsentDraft] = useState("");
+  const [savingMarketing, setSavingMarketing] = useState(false);
+  const [pendingMarketingDisable, setPendingMarketingDisable] = useState<"email" | "sms" | null>(null);
 
   const basePath = recipientType === "customer" ? `/api/customers/${recipientId}` : `/api/leads/${recipientId}`;
 
@@ -156,6 +167,49 @@ export function NotificationPreferences({
     }
   };
 
+  const requestMarketingDisable = (channel: "email" | "sms") => { setMutationError(null); setPendingMarketingDisable(channel); };
+
+  const confirmMarketingDisable = async () => {
+    if (!pendingMarketingDisable) return;
+    setSavingMarketing(true);
+    setMutationError(null);
+    try {
+      const key = pendingMarketingDisable === "email" ? "marketing_email_opt_in" : "marketing_sms_opt_in";
+      const res = await api<PreferencesResponse>("PUT", `${basePath}/marketing-preferences`, { [key]: false });
+      setData(res);
+      setPendingMarketingDisable(null);
+    } catch (err) {
+      setMutationError((err as Error).message);
+    } finally {
+      setSavingMarketing(false);
+    }
+  };
+
+  const requestMarketingEnable = (channel: "email" | "sms") => {
+    setMutationError(null);
+    setMarketingConsentDraft("");
+    setShowEnableMarketing(channel);
+  };
+
+  const confirmEnableMarketing = async () => {
+    if (!showEnableMarketing) return;
+    setSavingMarketing(true);
+    setMutationError(null);
+    try {
+      const key = showEnableMarketing === "email" ? "marketing_email_opt_in" : "marketing_sms_opt_in";
+      const res = await api<PreferencesResponse>("PUT", `${basePath}/marketing-preferences`, { [key]: true, consent_source: marketingConsentDraft });
+      setData(res);
+      setShowEnableMarketing(null);
+    } catch (err) {
+      setMutationError((err as Error).message);
+    } finally {
+      setSavingMarketing(false);
+    }
+  };
+
+  const marketingEmail = preferences.marketingEmail ?? { enabled: false, consentAt: null, consentSource: "" };
+  const marketingSms = preferences.marketingSms ?? { enabled: false, consentAt: null, consentSource: "" };
+
   return (
     <div class="detail-sidebar-section notification-preferences">
       <h4>Notification Preferences</h4>
@@ -192,6 +246,39 @@ export function NotificationPreferences({
           <button type="button" class="btn btn-sm btn-primary" onClick={requestSmsEnable}>Enable</button>
         )}
       </div>
+
+      {recipientType === "customer" && (
+        <>
+          <div class="notification-pref-row">
+            <div>
+              <strong>Marketing Emails</strong>
+              <p class="text-muted" style={{ margin: "2px 0 4px" }}>
+                Promotional content such as seasonal reminders and referral offers. Separate from, and never enabled by, the operational email toggle above — requires its own explicit opt-in.
+              </p>
+              <span class={`notification-pref-state ${marketingEmail.enabled ? "on" : "off"}`}>{marketingEmail.enabled ? "Opted in" : "Not opted in"}</span>
+            </div>
+            {marketingEmail.enabled ? (
+              <button type="button" class="btn btn-sm" onClick={() => requestMarketingDisable("email")}>Opt out</button>
+            ) : (
+              <button type="button" class="btn btn-sm btn-primary" onClick={() => requestMarketingEnable("email")}>Opt in</button>
+            )}
+          </div>
+          <div class="notification-pref-row">
+            <div>
+              <strong>Marketing Texts</strong>
+              <p class="text-muted" style={{ margin: "2px 0 4px" }}>
+                Promotional SMS. Requires its own recorded consent, separate from operational SMS.
+              </p>
+              <span class={`notification-pref-state ${marketingSms.enabled ? "on" : "off"}`}>{marketingSms.enabled ? "Opted in" : "Not opted in"}</span>
+            </div>
+            {marketingSms.enabled ? (
+              <button type="button" class="btn btn-sm" onClick={() => requestMarketingDisable("sms")}>Opt out</button>
+            ) : (
+              <button type="button" class="btn btn-sm btn-primary" onClick={() => requestMarketingEnable("sms")}>Opt in</button>
+            )}
+          </div>
+        </>
+      )}
 
       {pendingEmailValue !== null && (
         <ConfirmDialog
@@ -245,6 +332,48 @@ export function NotificationPreferences({
               <button type="button" class="btn" onClick={() => setShowEnableSms(false)} disabled={enablingSms}>Cancel</button>
               <button type="button" class="btn btn-primary" disabled={enablingSms || !consentSourceDraft} onClick={confirmEnableSms}>
                 {enablingSms ? "Please wait..." : "Enable SMS"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingMarketingDisable && (
+        <ConfirmDialog
+          title={`Opt out of marketing ${pendingMarketingDisable === "email" ? "emails" : "texts"}?`}
+          message="This customer will stop receiving promotional content on this channel. Their previously recorded consent stays on file as a historical record."
+          confirmLabel="Opt out"
+          danger
+          submitting={savingMarketing}
+          onConfirm={confirmMarketingDisable}
+          onClose={() => setPendingMarketingDisable(null)}
+        />
+      )}
+
+      {showEnableMarketing && (
+        <div class="modal-overlay" onClick={() => !savingMarketing && setShowEnableMarketing(null)}>
+          <div class="modal modal-sm" onClick={(e) => e.stopPropagation()}>
+            <div class="modal-header">
+              <h2>Opt in to marketing {showEnableMarketing === "email" ? "emails" : "texts"}?</h2>
+              <button class="btn-icon" aria-label="Close" onClick={() => setShowEnableMarketing(null)}><X size={18} /></button>
+            </div>
+            <div class="confirm-body">
+              <p>Marketing consent requires its own record, separate from operational notifications. Select how this consent was obtained.</p>
+              <div class="form-grid">
+                <div class="form-group full-width">
+                  <label>Consent Source *</label>
+                  <select value={marketingConsentDraft} onChange={(e) => setMarketingConsentDraft((e.target as HTMLSelectElement).value)} required>
+                    <option value="">Select...</option>
+                    {data.sms_consent_sources.map((s) => <option key={s} value={s}>{CONSENT_SOURCE_LABELS[s] || s}</option>)}
+                  </select>
+                </div>
+              </div>
+              {mutationError && <div class="inline-error" style={{ marginTop: 8 }}>{mutationError}</div>}
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn" onClick={() => setShowEnableMarketing(null)} disabled={savingMarketing}>Cancel</button>
+              <button type="button" class="btn btn-primary" disabled={savingMarketing || !marketingConsentDraft} onClick={confirmEnableMarketing}>
+                {savingMarketing ? "Please wait..." : "Opt In"}
               </button>
             </div>
           </div>

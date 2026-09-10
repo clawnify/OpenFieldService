@@ -1,0 +1,21 @@
+import { sql } from "drizzle-orm";
+import { check, foreignKey, index, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { organizationMembers, organizations, users } from "./identity";
+
+export const crmTargetType = pgEnum("crm_target_type", ["customer", "contact", "company", "lead", "deal"]);
+export const taskStatus = pgEnum("task_status", ["open", "in_progress", "completed"]);
+export const taskPriority = pgEnum("task_priority", ["low", "normal", "high", "urgent"]);
+export const activityType = pgEnum("activity_type", ["call", "email", "meeting", "visit", "other"]);
+const lifecycle = { createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }), updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }), createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(), updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(), archivedAt: timestamp("archived_at", { withTimezone: true }) };
+
+export const tasks = pgTable("tasks", {
+  id: uuid("id").defaultRandom().primaryKey(), organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }), title: text("title").notNull(), description: text("description"), status: taskStatus("status").default("open").notNull(), priority: taskPriority("priority").default("normal").notNull(), dueAt: timestamp("due_at", { withTimezone: true }), assigneeUserId: uuid("assignee_user_id"), targetType: crmTargetType("target_type").notNull(), targetId: uuid("target_id").notNull(), completedAt: timestamp("completed_at", { withTimezone: true }), completedBy: uuid("completed_by").references(() => users.id, { onDelete: "set null" }), ...lifecycle,
+}, (table) => [uniqueIndex("tasks_organization_id_unique").on(table.organizationId, table.id), index("tasks_organization_status_due_idx").on(table.organizationId, table.status, table.dueAt), index("tasks_organization_assignee_idx").on(table.organizationId, table.assigneeUserId), index("tasks_organization_target_idx").on(table.organizationId, table.targetType, table.targetId), foreignKey({ columns: [table.organizationId, table.assigneeUserId], foreignColumns: [organizationMembers.organizationId, organizationMembers.userId], name: "tasks_assignee_tenant_fk" }).onDelete("restrict"), check("tasks_completion_consistent", sql`(${table.status} = 'completed' and ${table.completedAt} is not null) or (${table.status} <> 'completed' and ${table.completedAt} is null)`)]);
+
+export const activities = pgTable("activities", {
+  id: uuid("id").defaultRandom().primaryKey(), organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }), type: activityType("type").notNull(), subject: text("subject").notNull(), details: text("details"), occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(), targetType: crmTargetType("target_type").notNull(), targetId: uuid("target_id").notNull(), actorUserId: uuid("actor_user_id").notNull(), ...lifecycle,
+}, (table) => [uniqueIndex("activities_organization_id_unique").on(table.organizationId, table.id), index("activities_organization_target_idx").on(table.organizationId, table.targetType, table.targetId, table.occurredAt), foreignKey({ columns: [table.organizationId, table.actorUserId], foreignColumns: [organizationMembers.organizationId, organizationMembers.userId], name: "activities_actor_tenant_fk" }).onDelete("restrict")]);
+
+export const notes = pgTable("notes", {
+  id: uuid("id").defaultRandom().primaryKey(), organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }), body: text("body").notNull(), targetType: crmTargetType("target_type").notNull(), targetId: uuid("target_id").notNull(), authorUserId: uuid("author_user_id").notNull(), ...lifecycle,
+}, (table) => [uniqueIndex("notes_organization_id_unique").on(table.organizationId, table.id), index("notes_organization_target_idx").on(table.organizationId, table.targetType, table.targetId, table.createdAt), foreignKey({ columns: [table.organizationId, table.authorUserId], foreignColumns: [organizationMembers.organizationId, organizationMembers.userId], name: "notes_author_tenant_fk" }).onDelete("restrict")]);

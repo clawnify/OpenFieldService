@@ -1,0 +1,16 @@
+import { createHmac } from "node:crypto";
+import { describe, expect, it } from "vitest";
+import { can } from "@/auth/permissions";
+import { ConflictError, ValidationError } from "@/lib/errors";
+import { outboundCallSchema, settingsSchema, toolInvocationSchema } from "./phone.schema";
+import { assertCallTransition, hashPhonePayload, mapTwilioCallStatus, normalizePhone, verifyTwilioSignature } from "./phone.rules";
+import { AesGcmSecretProtector } from "./phone.provider";
+
+describe("Phone Operations domain", () => {
+  it("preserves legacy NANP normalization and rejects unusable values", () => { expect(normalizePhone("+1 (604) 555-0100")).toBe("6045550100"); expect(normalizePhone("604.555.0100")).toBe("6045550100"); expect(() => normalizePhone("123")).toThrow(ValidationError); });
+  it("enforces forward-only provider lifecycle", () => { expect(() => assertCallTransition("queued", "ringing")).not.toThrow(); expect(() => assertCallTransition("in_progress", "completed")).not.toThrow(); expect(() => assertCallTransition("completed", "ringing")).toThrow(ConflictError); expect(mapTwilioCallStatus("no-answer")).toBe("no_answer"); expect(() => mapTwilioCallStatus("mystery")).toThrow(ValidationError); });
+  it("verifies Twilio's exact HMAC-SHA1 form signature", () => { const url = "https://field.example.test/api/phone/twilio/voice", params = { CallSid: "CA123", From: "+16045550100", To: "+16045550200" }, token = "synthetic-auth-token"; const signature = createHmac("sha1", token).update(url + Object.keys(params).sort().map(k => `${k}${params[k as keyof typeof params]}`).join("")).digest("base64"); expect(verifyTwilioSignature(token, url, params, signature)).toBe(true); expect(verifyTwilioSignature(token, url, params, "bad")).toBe(false); });
+  it("encrypts provider secrets with authenticated encryption", () => { const protector = new AesGcmSecretProtector("synthetic-32-byte-key-for-unit-tests"); const encrypted = protector.protect("provider-secret"); expect(JSON.stringify(encrypted)).not.toContain("provider-secret"); expect(protector.reveal(encrypted)).toBe("provider-secret"); expect(() => protector.reveal({ ...encrypted, tag: Buffer.alloc(16).toString("base64") })).toThrow(); });
+  it("uses stable payload hashes and strict authoritative validation", () => { expect(hashPhonePayload({ b: 2, a: 1 })).toBe(hashPhonePayload({ a: 1, b: 2 })); expect(() => outboundCallSchema.parse({ phoneNumberId: crypto.randomUUID(), destination: "+16045550100", idempotencyKey: crypto.randomUUID(), organizationId: crypto.randomUUID() })).toThrow(); expect(() => settingsSchema.parse({ operatingMode: "active", inboundEnabled: true, outboundEnabled: true, maxConcurrentCalls: 0, dailyCallCap: 1 })).toThrow(); expect(() => toolInvocationSchema.parse({ idempotencyKey: crypto.randomUUID(), toolName: "delete_customer", arguments: {} })).toThrow(); });
+  it("maps dispatcher and Technician RBAC without exposing settings", () => { expect(can({ role: "manager" }, "phone.read")).toBe(true); expect(can({ role: "manager" }, "phone.call")).toBe(true); expect(can({ role: "manager" }, "phone.settings.manage")).toBe(false); expect(can({ role: "member" }, "phone.read")).toBe(false); expect(can({ role: "viewer" }, "phone.read")).toBe(false); expect(can({ role: "admin" }, "phone.settings.manage")).toBe(true); });
+});

@@ -359,6 +359,24 @@ export async function resetDatabase() {
     "DELETE FROM maintenance_occurrences",
     "DELETE FROM maintenance_schedules",
     "DELETE FROM maintenance_automation_runs",
+    // Phase 19D — customer_follow_ups/customer_referrals/customer_credit_ledger
+    // already cascade-empty by this point (all CASCADE from customers/jobs,
+    // both already deleted above), explicit entries per this file's own
+    // established convention. referral_programs/campaigns/
+    // retention_automation_runs/retention_audit all have a plain
+    // organization_id int with NO foreign key (same "org id=1 is never
+    // deleted" reasoning as maintenance_automation_runs above) — these
+    // genuinely need a real explicit DELETE or a row from one test leaks
+    // into the next. campaign_recipients CASCADEs from campaigns, deleted
+    // right after.
+    "DELETE FROM customer_follow_ups",
+    "DELETE FROM customer_referrals",
+    "DELETE FROM customer_credit_ledger",
+    "DELETE FROM campaign_recipients",
+    "DELETE FROM campaigns",
+    "DELETE FROM referral_programs",
+    "DELETE FROM retention_automation_runs",
+    "DELETE FROM retention_audit",
     "DELETE FROM organizations WHERE id != 1",
     "UPDATE _meta SET value = '0' WHERE key IN ('job_counter', 'invoice_counter', 'lead_counter', 'quote_counter', 'contract_counter', 'maintenance_agreement_counter')",
     "DELETE FROM sqlite_sequence",

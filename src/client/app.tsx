@@ -30,6 +30,8 @@ import { ChecklistTemplates } from "./components/checklist-templates";
 import { MaintenanceAgreementList } from "./components/maintenance-agreement-list";
 import { MaintenanceAgreementDetail } from "./components/maintenance-agreement-detail";
 import { MaintenanceAutomation } from "./components/maintenance-automation";
+import { Retention } from "./components/retention";
+import { Campaigns, CampaignDetail } from "./components/campaigns";
 import { UserManagement } from "./components/user-list";
 import { Integrations } from "./components/integrations";
 import { GlobalSettings } from "./components/global-settings";
@@ -94,6 +96,12 @@ export function App() {
     if (view === "maintenance-agreements" && id) {
       return user?.role !== "technician" ? <MaintenanceAgreementDetail id={parseInt(id, 10)} navigate={navigate} /> : <TechnicianHome />;
     }
+    // Campaigns is self-contained (own fetch, not AppContext) for the same
+    // reason as Quotes/Leads/Contracts/Maintenance Agreements above —
+    // irrelevant to the technician role.
+    if (view === "campaigns" && id) {
+      return user?.role !== "technician" ? <CampaignDetail id={parseInt(id, 10)} navigate={navigate} /> : <TechnicianHome />;
+    }
     switch (view) {
       case "schedule": return <ScheduleView />;
       case "jobs": return <JobList />;
@@ -114,6 +122,8 @@ export function App() {
       case "maintenance-agreements": return user?.role !== "technician" ? <MaintenanceAgreementList navigate={navigate} /> : <TechnicianHome />;
       case "maintenance-plans": return user?.role !== "technician" ? <MaintenancePlans /> : <TechnicianHome />;
       case "maintenance-automation": return user?.role !== "technician" ? <MaintenanceAutomation navigate={navigate} /> : <TechnicianHome />;
+      case "retention": return user?.role !== "technician" ? <Retention /> : <TechnicianHome />;
+      case "campaigns": return user?.role !== "technician" ? <Campaigns navigate={navigate} /> : <TechnicianHome />;
       case "legal-terms": return user?.role !== "technician" ? <LegalTerms /> : <TechnicianHome />;
       case "checklist-templates": return user?.role !== "technician" ? <ChecklistTemplates /> : <TechnicianHome />;
       case "users": return user?.role === "admin" ? <UserManagement /> : <Dashboard />;

@@ -1,4 +1,8 @@
 node_modules/
+.next/
+*.tsbuildinfo
+.env*.local
+.postgres-test/
 dist/
 data.db
 data.db-shm

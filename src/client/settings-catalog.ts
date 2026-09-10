@@ -16,7 +16,7 @@ import type { SettingDataType } from "./types";
  * no business label to invent for something this app doesn't recognize.
  */
 
-export type SettingKind = "number" | "money_cents" | "option_list" | "select";
+export type SettingKind = "number" | "money_cents" | "option_list" | "select" | "text";
 
 export interface SettingSelectOption {
   value: string;
@@ -149,6 +149,31 @@ export const SETTINGS_CATALOG: SettingCatalogEntry[] = [
     dataType: "string",
     category: "Business Operations",
     options: TIMEZONE_OPTIONS,
+  },
+  {
+    key: "POST_JOB_FOLLOWUP_DAYS",
+    label: "Post-Job Follow-Up Delay",
+    description: "Days after an eligible Job is completed before a satisfaction follow-up is created.",
+    unit: "days",
+    kind: "number",
+    dataType: "number",
+    category: "Retention & Follow-Up",
+  },
+  {
+    key: "APP_PUBLIC_URL",
+    label: "Public App URL",
+    description: "The public web address customers use to reach this app (e.g. https://yourcompany.example.com). Used to build the link in follow-up emails/texts — follow-up links stay disabled until this is set.",
+    kind: "text",
+    dataType: "string",
+    category: "Retention & Follow-Up",
+  },
+  {
+    key: "REVIEW_REQUEST_URL",
+    label: "Review Request Destination",
+    description: "The link shown to a satisfied customer to leave a public review (e.g. your Google Business review link). Review requests stay disabled until this is set.",
+    kind: "text",
+    dataType: "string",
+    category: "Retention & Follow-Up",
   },
 ];
 

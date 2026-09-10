@@ -1,0 +1,12 @@
+"use server";
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+import { currentActor } from "@/auth/current-actor";
+import { JobService } from "@/modules/jobs/job.service";
+
+export async function createJobAction(formData:FormData){const actor=await currentActor();const job=await new JobService().createJob(actor!,{customerId:String(formData.get("customerId")??""),title:String(formData.get("title")??""),description:String(formData.get("description")??""),serviceAddress:String(formData.get("serviceAddress")??""),priority:String(formData.get("priority")??"normal") as "low"|"normal"|"high"|"urgent",technicianUserId:String(formData.get("technicianUserId")??"")||null,scheduledDate:String(formData.get("scheduledDate")??"")||null,scheduledTime:String(formData.get("scheduledTime")??"")||null,durationMinutes:Number(formData.get("durationMinutes")??60),timezone:"America/Vancouver"});revalidatePath("/jobs");redirect(`/jobs/${job.id}`);}
+export async function scheduleJobAction(id:string,formData:FormData){const actor=await currentActor();await new JobService().scheduleJob(actor!,id,{technicianUserId:String(formData.get("technicianUserId")??"")||null,scheduledDate:String(formData.get("scheduledDate")??"")||null,scheduledTime:String(formData.get("scheduledTime")??"")||null,durationMinutes:Number(formData.get("durationMinutes")??60),timezone:"America/Vancouver",reason:String(formData.get("reason")??"")||undefined});revalidatePath(`/jobs/${id}`);revalidatePath("/schedule");}
+export async function transitionJobAction(id:string,formData:FormData){const actor=await currentActor();await new JobService().transitionJob(actor!,id,{toStatus:String(formData.get("toStatus")??""),reason:String(formData.get("reason")??"")||undefined});revalidatePath(`/jobs/${id}`);}
+export async function addChecklistItemAction(id:string,formData:FormData){const actor=await currentActor();await new JobService().addChecklistItem(actor!,id,{label:String(formData.get("label")??"")});revalidatePath(`/jobs/${id}`);}
+export async function setChecklistItemAction(id:string,itemId:string,completed:boolean){const actor=await currentActor();await new JobService().setChecklistItem(actor!,id,itemId,{completed});revalidatePath(`/jobs/${id}`);}
+export async function addJobNoteAction(id:string,formData:FormData){const actor=await currentActor();await new JobService().addNote(actor!,id,{body:String(formData.get("body")??"")});revalidatePath(`/jobs/${id}`);}

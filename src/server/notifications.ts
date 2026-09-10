@@ -18,7 +18,7 @@ import { get, run } from "./db.js";
 export type NotificationChannel = "email" | "sms";
 export type RecipientType = "customer" | "lead";
 
-export type EnqueueSkipReason = "missing_recipient" | "channel_disabled" | "sms_not_opted_in" | "duplicate" | "unsupported_event";
+export type EnqueueSkipReason = "missing_recipient" | "channel_disabled" | "sms_not_opted_in" | "duplicate" | "unsupported_event" | "marketing_not_opted_in" | "marketing_unsubscribed";
 
 export interface EnqueueResult {
   enqueued: boolean;
@@ -44,9 +44,15 @@ export function buildDedupeKey(parts: {
   return `${parts.entityType}:${parts.entityId}:${parts.eventType}:${parts.discriminator}:${parts.channel}`;
 }
 
-interface PreferenceRow { email_enabled: number; sms_enabled: number; sms_consent_at: string | null }
+interface PreferenceRow {
+  email_enabled: number; sms_enabled: number; sms_consent_at: string | null;
+  marketing_email_opt_in: number; marketing_sms_opt_in: number; marketing_unsubscribed_at: string | null;
+}
 
-const DEFAULT_PREFERENCES = { emailEnabled: true, smsEnabled: false, smsConsentAt: null as string | null };
+const DEFAULT_PREFERENCES = {
+  emailEnabled: true, smsEnabled: false, smsConsentAt: null as string | null,
+  marketingEmailOptIn: false, marketingSmsOptIn: false, marketingUnsubscribedAt: null as string | null,
+};
 
 /**
  * Phase 9.0 established email_enabled default=1 / sms_enabled default=0 as
@@ -56,15 +62,31 @@ const DEFAULT_PREFERENCES = { emailEnabled: true, smsEnabled: false, smsConsentA
  * with no row, so the two code paths ("has an explicit row" vs. "never
  * configured") produce identical eligibility — a real preference row only
  * ever OVERRIDES these, never introduces different default semantics.
+ *
+ * Phase 19D adds marketing_email_opt_in/marketing_sms_opt_in — a SEPARATE,
+ * default-OFF consent tier for genuinely promotional sends (seasonal
+ * campaigns, referral-promo content), deliberately never conflated with
+ * the transactional email_enabled/sms_enabled toggle above. Post-job
+ * follow-up/review-request/maintenance-offer sends are service-adjacent
+ * and continue to use the transactional toggle, same as every existing
+ * Phase 9 event — only campaigns check the marketing tier.
  */
 export async function resolvePreferences(
   recipientType: RecipientType, recipientId: number
-): Promise<{ emailEnabled: boolean; smsEnabled: boolean; smsConsentAt: string | null }> {
+): Promise<{
+  emailEnabled: boolean; smsEnabled: boolean; smsConsentAt: string | null;
+  marketingEmailOptIn: boolean; marketingSmsOptIn: boolean; marketingUnsubscribedAt: string | null;
+}> {
+  const cols = "email_enabled, sms_enabled, sms_consent_at, marketing_email_opt_in, marketing_sms_opt_in, marketing_unsubscribed_at";
   const row = recipientType === "customer"
-    ? await get<PreferenceRow>("SELECT email_enabled, sms_enabled, sms_consent_at FROM notification_preferences WHERE customer_id = ?", [recipientId])
-    : await get<PreferenceRow>("SELECT email_enabled, sms_enabled, sms_consent_at FROM notification_preferences WHERE lead_id = ?", [recipientId]);
+    ? await get<PreferenceRow>(`SELECT ${cols} FROM notification_preferences WHERE customer_id = ?`, [recipientId])
+    : await get<PreferenceRow>(`SELECT ${cols} FROM notification_preferences WHERE lead_id = ?`, [recipientId]);
   if (!row) return { ...DEFAULT_PREFERENCES };
-  return { emailEnabled: row.email_enabled === 1, smsEnabled: row.sms_enabled === 1, smsConsentAt: row.sms_consent_at };
+  return {
+    emailEnabled: row.email_enabled === 1, smsEnabled: row.sms_enabled === 1, smsConsentAt: row.sms_consent_at,
+    marketingEmailOptIn: row.marketing_email_opt_in === 1, marketingSmsOptIn: row.marketing_sms_opt_in === 1,
+    marketingUnsubscribedAt: row.marketing_unsubscribed_at,
+  };
 }
 
 export interface EnqueueChannelInput {
@@ -93,6 +115,14 @@ export interface EnqueueChannelInput {
    *  datetime('now')). Reminder-style future scheduling is Phase 9.2's
    *  concern — no current caller in this phase sets this. */
   scheduledFor?: string;
+  /** Phase 19D — which consent tier gates this send. Omit for the default
+   *  ('transactional', preserving every pre-Phase-19D caller's exact
+   *  existing behavior unchanged: base email_enabled/sms_enabled only).
+   *  'marketing' additionally requires the recipient's separate
+   *  marketing_email_opt_in/marketing_sms_opt_in AND no
+   *  marketing_unsubscribed_at — used ONLY by seasonal/referral-promo
+   *  campaign sends. */
+  purpose?: "transactional" | "marketing";
 }
 
 /**
@@ -115,15 +145,26 @@ export async function enqueueChannel(input: EnqueueChannelInput): Promise<Enqueu
   }
 
   const prefs = await resolvePreferences(input.recipientType, input.recipientId);
-  if (input.channel === "email" && !prefs.emailEnabled) {
-    return { enqueued: false, reason: "channel_disabled" };
-  }
-  if (input.channel === "sms") {
-    // Explicit opt-in AND consent evidence required — the mere presence of
-    // a phone number, or sms_enabled alone without a recorded consent
-    // timestamp, is never sufficient (Phase 9.0's approved policy).
-    if (!prefs.smsEnabled || !prefs.smsConsentAt) {
-      return { enqueued: false, reason: "sms_not_opted_in" };
+  const purpose = input.purpose ?? "transactional";
+  if (purpose === "marketing") {
+    // Phase 19D — a SEPARATE, default-OFF consent check. Never falls back
+    // to the transactional email_enabled/sms_enabled toggle: a customer
+    // who allows transactional email has NOT thereby consented to
+    // marketing email.
+    if (prefs.marketingUnsubscribedAt) return { enqueued: false, reason: "marketing_unsubscribed" };
+    if (input.channel === "email" && !prefs.marketingEmailOptIn) return { enqueued: false, reason: "marketing_not_opted_in" };
+    if (input.channel === "sms" && !prefs.marketingSmsOptIn) return { enqueued: false, reason: "marketing_not_opted_in" };
+  } else {
+    if (input.channel === "email" && !prefs.emailEnabled) {
+      return { enqueued: false, reason: "channel_disabled" };
+    }
+    if (input.channel === "sms") {
+      // Explicit opt-in AND consent evidence required — the mere presence of
+      // a phone number, or sms_enabled alone without a recorded consent
+      // timestamp, is never sufficient (Phase 9.0's approved policy).
+      if (!prefs.smsEnabled || !prefs.smsConsentAt) {
+        return { enqueued: false, reason: "sms_not_opted_in" };
+      }
     }
   }
 

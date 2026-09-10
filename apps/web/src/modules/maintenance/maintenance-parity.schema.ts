@@ -1,0 +1,17 @@
+import { z } from "zod";
+const id=z.uuid(), short=z.string().trim().min(1).max(200), long=z.string().trim().max(10_000), date=z.iso.date();
+export const createAssetSchema=z.strictObject({customerId:id,type:z.string().trim().min(1).max(80),displayName:z.string().trim().max(200).default(""),manufacturer:z.string().trim().max(120).default(""),model:z.string().trim().max(120).default(""),serialNumber:z.string().trim().max(120).default(""),installationDate:date.nullable().default(null),serviceLocation:short,notes:z.string().trim().max(5000).default("")});
+export const updateAssetSchema=createAssetSchema.partial().extend({expectedRowVersion:z.int().min(0)}).strict();
+export const createLegalDocumentSchema=z.strictObject({title:short,content:z.string().trim().min(1).max(50_000),effectiveFrom:date.nullable().default(null)});
+export const createLegalVersionSchema=z.strictObject({content:z.string().trim().min(1).max(50_000),effectiveFrom:date.nullable().default(null)});
+const checklistItem=z.strictObject({key:z.string().trim().min(1).max(80).regex(/^[a-z0-9_-]+$/i),label:short,type:z.enum(["PASS_FAIL","YES_NO","TEXT","NUMBER","MEASUREMENT","SELECT","PHOTO_REQUIRED"]),required:z.boolean().default(false)});
+const checklistSection=z.strictObject({title:short,items:z.array(checklistItem).min(1).max(100)});
+export const createChecklistTemplateSchema=z.strictObject({name:short,applicability:z.array(z.string().trim().min(1).max(80)).max(50).default([]),sections:z.array(checklistSection).min(1).max(30)});
+export const createChecklistVersionSchema=z.strictObject({sections:z.array(checklistSection).min(1).max(30)});
+export const attachCoverageSchema=z.strictObject({assetIds:z.array(id).min(1).max(100),coverage:z.record(z.string(),z.unknown()).default({})});
+export const createServiceReportSchema=z.strictObject({jobId:id,membershipId:id,occurrenceId:id,assetId:id.nullable().default(null),checklistVersionId:id});
+export const updateServiceReportSchema=z.strictObject({responses:z.record(z.string(),z.unknown()),findings:long.default(""),deficiencies:long.default(""),recommendations:long.default(""),preWorkAttachmentId:id,postWorkAttachmentId:id,customerSignerName:short,customerSignature:z.string().trim().min(1).max(500),expectedRowVersion:z.int().min(0)});
+export const benefitRequestSchema=z.strictObject({customerId:id,serviceCode:z.string().trim().min(1).max(100),assetId:id.nullable().default(null),subtotalCents:z.int().min(0).max(9_000_000_000_000),quoteId:id.nullable().default(null),quoteOptionId:id.nullable().default(null),idempotencyKey:z.string().trim().min(8).max(200)});
+export const applyQuoteBenefitSchema=z.strictObject({quoteId:id,quoteOptionId:id,serviceCode:z.string().trim().min(1).max(100),assetId:id.nullable().default(null),idempotencyKey:z.string().trim().min(8).max(200)});
+export const outboxFilterSchema=z.strictObject({status:z.enum(["pending","processing","delivered","failed","cancelled"]).optional(),limit:z.int().min(1).max(100).default(50)});
+export type CreateAssetInput=z.input<typeof createAssetSchema>;

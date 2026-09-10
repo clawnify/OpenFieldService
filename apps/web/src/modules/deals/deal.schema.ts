@@ -1,0 +1,13 @@
+import { z } from "zod";
+const optionalText = (max: number) => z.string().trim().max(max).optional().or(z.literal(""));
+const optionalUuid = z.uuid().nullable().optional();
+const amount = z.number().int().min(0).max(1_000_000_000_000);
+const currency = z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/);
+const isoDate = z.iso.date();
+export const createDealSchema = z.strictObject({ name: z.string().trim().min(1).max(200), pipelineId: z.uuid(), stageId: z.uuid(), customerId: z.uuid(), contactId: optionalUuid, ownerUserId: optionalUuid, amountCents: amount.default(0), currency: currency.default("CAD"), expectedCloseDate: isoDate.nullable().optional(), source: optionalText(120) });
+export const updateDealSchema = z.strictObject({ name: z.string().trim().min(1).max(200).optional(), amountCents: amount.optional(), currency: currency.optional(), expectedCloseDate: isoDate.nullable().optional(), source: optionalText(120), contactId: optionalUuid });
+export const assignDealSchema = z.strictObject({ ownerUserId: z.uuid().nullable() });
+export const moveDealSchema = z.strictObject({ pipelineId: z.uuid(), stageId: z.uuid(), lostReason: z.string().trim().min(1).max(200).optional(), lostReasonNote: optionalText(2_000), reason: optionalText(500) });
+export const dealFilterSchema = z.strictObject({ query: z.string().trim().max(200).optional(), pipelineId: z.uuid().optional(), stageId: z.uuid().optional(), ownerUserId: z.uuid().nullable().optional(), customerId: z.uuid().optional(), kind: z.enum(["open", "won", "lost"]).optional(), minAmountCents: amount.optional(), maxAmountCents: amount.optional(), expectedCloseFrom: isoDate.optional(), expectedCloseTo: isoDate.optional(), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(25) }).refine((value) => value.minAmountCents === undefined || value.maxAmountCents === undefined || value.minAmountCents <= value.maxAmountCents, { path: ["maxAmountCents"], message: "Maximum amount must not be less than minimum amount" });
+export const archiveDealSchema = z.strictObject({});
+export type CreateDealInput = z.input<typeof createDealSchema>; export type UpdateDealInput = z.input<typeof updateDealSchema>; export type AssignDealInput = z.input<typeof assignDealSchema>; export type MoveDealInput = z.input<typeof moveDealSchema>; export type DealFilter = z.input<typeof dealFilterSchema>;

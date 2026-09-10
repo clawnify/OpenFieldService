@@ -1,4 +1,4 @@
-export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "quotes" | "contracts" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility" | "phone-operations" | "pricebook" | "maintenance-plans" | "legal-terms" | "checklist-templates" | "maintenance-agreements" | "maintenance-automation";
+export type View = "dashboard" | "schedule" | "jobs" | "customers" | "leads" | "quotes" | "contracts" | "technicians" | "services" | "invoices" | "materials" | "users" | "integrations" | "settings" | "eligibility" | "phone-operations" | "pricebook" | "maintenance-plans" | "legal-terms" | "checklist-templates" | "maintenance-agreements" | "maintenance-automation" | "retention" | "campaigns";
 
 // ── Phase 19B — Maintenance Plans / Memberships / Agreements ───────────
 

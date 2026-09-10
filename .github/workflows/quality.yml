@@ -19,7 +19,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Enable Corepack
         run: corepack enable
@@ -38,3 +38,72 @@ jobs:
 
       - name: Build
         run: corepack pnpm run build
+
+  verify-web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: open_fieldservice_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/open_fieldservice_ci
+      AUTH_SECRET: ci-only-non-production-secret-at-least-32-chars
+      APP_URL: http://localhost:3000
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: apps/web
+        run: corepack pnpm run typecheck
+
+      - name: Lint
+        working-directory: apps/web
+        run: corepack pnpm run lint
+
+      - name: Migrate database
+        working-directory: apps/web
+        run: corepack pnpm exec drizzle-kit migrate
+
+      - name: Unit tests
+        working-directory: apps/web
+        run: corepack pnpm run test
+
+      - name: PostgreSQL integration tests
+        working-directory: apps/web
+        run: corepack pnpm run test:integration
+
+      - name: Build
+        working-directory: apps/web
+        run: corepack pnpm run build
+
+      - name: Drizzle drift check
+        working-directory: apps/web
+        run: |
+          before=$(find src/db/migrations -maxdepth 1 -name '*.sql' | wc -l)
+          corepack pnpm exec drizzle-kit generate
+          after=$(find src/db/migrations -maxdepth 1 -name '*.sql' | wc -l)
+          if [ "$before" != "$after" ]; then
+            echo "Drizzle schema drift detected: schema.ts changed without a generated/committed migration"
+            exit 1
+          fi
