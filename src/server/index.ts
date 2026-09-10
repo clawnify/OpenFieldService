@@ -488,10 +488,88 @@ function isGoogleConfigured(c: Context<Env>): boolean {
 }
 
 const app = createApp<Env>({
-  title: "Field Service Scheduler",
+  title: "OpenFieldService",
   version: "1.0.0",
   description:
     "Field service scheduling and business management with customers, technicians, service types, and job tracking.",
+});
+
+// ── First-run data ─────────────────────────────────────────────────
+// A deploy applies `schema.sql` as DDL only — a seed INSERT there fails the
+// whole build — so the counters and the example rows are written here, once,
+// while their tables are still empty. A re-deploy never resurrects a row the
+// user deleted, because the table is no longer empty.
+
+const META_DEFAULTS: Array<[string, string]> = [
+  ["job_counter", "0"],
+  ["identifier_prefix", "JOB"],
+  ["invoice_counter", "0"],
+  ["invoice_prefix", "INV"],
+  // IANA timezone used when building Google Calendar events from job date/time,
+  // so wall-clock times don't shift when viewed in another timezone.
+  ["timezone", "UTC"],
+];
+
+/** id, name, description, default_duration, default_price, color */
+const DEMO_SERVICE_TYPES: Array<[number, string, string, number, number, string]> = [
+  [1, "Standard Service", "Standard service visit", 60, 150, "#16a34a"],
+  [2, "Inspection", "On-site inspection and assessment", 45, 75, "#0891b2"],
+  [3, "Emergency", "Urgent same-day service call", 90, 300, "#dc2626"],
+  [4, "Follow-up", "Follow-up visit after initial service", 30, 50, "#9333ea"],
+  [5, "Installation", "Equipment or system installation", 120, 400, "#ea580c"],
+  [6, "Maintenance", "Routine maintenance visit", 60, 125, "#ca8a04"],
+];
+
+/** id, name, unit, unit_cost, in_stock */
+const DEMO_MATERIALS: Array<[number, string, string, number, number]> = [
+  [1, "Service Fee", "ea", 0, 999],
+  [2, "Filter Replacement", "ea", 25, 50],
+  [3, "Sealant", "tube", 12, 30],
+  [4, "Travel Surcharge", "ea", 35, 999],
+  [5, "Disposable Supplies", "kit", 8, 100],
+];
+
+let seeded = false; // per-isolate fast path; the COUNT re-checks are cheap
+
+async function ensureSeeded(): Promise<void> {
+  if (seeded) return;
+  seeded = true;
+  try {
+    // Load-bearing, not sample data: the job and invoice numbering depends on
+    // these rows existing, so they are restored even on a populated database.
+    for (const [key, value] of META_DEFAULTS) {
+      await run("INSERT OR IGNORE INTO _meta (key, value) VALUES (?, ?)", [key, value]);
+    }
+
+    const serviceTypes = await get<{ n: number }>("SELECT COUNT(*) AS n FROM service_types");
+    if ((serviceTypes?.n ?? 0) === 0) {
+      for (const st of DEMO_SERVICE_TYPES) {
+        await run(
+          "INSERT OR IGNORE INTO service_types (id, name, description, default_duration, default_price, color) VALUES (?, ?, ?, ?, ?, ?)",
+          st,
+        );
+      }
+    }
+
+    const materials = await get<{ n: number }>("SELECT COUNT(*) AS n FROM materials");
+    if ((materials?.n ?? 0) === 0) {
+      for (const m of DEMO_MATERIALS) {
+        await run(
+          "INSERT OR IGNORE INTO materials (id, name, unit, unit_cost, in_stock) VALUES (?, ?, ?, ?, ?)",
+          m,
+        );
+      }
+    }
+  } catch {
+    // A cold database mid-migration, or a table this build has not created
+    // yet: the next request retries. Never fail a request over sample data.
+    seeded = false;
+  }
+}
+
+app.use("*", async (_c, next) => {
+  await ensureSeeded();
+  await next();
 });
 
 // ── Auth middleware ───────────────────────────────────────────────
@@ -808,7 +886,10 @@ async function nextIdentifier(): Promise<string> {
   const prefix = await get<{ value: string }>("SELECT value FROM _meta WHERE key = 'identifier_prefix'");
   const counter = await get<{ value: string }>("SELECT value FROM _meta WHERE key = 'job_counter'");
   const next = parseInt(counter?.value || "0", 10) + 1;
-  await run("UPDATE _meta SET value = ? WHERE key = 'job_counter'", [String(next)]);
+  await run(
+    "INSERT INTO _meta (key, value) VALUES ('job_counter', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    [String(next)],
+  );
   return `${prefix?.value || "JOB"}-${next}`;
 }
 

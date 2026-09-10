@@ -215,24 +215,13 @@ CREATE TABLE IF NOT EXISTS _meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('job_counter', '0');
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('identifier_prefix', 'JOB');
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('invoice_counter', '0');
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('invoice_prefix', 'INV');
--- IANA timezone used when building Google Calendar events from job date/time,
--- so wall-clock times don't shift when viewed in another timezone. No timezone
--- setting existed before this integration; change it for your business's locale.
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('timezone', 'UTC');
+-- The counter, prefix, and timezone rows (including 'timezone', used when
+-- building Google Calendar events from job date/time) are written by the
+-- app (ensureSeeded in src/server/index.ts): a deploy applies this file as
+-- DDL only, so a seed row here fails the whole build.
 
--- Example service types (users customize for their vertical)
-INSERT OR IGNORE INTO service_types (id, name, description, default_duration, default_price, color)
-VALUES
-  (1, 'Standard Service', 'Standard service visit', 60, 150, '#16a34a'),
-  (2, 'Inspection', 'On-site inspection and assessment', 45, 75, '#0891b2'),
-  (3, 'Emergency', 'Urgent same-day service call', 90, 300, '#dc2626'),
-  (4, 'Follow-up', 'Follow-up visit after initial service', 30, 50, '#9333ea'),
-  (5, 'Installation', 'Equipment or system installation', 120, 400, '#ea580c'),
-  (6, 'Maintenance', 'Routine maintenance visit', 60, 125, '#ca8a04');
+-- Example service types are seeded by the app on first request
+-- (ensureSeeded in src/server/index.ts), never here: DDL only.
 
 CREATE INDEX IF NOT EXISTS idx_jobs_customer ON jobs(customer_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_technician ON jobs(technician_id);
@@ -248,11 +237,5 @@ CREATE INDEX IF NOT EXISTS idx_invoices_job ON invoices(job_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status);
 CREATE INDEX IF NOT EXISTS idx_invoice_lines_invoice ON invoice_lines(invoice_id);
 
--- Example materials
-INSERT OR IGNORE INTO materials (id, name, unit, unit_cost, in_stock)
-VALUES
-  (1, 'Service Fee', 'ea', 0, 999),
-  (2, 'Filter Replacement', 'ea', 25, 50),
-  (3, 'Sealant', 'tube', 12, 30),
-  (4, 'Travel Surcharge', 'ea', 35, 999),
-  (5, 'Disposable Supplies', 'kit', 8, 100);
+-- Example materials are seeded by the app on first request
+-- (ensureSeeded in src/server/index.ts), never here: DDL only.

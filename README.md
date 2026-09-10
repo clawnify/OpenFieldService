@@ -1,8 +1,8 @@
-<img src="readme-banner.png" alt="Open Field Service preview" width="100%" />
+<img src="readme-banner.png" alt="OpenFieldService preview" width="100%" />
 
-# Open Field Scheduling: The Open-Source PestPac & ServiceTitan Alternative
+# OpenFieldService: The Open-Source PestPac & ServiceTitan Alternative
 
-[![Deploy with Clawnify](https://app.clawnify.com/deploy-button.svg)](https://app.clawnify.com/deploy?repo=clawnify/open-fieldservice)
+[![Deploy with Clawnify](https://app.clawnify.com/deploy-button.svg)](https://app.clawnify.com/deploy?repo=clawnify/OpenFieldService)
 
 A field service scheduling and business management app for service companies — pest control, HVAC, plumbing, cleaning, landscaping, and more. Part of the [OpenClaw](https://github.com/openclaw/openclaw) ecosystem. Zero cloud dependencies — runs locally with SQLite.
 
@@ -10,13 +10,13 @@ Built with **Preact + Hono + SQLite**. Ships with a clean dashboard UI, weekly c
 
 ## What Is It?
 
-Open Field Scheduling is a production-ready field service management platform designed for the OpenClaw community. Think of it as an open-source alternative to **PestPac**, **ServiceTitan**, **FieldWork**, **Jobber**, or **Housecall Pro** — a complete scheduling and dispatch system you can self-host, customize, and embed in any SaaS product.
+OpenFieldService is a production-ready field service management platform designed for the OpenClaw community. Think of it as an open-source alternative to **PestPac**, **ServiceTitan**, **FieldWork**, **Jobber**, or **Housecall Pro** — a complete scheduling and dispatch system you can self-host, customize, and embed in any SaaS product.
 
 Unlike PestPac or ServiceTitan, this runs entirely on your own infrastructure. No per-user fees, no contracts, no vendor lock-in. Manage your entire field service operation from scheduling to invoicing.
 
 ## Built for Every Field Service Vertical
 
-Open Field Scheduling is **vertical-agnostic** — configure service types, pricing, and workflows for any industry:
+OpenFieldService is **vertical-agnostic** — configure service types, pricing, and workflows for any industry:
 
 | Industry | Example Services |
 |----------|-----------------|
@@ -52,7 +52,7 @@ Open Field Scheduling is **vertical-agnostic** — configure service types, pric
 ## Quickstart
 
 ```bash
-git clone https://github.com/clawnify/open-fieldservice.git
+git clone https://github.com/clawnify/OpenFieldService.git
 cd open-fieldservice
 pnpm install
 pnpm run dev

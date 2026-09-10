@@ -1,7 +1,7 @@
 {
   "$schema": "https://app.clawnify.com/schema/v1/clawnify.json",
   "version": 1,
-  "name": "Field Service Scheduler",
+  "name": "OpenFieldService",
   "description": "Field service scheduling and business management with customers, technicians, service types, and job tracking. Like PestPac, FieldWork, or ServiceTitan. Best for pest control, HVAC, plumbing, cleaning, landscaping, or any field service business that needs appointment scheduling, technician dispatch, recurring jobs, and service history.",
   "icon": "icon.svg",
   "screenshot": "https://github.com/user-attachments/assets/f200eed4-ac02-49fc-9898-a46d209dc432",
@@ -14,7 +14,7 @@
   },
 
   "deploy": {
-    "title": "Deploy your Field Service Scheduler",
+    "title": "Deploy your OpenFieldService",
     "subtitle": "Like PestPac or ServiceTitan — customized for your business in minutes",
     "prompts": [
       {

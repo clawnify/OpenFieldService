@@ -1,5 +1,5 @@
 {
-  "name": "Field Service Scheduler",
+  "name": "OpenFieldService",
   "description": "Field service scheduling and business management with customers, technicians, service types, and job tracking. Like PestPac, FieldWork, or ServiceTitan. Best for pest control, HVAC, plumbing, cleaning, landscaping, or any field service business that needs appointment scheduling, technician dispatch, recurring jobs, and service history.",
   "framework": "preact+hono",
   "files": [
