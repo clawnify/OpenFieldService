@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   identifier TEXT NOT NULL UNIQUE,
   customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  asset_id INTEGER REFERENCES assets(id) ON DELETE RESTRICT,
   technician_id INTEGER REFERENCES technicians(id) ON DELETE SET NULL,
   service_type_id INTEGER REFERENCES service_types(id) ON DELETE SET NULL,
   status TEXT NOT NULL DEFAULT 'scheduled',
@@ -148,3 +149,112 @@ CREATE INDEX IF NOT EXISTS idx_invoice_lines_invoice ON invoice_lines(invoice_id
 
 -- Example materials are seeded by the app on first request
 -- (ensureSeeded in src/server/index.ts), never here: DDL only.
+
+-- Optional equipment lifecycle: records are retained, equipment is retired rather than deleted.
+CREATE TABLE IF NOT EXISTS sites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+  name TEXT NOT NULL,
+  address TEXT NOT NULL DEFAULT '',
+  contact_name TEXT NOT NULL DEFAULT '',
+  contact_phone TEXT NOT NULL DEFAULT '',
+  contact_email TEXT NOT NULL DEFAULT '',
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  access_instructions TEXT NOT NULL DEFAULT '',
+  safety_notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(id, customer_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sites_customer ON sites(customer_id, name);
+
+CREATE TABLE IF NOT EXISTS assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+  site_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  serial_number TEXT NOT NULL COLLATE NOCASE,
+  manufacturer TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'in_service' CHECK(status IN ('in_service', 'out_of_service', 'retired')),
+  installation_date TEXT NOT NULL DEFAULT '',
+  commissioning_date TEXT NOT NULL DEFAULT '',
+  warranty_start TEXT NOT NULL DEFAULT '',
+  warranty_end TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(site_id, customer_id) REFERENCES sites(id, customer_id) ON DELETE RESTRICT,
+  UNIQUE(customer_id, serial_number)
+);
+CREATE INDEX IF NOT EXISTS idx_assets_customer ON assets(customer_id, name);
+CREATE INDEX IF NOT EXISTS idx_assets_site ON assets(site_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_asset ON jobs(asset_id);
+
+-- History is captured in the same statement as a change. job_id is a logical
+-- reference: the snapshot survives deletion or reassignment of the original job.
+CREATE TABLE IF NOT EXISTS asset_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE RESTRICT,
+  job_id INTEGER,
+  summary TEXT NOT NULL,
+  details TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_asset_history_asset ON asset_history(asset_id, id);
+
+CREATE TRIGGER IF NOT EXISTS asset_registered AFTER INSERT ON assets BEGIN
+  INSERT INTO asset_history(asset_id, summary, details)
+  VALUES (NEW.id, 'Equipment registered', NEW.name || ' · ' || NEW.serial_number || ' · ' || (SELECT name FROM sites WHERE id = NEW.site_id));
+END;
+CREATE TRIGGER IF NOT EXISTS asset_moved AFTER UPDATE OF site_id ON assets
+WHEN OLD.site_id != NEW.site_id BEGIN
+  INSERT INTO asset_history(asset_id, summary, details)
+  VALUES (NEW.id, 'Site changed', (SELECT name FROM sites WHERE id = OLD.site_id) || ' → ' || (SELECT name FROM sites WHERE id = NEW.site_id));
+END;
+CREATE TRIGGER IF NOT EXISTS asset_status_changed AFTER UPDATE OF status ON assets
+WHEN OLD.status != NEW.status BEGIN
+  INSERT INTO asset_history(asset_id, summary, details)
+  VALUES (NEW.id, 'Equipment status changed', OLD.status || ' → ' || NEW.status);
+END;
+
+-- Validate both writes so changing a job's customer cannot cross-link equipment.
+CREATE TRIGGER IF NOT EXISTS job_asset_customer_insert BEFORE INSERT ON jobs
+WHEN NEW.asset_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM assets WHERE id = NEW.asset_id AND customer_id = NEW.customer_id
+) BEGIN SELECT RAISE(ABORT, 'Equipment must belong to the job customer'); END;
+CREATE TRIGGER IF NOT EXISTS job_asset_customer_update BEFORE UPDATE OF asset_id, customer_id ON jobs
+WHEN NEW.asset_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM assets WHERE id = NEW.asset_id AND customer_id = NEW.customer_id
+) BEGIN SELECT RAISE(ABORT, 'Equipment must belong to the job customer'); END;
+
+CREATE TRIGGER IF NOT EXISTS asset_job_created AFTER INSERT ON jobs
+WHEN NEW.asset_id IS NOT NULL BEGIN
+  INSERT INTO asset_history(asset_id, job_id, summary, details)
+  VALUES (NEW.asset_id, NEW.id, NEW.identifier || ' linked', NEW.status || ' · ' || NEW.scheduled_date || ' · ' || COALESCE(NEW.notes, ''));
+END;
+CREATE TRIGGER IF NOT EXISTS asset_job_updated AFTER UPDATE ON jobs
+WHEN NEW.asset_id IS NOT NULL AND (
+  OLD.asset_id IS NOT NEW.asset_id OR OLD.status IS NOT NEW.status OR
+  OLD.scheduled_date IS NOT NEW.scheduled_date OR OLD.notes IS NOT NEW.notes OR
+  OLD.completion_notes IS NOT NEW.completion_notes
+) BEGIN
+  INSERT INTO asset_history(asset_id, job_id, summary, details)
+  VALUES (NEW.asset_id, NEW.id, NEW.identifier || CASE WHEN OLD.asset_id IS NOT NEW.asset_id THEN ' linked' ELSE ' updated' END,
+    NEW.status || ' · ' || NEW.scheduled_date || ' · ' || COALESCE(NEW.notes, '') || ' ' || COALESCE(NEW.completion_notes, ''));
+END;
+CREATE TRIGGER IF NOT EXISTS asset_job_unlinked AFTER UPDATE OF asset_id ON jobs
+WHEN OLD.asset_id IS NOT NULL AND OLD.asset_id IS NOT NEW.asset_id BEGIN
+  INSERT INTO asset_history(asset_id, job_id, summary, details)
+  VALUES (OLD.asset_id, OLD.id, OLD.identifier || ' unlinked', OLD.status || ' · ' || OLD.scheduled_date || ' · ' || COALESCE(OLD.notes, '') || ' ' || COALESCE(OLD.completion_notes, ''));
+END;
+CREATE TRIGGER IF NOT EXISTS asset_job_deleted BEFORE DELETE ON jobs
+WHEN OLD.asset_id IS NOT NULL BEGIN
+  INSERT INTO asset_history(asset_id, job_id, summary, details)
+  VALUES (OLD.asset_id, OLD.id, OLD.identifier || ' deleted', OLD.status || ' · ' || OLD.scheduled_date || ' · ' || COALESCE(OLD.notes, '') || ' ' || COALESCE(OLD.completion_notes, ''));
+END;
+CREATE TRIGGER IF NOT EXISTS asset_job_note AFTER INSERT ON job_notes
+WHEN (SELECT asset_id FROM jobs WHERE id = NEW.job_id) IS NOT NULL BEGIN
+  INSERT INTO asset_history(asset_id, job_id, summary, details)
+  SELECT asset_id, id, identifier || ' note added', NEW.content FROM jobs WHERE id = NEW.job_id;
+END;

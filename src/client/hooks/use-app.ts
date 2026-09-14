@@ -157,7 +157,7 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
   const setJobsPage = useCallback((page: number) => setJobsPag((p) => ({ ...p, page })), []);
 
   const addJob = useCallback(async (data: {
-    customer_id: number; technician_id?: number | null; service_type_id?: number | null;
+    customer_id: number; asset_id?: number | null; technician_id?: number | null; service_type_id?: number | null;
     scheduled_date: string; scheduled_time?: string; duration?: number; price?: number;
     address?: string; notes?: string; priority?: Priority; is_recurring?: number; recurrence_interval?: string;
   }) => {

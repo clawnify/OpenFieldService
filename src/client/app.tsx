@@ -14,6 +14,7 @@ import { ServiceTypeList } from "./components/service-type-list";
 import { MaterialList } from "./components/material-list";
 import { InvoiceList } from "./components/invoice-list";
 import { InvoiceDetail } from "./components/invoice-detail";
+import { AssetDetail } from "./components/asset-detail";
 import { ErrorBanner } from "./components/error-banner";
 
 export function App() {
@@ -43,6 +44,7 @@ export function App() {
   }, [view, id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const renderMain = () => {
+    if (view === "assets" && id) return <AssetDetail key={id} id={Number(id)} />;
     if (view === "jobs" && id && appState.selectedJob) return <JobDetail />;
     if (view === "customers" && id && appState.selectedCustomer) return <CustomerDetail />;
     if (view === "invoices" && id && appState.selectedInvoice) return <InvoiceDetail />;

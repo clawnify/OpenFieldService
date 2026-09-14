@@ -1,5 +1,6 @@
 import { useState } from "preact/hooks";
 import { useApp } from "../context";
+import { JobEquipment } from "./asset-picker";
 import { StatusBadge, PriorityBadge } from "./status-badge";
 import { ArrowLeft, Trash2, Send, MapPin, Clock, DollarSign, User, Wrench, Plus, X, CheckSquare, Square, Package, FileText } from "lucide-preact";
 import type { JobStatus } from "../types";
@@ -120,6 +121,8 @@ export function JobDetail() {
               <p class="detail-notes">{job.notes}</p>
             </div>
           )}
+
+          <JobEquipment key={job.id} job={job} />
 
           {/* Checklist */}
           <div class="detail-section">

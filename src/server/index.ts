@@ -1,5 +1,6 @@
 import { createApp, createRoute, z } from "@clawnify/app";
 import { query, get, run } from "./db.js";
+import { equipmentApp } from "./equipment.js";
 
 type Env = { Bindings: { DB: D1Database } };
 
@@ -14,6 +15,8 @@ app.use("*", async (_c, next) => {
   await ensureSeeded();
   await next();
 });
+
+app.route("/", equipmentApp);
 
 // ── First-run data ─────────────────────────────────────────────────
 // A deploy applies `schema.sql` as DDL only — a seed INSERT there fails the
@@ -137,6 +140,7 @@ const JobSchema = z.object({
   id: z.number().int(),
   identifier: z.string(),
   customer_id: z.number().int(),
+  asset_id: z.number().int().nullable(),
   technician_id: z.number().int().nullable(),
   service_type_id: z.number().int().nullable(),
   status: z.string(),
@@ -353,6 +357,7 @@ const createJob = createRoute({
     body: {
       content: { "application/json": { schema: z.object({
         customer_id: z.number().int(),
+        asset_id: z.number().int().positive().nullable().optional(),
         technician_id: z.number().int().nullable().optional(),
         service_type_id: z.number().int().nullable().optional(),
         status: z.string().optional(),
@@ -369,16 +374,24 @@ const createJob = createRoute({
     },
   },
   responses: {
+    400: { description: "Invalid equipment relationship", content: { "application/json": { schema: ErrorSchema } } },
     201: { description: "Created", content: { "application/json": { schema: JobSchema } } },
   },
 });
 
 app.openapi(createJob, async (c) => {
   const data = c.req.valid("json");
+  if (data.asset_id != null && !await get("SELECT id FROM assets WHERE id = ? AND customer_id = ?", [data.asset_id, data.customer_id])) {
+    return c.json({ error: "Equipment must belong to the job customer" }, 400);
+  }
   const identifier = await nextIdentifier();
 
-  // If address is empty, use customer address
+  // Snapshot the equipment site's address; future site moves do not rewrite old jobs.
   let address = data.address || "";
+  if (!address && data.asset_id != null) {
+    const site = await get<{ address: string }>("SELECT s.address FROM sites s JOIN assets a ON a.site_id = s.id WHERE a.id = ?", [data.asset_id]);
+    address = site?.address || "";
+  }
   if (!address) {
     const cust = await get<{ address: string; city: string; state: string; zip: string }>(
       "SELECT address, city, state, zip FROM customers WHERE id = ?", [data.customer_id]
@@ -402,12 +415,13 @@ app.openapi(createJob, async (c) => {
   }
 
   await run(
-    `INSERT INTO jobs (identifier, customer_id, technician_id, service_type_id, status, priority,
+    `INSERT INTO jobs (identifier, customer_id, asset_id, technician_id, service_type_id, status, priority,
        scheduled_date, scheduled_time, duration, price, address, notes, is_recurring, recurrence_interval)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       identifier,
       data.customer_id,
+      data.asset_id ?? null,
       data.technician_id ?? null,
       data.service_type_id ?? null,
       data.status || "scheduled",
@@ -445,6 +459,7 @@ const updateJob = createRoute({
     body: {
       content: { "application/json": { schema: z.object({
         customer_id: z.number().int().optional(),
+        asset_id: z.number().int().positive().nullable().optional(),
         technician_id: z.number().int().nullable().optional(),
         service_type_id: z.number().int().nullable().optional(),
         status: z.string().optional(),
@@ -462,6 +477,7 @@ const updateJob = createRoute({
     },
   },
   responses: {
+    400: { description: "Invalid equipment relationship", content: { "application/json": { schema: ErrorSchema } } },
     200: { description: "Updated", content: { "application/json": { schema: OkSchema } } },
     404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
   },
@@ -472,6 +488,11 @@ app.openapi(updateJob, async (c) => {
   const data = c.req.valid("json");
   const existing = await get<Record<string, unknown>>("SELECT * FROM jobs WHERE id = ?", [id]);
   if (!existing) return c.json({ error: "Job not found" }, 404);
+  const assetId = data.asset_id === undefined ? existing.asset_id : data.asset_id;
+  const customerId = data.customer_id ?? existing.customer_id;
+  if (assetId != null && !await get("SELECT id FROM assets WHERE id = ? AND customer_id = ?", [assetId, customerId])) {
+    return c.json({ error: "Equipment must belong to the job customer" }, 400);
+  }
 
   const fields: string[] = [];
   const vals: unknown[] = [];
@@ -712,12 +733,16 @@ const deleteCustomer = createRoute({
   path: "/api/customers/{id}",
   request: { params: IdParam },
   responses: {
+    409: { description: "Invalid equipment relationship", content: { "application/json": { schema: ErrorSchema } } },
     200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } },
   },
 });
 
 app.openapi(deleteCustomer, async (c) => {
   const { id } = c.req.valid("param");
+  if (await get("SELECT id FROM sites WHERE customer_id = ? LIMIT 1", [id])) {
+    return c.json({ error: "This customer has sites or equipment. Keep the customer to preserve equipment history." }, 409);
+  }
   await run("DELETE FROM customers WHERE id = ?", [id]);
   return c.json({ ok: true }, 200);
 });

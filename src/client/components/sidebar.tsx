@@ -29,7 +29,7 @@ export function Sidebar({ currentView }: { currentView: View }) {
         {navItems.map((item) => (
           <button
             key={item.view}
-            class={`sidebar-item ${currentView === item.view ? "active" : ""}`}
+            class={`sidebar-item ${(currentView === item.view || (currentView === "assets" && item.view === "customers")) ? "active" : ""}`}
             onClick={() => navigate(item.path)}
           >
             <item.icon size={16} />

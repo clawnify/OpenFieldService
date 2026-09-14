@@ -930,3 +930,48 @@ body {
 
 [data-agent] .btn-icon { opacity: 1 !important; }
 [data-agent] .table-row .action-btns { visibility: visible !important; }
+
+/* Optional sites and equipment */
+.equipment-heading, .equipment-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.equipment-heading { justify-content: space-between; margin-bottom: 12px; }
+.equipment-heading h3 { margin: 0; }
+.equipment-section > p, .equipment-page p { margin: 10px 0; }
+.equipment-grid, .equipment-sites { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; margin: 16px 0; }
+.equipment-card { padding: 16px; overflow-wrap: anywhere; min-width: 0; }
+.equipment-card summary { cursor: pointer; font-weight: 600; }
+.equipment-card p { margin: 10px 0; }
+.equipment-link { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; cursor: pointer; text-align: left; font: inherit; color: inherit; }
+.equipment-link:hover { border-color: var(--primary); }
+.equipment-search { margin: 16px 0; max-width: 460px; }
+.equipment-history { list-style: none; padding: 0; display: grid; gap: 12px; }
+.equipment-history time { color: var(--text-muted); font-size: 12px; }
+.equipment-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 16px; margin: 20px 0; }
+.equipment-facts dt { color: var(--text-muted); font-size: 12px; }
+.equipment-facts dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+.equipment-error { color: #b91c1c; }
+.equipment-dialog { border: none; padding: 0; margin: auto; max-width: min(560px, calc(100vw - 24px)); }
+.equipment-dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+.equipment-dialog .form-group { font-size: 12px; font-weight: 600; }
+.equipment-dialog .full-width { grid-column: 1 / -1; }
+.equipment-dialog input, .equipment-dialog select, .equipment-dialog textarea, .equipment-picker input, .equipment-picker select { min-width: 0; width: 100%; }
+.equipment-picker { display: grid; gap: 8px; margin-bottom: 12px; }
+.equipment-section fieldset { border: 0; padding: 0; min-width: 0; }
+.equipment-page { overflow-wrap: anywhere; }
+
+/* Keep customer, equipment, and job workflows reachable on narrow screens. */
+@media (max-width: 640px) {
+  .layout { flex-direction: column; }
+  .sidebar { width: 100%; min-width: 0; height: auto; }
+  .sidebar-brand, .sidebar-footer, .sidebar-section-title { display: none; }
+  .sidebar-nav { display: flex; overflow-x: auto; padding: 8px; flex: none; }
+  .sidebar-item { flex-shrink: 0; width: auto; }
+  .page { padding: 16px; }
+  .page-header, .page-header-right { flex-wrap: wrap; gap: 8px; }
+  .detail-layout { flex-direction: column; }
+  .detail-sidebar { width: 100%; }
+  .form-grid { grid-template-columns: 1fr; padding: 16px; }
+  .form-group input, .form-group select, .form-group textarea { min-width: 0; }
+  .equipment-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .equipment-actions .btn { min-height: 40px; }
+  .equipment-dialog { max-height: calc(100dvh - 24px); }
+}

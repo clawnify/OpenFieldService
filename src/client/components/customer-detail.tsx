@@ -1,10 +1,11 @@
 import { useState } from "preact/hooks";
 import { useApp } from "../context";
+import { CustomerEquipment } from "./customer-equipment";
 import { StatusBadge } from "./status-badge";
 import { ArrowLeft, Trash2, Edit3, Save, X } from "lucide-preact";
 
 export function CustomerDetail() {
-  const { selectedCustomer: customer, selectedCustomerJobs: jobs, navigate, updateCustomer, deleteCustomer } = useApp();
+  const { selectedCustomer: customer, selectedCustomerJobs: jobs, navigate, updateCustomer, deleteCustomer, setError } = useApp();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name: "", email: "", phone: "", address: "", city: "", state: "", zip: "", notes: "" });
 
@@ -39,7 +40,7 @@ export function CustomerDetail() {
           ) : (
             <>
               <button class="btn" onClick={startEdit}><Edit3 size={14} /> Edit</button>
-              <button class="btn btn-danger" onClick={() => deleteCustomer(customer.id)}><Trash2 size={14} /> Delete</button>
+              <button class="btn btn-danger" onClick={() => deleteCustomer(customer.id).catch((err) => setError(err.message))}><Trash2 size={14} /> Delete</button>
             </>
           )}
         </div>
@@ -107,6 +108,8 @@ export function CustomerDetail() {
               )}
             </>
           )}
+
+          <CustomerEquipment key={customer.id} customerId={customer.id} />
 
           <div class="detail-section">
             <h3>Service History ({jobs.length})</h3>
