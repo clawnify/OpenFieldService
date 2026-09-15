@@ -1,4 +1,4 @@
-export type View = "dashboard" | "schedule" | "jobs" | "customers" | "technicians" | "services" | "invoices" | "materials";
+export type View = "assets" | "dashboard" | "schedule" | "jobs" | "customers" | "technicians" | "services" | "invoices" | "materials";
 
 export type JobStatus = "scheduled" | "confirmed" | "in_progress" | "completed" | "cancelled";
 export type Priority = "low" | "normal" | "high" | "urgent";
@@ -8,6 +8,7 @@ export interface Job {
   id: number;
   identifier: string;
   customer_id: number;
+  asset_id: number | null;
   technician_id: number | null;
   service_type_id: number | null;
   status: JobStatus;
@@ -163,4 +164,50 @@ export interface TechnicianLookup {
   id: number;
   name: string;
   color: string;
+}
+
+export interface Site {
+  id: number;
+  customer_id: number;
+  name: string;
+  address: string;
+  contact_name: string;
+  contact_phone: string;
+  contact_email: string;
+  timezone: string;
+  access_instructions: string;
+  safety_notes: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Asset {
+  id: number;
+  customer_id: number;
+  site_id: number;
+  name: string;
+  serial_number: string;
+  manufacturer: string;
+  model: string;
+  status: "in_service" | "out_of_service" | "retired";
+  installation_date: string;
+  commissioning_date: string;
+  warranty_start: string;
+  warranty_end: string;
+  notes: string;
+  site_name: string;
+  site_address: string;
+  customer_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssetHistory {
+  id: number;
+  asset_id: number;
+  job_id: number | null;
+  available_job_id: number | null;
+  summary: string;
+  details: string;
+  created_at: string;
 }

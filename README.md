@@ -38,6 +38,7 @@ OpenFieldService is **vertical-agnostic** — configure service types, pricing, 
 - **Job scheduling** — create, assign, and track service visits with date/time scheduling, priority levels, and status workflow
 - **Weekly calendar view** — visual schedule grid with technician color coding and week navigation
 - **Customer management** — full CRM with contact info, addresses, service history, and notes
+- **Optional equipment records** — customer sites, serialized equipment, lifecycle status, installation/commissioning and warranty dates, and a chronological service history
 - **Technician dispatch** — assign techs to jobs, track active workloads, toggle availability
 - **Service type catalog** — configurable services with default pricing and durations per vertical
 - **Invoicing** — generate invoices from completed jobs, track draft/sent/paid/overdue status, line item details
@@ -53,12 +54,48 @@ OpenFieldService is **vertical-agnostic** — configure service types, pricing, 
 
 ```bash
 git clone https://github.com/clawnify/OpenFieldService.git
-cd open-fieldservice
+cd OpenFieldService
 pnpm install
 pnpm run dev
 ```
 
-Open `http://localhost:5174` in your browser. Data persists in `data.db`.
+Open the local URL printed by Vite (usually `http://localhost:5173`). The API runs on port 8787. Local D1 data persists in `.wrangler/state/`. `pnpm run dev` creates the schema and upgrades existing local jobs with the optional equipment link.
+
+### Sites and equipment (optional)
+
+Open a customer profile and use **Sites & equipment** to add locations, site
+contacts, timezones, access instructions, and safety notes. Register each piece
+of equipment with its serial number and site; serial numbers are unique within
+a customer, ignoring case. Search by name, serial number, or model and open an
+equipment card to view its bookmarkable detail page (`/assets/:id`).
+
+When creating a job, optionally select equipment. A blank job address uses the
+equipment site's address, falling back to the customer address if the site has
+none. Existing jobs can be linked or unlinked from **Job → Equipment**. Changing
+a link or moving equipment does not change an existing job's address.
+
+**Edit equipment** supports moves between the same customer's sites and lifecycle
+status changes. Registration, moves, status changes, linked job changes, and new
+job notes appear in its history. History snapshots remain after a job is unlinked
+or deleted; surviving jobs link through to their checklists and materials.
+Equipment and sites are retained rather than deleted, and customers with sites
+cannot be deleted. Use the equipment's **Retired** status when it leaves service.
+Lifecycle status is a business record, not a telemetry-based health assessment.
+
+This is the first delivery slice of issue #6. Ownership transfers, component
+hierarchies, support cases, maintenance plans, parts applicability, coverage
+adjudication, customer portals, and telemetry ingestion are not included.
+Warranty dates are recorded; coverage decisions are not inferred from them.
+
+For an existing local checkout, `pnpm run db:setup` adds the nullable equipment
+link without dropping or rewriting jobs, then applies the additive schema.
+Clawnify deployments use the platform's additive schema reconciliation. If you
+operate D1 directly, apply the same nullable column addition and declared schema
+to your database through your normal migration process before running the new API.
+
+Run `pnpm test` to exercise the previous schema upgrade (twice, with existing
+data) and the equipment workflows against a temporary local Wrangler/D1 instance.
+The test creates and removes its own database; it does not use a remote database.
 
 ### Agent Mode (for OpenClaw / Claude Code)
 
@@ -104,7 +141,7 @@ curl -X POST http://localhost:3004/api/jobs/1/invoice
 
 ### Prerequisites
 
-- Node.js 20+
+- Node.js 22+ (required by the locked Wrangler version)
 - pnpm (or npm/yarn)
 
 ## Architecture
@@ -184,6 +221,11 @@ invoice_lines(id, invoice_id, description, quantity, unit_price, total)
 | GET | `/api/customers/:id` | Customer detail with job history |
 | PUT | `/api/customers/:id` | Update a customer |
 | DELETE | `/api/customers/:id` | Delete a customer |
+| GET / POST | `/api/customers/:id/sites` | List or create customer sites |
+| PUT | `/api/sites/:id` | Update site details |
+| GET / POST | `/api/customers/:id/assets` | Search/list (50 per page) or register equipment |
+| GET / PUT | `/api/assets/:id` | View or update equipment; move between same-customer sites |
+| GET | `/api/assets/:id/history` | Equipment history, newest first, 50 per page |
 | GET | `/api/technicians` | List technicians with job counts |
 | POST | `/api/technicians` | Create a technician |
 | PUT | `/api/technicians/:id` | Update a technician |

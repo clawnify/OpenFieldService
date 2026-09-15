@@ -12,6 +12,7 @@ const VIEW_ROUTES: Record<string, View> = {
   "schedule": "schedule",
   "jobs": "jobs",
   "customers": "customers",
+  "assets": "assets",
   "technicians": "technicians",
   "services": "services",
   "invoices": "invoices",

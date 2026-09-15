@@ -6,7 +6,7 @@ export function ErrorBanner() {
   if (!error) return null;
 
   return (
-    <div class="error-banner">
+    <div class="error-banner" role="alert">
       <span>{error}</span>
       <button class="error-close" onClick={() => setError(null)}>
         <X size={14} />

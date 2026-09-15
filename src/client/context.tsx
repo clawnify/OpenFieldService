@@ -20,6 +20,7 @@ export interface AppContextValue {
   setJobsStatusFilter: (s: string) => void;
   addJob: (data: {
     customer_id: number;
+    asset_id?: number | null;
     technician_id?: number | null;
     service_type_id?: number | null;
     scheduled_date: string;

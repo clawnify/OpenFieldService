@@ -1,5 +1,6 @@
 import { useState } from "preact/hooks";
 import { useApp } from "../context";
+import { AssetPicker } from "./asset-picker";
 import { X } from "lucide-preact";
 
 export function CreateJob({ onClose }: { onClose: () => void }) {
@@ -7,6 +8,7 @@ export function CreateJob({ onClose }: { onClose: () => void }) {
 
   const today = new Date().toISOString().split("T")[0];
   const [customerId, setCustomerId] = useState("");
+  const [assetId, setAssetId] = useState<number | null>(null);
   const [technicianId, setTechnicianId] = useState("");
   const [serviceTypeId, setServiceTypeId] = useState("");
   const [scheduledDate, setScheduledDate] = useState(today);
@@ -24,6 +26,7 @@ export function CreateJob({ onClose }: { onClose: () => void }) {
     try {
       await addJob({
         customer_id: parseInt(customerId, 10),
+        asset_id: assetId,
         technician_id: technicianId ? parseInt(technicianId, 10) : null,
         service_type_id: serviceTypeId ? parseInt(serviceTypeId, 10) : null,
         scheduled_date: scheduledDate,
@@ -51,7 +54,7 @@ export function CreateJob({ onClose }: { onClose: () => void }) {
           <div class="form-grid">
             <div class="form-group">
               <label>Customer *</label>
-              <select value={customerId} onChange={(e) => setCustomerId((e.target as HTMLSelectElement).value)} required>
+              <select value={customerId} onChange={(e) => { setCustomerId((e.target as HTMLSelectElement).value); setAssetId(null); }} required>
                 <option value="">Select customer...</option>
                 {customerLookup.map((c) => (
                   <option key={c.id} value={c.id}>{c.name}</option>
@@ -94,7 +97,10 @@ export function CreateJob({ onClose }: { onClose: () => void }) {
               <input type="time" value={scheduledTime} onChange={(e) => setScheduledTime((e.target as HTMLInputElement).value)} />
             </div>
             <div class="form-group full-width">
-              <label>Address (leave blank to use customer address)</label>
+              <AssetPicker key={customerId} customerId={Number(customerId)} value={assetId} onChange={setAssetId} />
+            </div>
+            <div class="form-group full-width">
+              <label>Address (leave blank to use equipment site or customer address)</label>
               <input type="text" value={address} onInput={(e) => setAddress((e.target as HTMLInputElement).value)} placeholder="123 Main St, City, ST 12345" />
             </div>
             <div class="form-group full-width">
