@@ -1,3 +1,4 @@
+import { AppNav, embedded } from "@clawnify/app/client";
 import { useState } from "preact/hooks";
 import { useApp } from "../context";
 import { PanelLeft, CalendarClock, LayoutDashboard, Briefcase, Users, Wrench, Settings, CalendarDays, FileText, Package } from "lucide-preact";
@@ -18,6 +19,19 @@ export function Sidebar({ currentView }: { currentView: View }) {
   const { navigate, stats } = useApp();
 
   const [collapsed, setCollapsed] = useState(false);
+
+  if (embedded) {
+    const icons = ["home", "calendar-days", "briefcase", "users", "wrench", "file-text", "package", "settings"];
+    return <AppNav title="Field Service" icon="wrench" active={currentView === "assets" ? "customers" : currentView}
+      groups={[{ items: navItems.map((item, index) => ({
+        id: item.view, label: item.label, href: item.path, icon: icons[index],
+        home: item.view === "dashboard",
+        count: item.view === "jobs" ? stats.jobs || undefined
+          : item.view === "customers" ? stats.customers || undefined
+          : item.view === "invoices" ? stats.invoices_outstanding || undefined : undefined,
+      })) }]}
+      onNavigate={item => navigate(item.href ?? "/")} />;
+  }
 
   return (
     <aside class={`sidebar ${collapsed ? "collapsed" : ""}`}>
