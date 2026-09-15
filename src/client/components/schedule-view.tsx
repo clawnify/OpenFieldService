@@ -1,40 +1,25 @@
 import { useApp } from "../context";
 import { ChevronLeft, ChevronRight } from "lucide-preact";
-
-function getDaysInRange(start: string, end: string): string[] {
-  const days: string[] = [];
-  const d = new Date(start + "T00:00:00");
-  const endDate = new Date(end + "T00:00:00");
-  while (d <= endDate) {
-    days.push(d.toISOString().split("T")[0]);
-    d.setDate(d.getDate() + 1);
-  }
-  return days;
-}
+import { calendarDate, daysInRange, weekRange } from "../calendar";
 
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export function ScheduleView() {
   const { scheduleJobs, scheduleStart, scheduleEnd, setScheduleRange, navigate, technicianLookup } = useApp();
 
-  const days = getDaysInRange(scheduleStart, scheduleEnd);
-  const todayStr = new Date().toISOString().split("T")[0];
+  const days = daysInRange(scheduleStart, scheduleEnd);
+  const todayStr = calendarDate(new Date());
 
   const shiftWeek = (delta: number) => {
     const start = new Date(scheduleStart + "T00:00:00");
     start.setDate(start.getDate() + delta * 7);
     const end = new Date(start);
     end.setDate(start.getDate() + 6);
-    setScheduleRange(start.toISOString().split("T")[0], end.toISOString().split("T")[0]);
+    setScheduleRange(calendarDate(start), calendarDate(end));
   };
 
   const goToday = () => {
-    const today = new Date();
-    const monday = new Date(today);
-    monday.setDate(today.getDate() - today.getDay() + 1);
-    const sunday = new Date(monday);
-    sunday.setDate(monday.getDate() + 6);
-    setScheduleRange(monday.toISOString().split("T")[0], sunday.toISOString().split("T")[0]);
+    setScheduleRange(...weekRange());
   };
 
   return (

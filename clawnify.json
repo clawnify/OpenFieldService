@@ -4,7 +4,7 @@
   "name": "OpenFieldService",
   "description": "Field service scheduling and business management with customers, technicians, service types, and job tracking. Like PestPac, FieldWork, or ServiceTitan. Best for pest control, HVAC, plumbing, cleaning, landscaping, or any field service business that needs appointment scheduling, technician dispatch, recurring jobs, and service history.",
   "icon": "icon.svg",
-  "screenshot": "https://github.com/user-attachments/assets/f200eed4-ac02-49fc-9898-a46d209dc432",
+  "screenshot": "https://raw.githubusercontent.com/clawnify/OpenFieldService/main/screenshots/schedule.png",
   "tags": ["scheduling", "field-service", "dispatch", "crm", "invoicing"],
 
   "app": {
