@@ -2,28 +2,28 @@
   {
     "src": "previews/dispatch.png",
     "alt": "Conceptual floating daily schedule with a slightly overlapping technician assignment panel.",
-    "caption": "The right person. The right place. · Illustrative UI",
+    "caption": "The right person. The right place.",
     "width": 1600,
     "height": 1000
   },
   {
     "src": "previews/job-work.png",
     "alt": "Conceptual floating job checklist with a slightly overlapping materials panel.",
-    "caption": "Every step. Every part. · Illustrative UI",
+    "caption": "Every step. Every part.",
     "width": 1600,
     "height": 1000
   },
   {
     "src": "previews/equipment-history.png",
     "alt": "Conceptual floating equipment service history with an overlapping schedule-job panel.",
-    "caption": "Every visit leaves a record. · Illustrative UI",
+    "caption": "Every visit leaves a record.",
     "width": 1600,
     "height": 1000
   },
   {
     "src": "previews/invoicing.png",
     "alt": "Conceptual floating itemized invoice with an overlapping manual invoice-status panel.",
-    "caption": "From service to invoice. · Illustrative UI",
+    "caption": "From service to invoice.",
     "width": 1600,
     "height": 1000
   }

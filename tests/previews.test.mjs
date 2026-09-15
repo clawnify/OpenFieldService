@@ -17,7 +17,7 @@ test('saved preview pipeline rejects stale compositions and invalid captures', (
     assert.equal(run('build').status, 0);
     const concept = readFileSync(join(directory, '.preview-build/dispatch.html'), 'utf8');
     assert.ok(!concept.includes('data:image/png'), 'feature illustrations must not embed screenshots');
-    assert.match(concept, /Illustrative UI/);
+    assert.ok(!concept.includes('Illustrative UI'), 'feature images should not include a disclaimer footer');
     assert.match(concept, /Conceptual technician assignment/);
     const cover = readFileSync(join(directory, 'readme-banner.png'));
     const wrongSize = run('import', 'cover-light', 'screenshots/dashboard-mobile.png');

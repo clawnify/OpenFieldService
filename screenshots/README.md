@@ -84,7 +84,9 @@ manifest describe the original capture; use the new routes when recapturing.
    one relatable task, with large readable labels and at most two related
    floating panels. Overlap their edges slightly; leave key content visible.
    Use layers, soft shadows and background colour to integrate the panels.
-   Keep the “Illustrative UI” label and do not imply unbuilt features.
+   Keep the artwork free of footer disclaimers such as “Illustrative UI” or
+   “Example data”. Document the conceptual treatment here and in image alt
+   text; do not imply unbuilt features.
 
 ## Build the cover and feature cards
 

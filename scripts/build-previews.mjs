@@ -58,7 +58,7 @@ for (const feature of manifest.features) {
   }
   const panels = renderConcept(feature.id);
   outputs.push({ id: feature.id, src: `previews/${feature.id}.png`, width: 1600, height: 1000, title: feature.title, alt: feature.alt, theme: 'light',
-    html: html(feature.title, `<style>${conceptStyles}</style><div class="brand"><img src="${icon}" alt="">OpenFieldService</div><div class="eyebrow">${escape(feature.eyebrow)}</div><div class="copy"><h1>${escape(feature.title)}</h1><p>${escape(feature.subtitle)}</p></div>${panels}<div class="footer">Illustrative UI · Example data</div>`, feature.background, `concept ${feature.id}`),
+    html: html(feature.title, `<style>${conceptStyles}</style><div class="brand"><img src="${icon}" alt="">OpenFieldService</div><div class="eyebrow">${escape(feature.eyebrow)}</div><div class="copy"><h1>${escape(feature.title)}</h1><p>${escape(feature.subtitle)}</p></div>${panels}`, feature.background, `concept ${feature.id}`),
   });
 }
 const [command = 'build', id, source] = process.argv.slice(2);
@@ -91,7 +91,7 @@ if (command === 'build') {
   const images = manifest.carousel.map(id => {
     const entry = catalogue.get(id);
     if (!entry) throw new Error(`Unknown carousel image: ${id}`);
-    return { src: entry.src, alt: entry.alt, caption: `${entry.title.replaceAll('\n', ' ')} · ${manifest.features.some(f => f.id === id) ? 'Illustrative UI' : 'Example data'}`, width: entry.width, height: entry.height };
+    return { src: entry.src, alt: entry.alt, caption: entry.title.replaceAll('\n', ' '), width: entry.width, height: entry.height };
   });
   if (command === 'export') {
     // Existing website AppImage[] contract. Prefix these repo-relative paths
