@@ -1,3 +1,4 @@
+import { reportLocation } from "@clawnify/app/client";
 import { useEffect, useMemo } from "preact/hooks";
 import { AppContext } from "./context";
 import { useAppState } from "./hooks/use-app";
@@ -31,6 +32,7 @@ export function App() {
 
   const { view, id, navigate } = useRouter();
   const appState = useAppState(isAgent, navigate);
+  useEffect(() => { reportLocation(window.location.pathname + window.location.search); }, [view, id]);
 
   // Load detail when URL has an ID
   useEffect(() => {
