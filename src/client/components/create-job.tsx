@@ -1,18 +1,18 @@
 import { useState } from "preact/hooks";
+import { calendarDate } from "../calendar";
 import { useApp } from "../context";
 import { AssetPicker } from "./asset-picker";
 import { EquipmentDialog } from "./equipment-forms";
 import type { Asset, Job } from "../types";
 
-export function CreateJob({ onClose, initialAsset, onCreated }: { onClose: () => void; initialAsset?: Asset; onCreated?: (job: Job) => void }) {
+export function CreateJob({ onClose, initialAsset, initialDate, onCreated }: { onClose: () => void; initialAsset?: Asset; initialDate?: string; onCreated?: (job: Job) => void }) {
   const { addJob, customerLookup, technicianLookup, serviceTypes } = useApp();
 
-  const today = new Date().toISOString().split("T")[0];
   const [customerId, setCustomerId] = useState(initialAsset ? String(initialAsset.customer_id) : "");
   const [assetId, setAssetId] = useState<string | null>(initialAsset?.id ?? null);
   const [technicianId, setTechnicianId] = useState("");
   const [serviceTypeId, setServiceTypeId] = useState("");
-  const [scheduledDate, setScheduledDate] = useState(today);
+  const [scheduledDate, setScheduledDate] = useState(() => initialDate ?? calendarDate(new Date()));
   const [scheduledTime, setScheduledTime] = useState("09:00");
   const [priority, setPriority] = useState("normal");
   const [address, setAddress] = useState("");
