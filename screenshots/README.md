@@ -18,7 +18,9 @@ separate local database and fictional customers, at 1440×960.
   existing capabilities, not literal application screens.
 - [../readme-banner.png](../readme-banner.png) and
   [dark variant](../readme-banner-dark.png): 1600×1000 covers, selected through
-  `cover.light` and `cover.dark`. README uses a theme-aware `<picture>`.
+  `cover.light` and `cover.dark`. A large headline and floating schedule frame
+  pair with a slightly overlapping conceptual assignment panel. Both the
+  background and panel styling follow the selected theme; the README uses `<picture>`.
 - [../previews/website-gallery.json](../previews/website-gallery.json): ordered
   image data with `src`, `alt`, `caption`, `width` and `height` for the website.
 - [../scripts/feature-concepts.mjs](../scripts/feature-concepts.mjs): reusable

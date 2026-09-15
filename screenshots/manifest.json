@@ -39,7 +39,8 @@
     "light": "schedule",
     "dark": "schedule-dark",
     "title": "OpenFieldService",
-    "subtitle": "Dispatch your team. Keep every visit connected."
+    "subtitle": "Plan the work. Assign the right person. Keep every visit connected.",
+    "headline": "Your team.\nEvery visit.\nConnected."
   },
   "features": [
     {

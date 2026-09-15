@@ -1,6 +1,6 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="readme-banner-dark.png" />
-  <img src="readme-banner.png" alt="OpenFieldService weekly dispatch with technician assignments" width="100%" />
+  <img src="readme-banner.png" alt="OpenFieldService — weekly dispatch with a floating conceptual technician assignment panel" width="100%" />
 </picture>
 
 # OpenFieldService: The Open-Source PestPac & ServiceTitan Alternative
