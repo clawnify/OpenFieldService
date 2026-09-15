@@ -7,165 +7,11 @@
   "captureNotes": "Real TaskWindow captures on a separate local database, fictional example data. Includes calendar timezone fix from this branch. Dark capture activates the existing dark media rule via CSSOM; no UI content is replaced. Desktop capture is a 1440×960 emulated touch viewport.",
   "screenshots": [
     {
-      "id": "dashboard",
-      "src": "screenshots/dashboard.png",
-      "title": "Dashboard",
-      "alt": "Daily job counts, revenue, outstanding invoices and today’s schedule.",
-      "route": "/",
-      "theme": "light",
-      "width": 1440,
-      "height": 960,
-      "viewport": {
-        "width": 1440,
-        "height": 960
-      }
-    },
-    {
       "id": "schedule",
       "src": "screenshots/schedule.png",
       "title": "Weekly dispatch",
       "alt": "A Monday-to-Sunday schedule with customer visits, service types and assigned technicians.",
       "route": "/schedule",
-      "theme": "light",
-      "width": 1440,
-      "height": 960,
-      "viewport": {
-        "width": 1440,
-        "height": 960
-      }
-    },
-    {
-      "id": "jobs",
-      "src": "screenshots/jobs.png",
-      "title": "Jobs",
-      "alt": "Scheduled, confirmed, in-progress and completed service jobs with dates, technicians and prices.",
-      "route": "/jobs",
-      "theme": "light",
-      "width": 1440,
-      "height": 960,
-      "viewport": {
-        "width": 1440,
-        "height": 960
-      }
-    },
-    {
-      "id": "job",
-      "src": "screenshots/job.png",
-      "title": "Job workspace",
-      "alt": "A service visit with customer details, linked equipment, checklist, materials and activity.",
-      "route": "/jobs/8b98415e-ba63-4ab6-bec2-4a56e68622f2",
-      "theme": "light",
-      "width": 1440,
-      "height": 1429,
-      "viewport": {
-        "width": 1440,
-        "height": 960
-      }
-    },
-    {
-      "id": "customers",
-      "src": "screenshots/customers.png",
-      "title": "Customers",
-      "alt": "Customer directory with contact details, addresses and job counts.",
-      "route": "/customers",
-      "theme": "light",
-      "width": 1440,
-      "height": 960,
-      "viewport": {
-        "width": 1440,
-        "height": 960
-      }
-    },
-    {
-      "id": "customer",
-      "src": "screenshots/customer.png",
-      "title": "Customer record",
-      "alt": "Juniper House’s contact details, sites, installed equipment and service history.",
-      "route": "/customers/9481f50e-130f-435e-bee9-5e4015fa3c06",
-      "theme": "light",
-      "width": 1440,
-      "height": 977,
-      "viewport": {
-        "width": 1440,
-        "height": 960
-      }
-    },
-    {
-      "id": "equipment",
-      "src": "screenshots/equipment.png",
-      "title": "Equipment history",
-      "alt": "Rooftop air handler serial, warranty dates, site access and linked service history.",
-      "route": "/assets/a95b4bc1-c722-4c26-944e-49774019a387",
-      "theme": "light",
-      "width": 1440,
-      "height": 960,
-      "viewport": {
-        "width": 1440,
-        "height": 960
-      }
-    },
-    {
-      "id": "services",
-      "src": "screenshots/services.png",
-      "title": "Service types",
-      "alt": "Configurable services with duration, default pricing and category colours.",
-      "route": "/services",
-      "theme": "light",
-      "width": 1440,
-      "height": 960,
-      "viewport": {
-        "width": 1440,
-        "height": 960
-      }
-    },
-    {
-      "id": "materials",
-      "src": "screenshots/materials.png",
-      "title": "Materials & inventory",
-      "alt": "Materials catalog with unit costs and stock quantities.",
-      "route": "/materials",
-      "theme": "light",
-      "width": 1440,
-      "height": 960,
-      "viewport": {
-        "width": 1440,
-        "height": 960
-      }
-    },
-    {
-      "id": "invoices",
-      "src": "screenshots/invoices.png",
-      "title": "Invoices",
-      "alt": "Invoice list with paid, sent and overdue statuses, due dates and totals.",
-      "route": "/invoices",
-      "theme": "light",
-      "width": 1440,
-      "height": 960,
-      "viewport": {
-        "width": 1440,
-        "height": 960
-      }
-    },
-    {
-      "id": "invoice",
-      "src": "screenshots/invoice.png",
-      "title": "Invoice detail",
-      "alt": "Itemized maintenance invoice with quantities, tax, total and payment status.",
-      "route": "/invoices/ad1cf17b-b533-43c3-a1ca-5a7fc9092327",
-      "theme": "light",
-      "width": 1440,
-      "height": 960,
-      "viewport": {
-        "width": 1440,
-        "height": 960
-      }
-    },
-    {
-      "id": "technicians",
-      "src": "screenshots/technicians.png",
-      "title": "Technicians",
-      "alt": "Technician directory with assigned colours, active workloads and availability.",
-      "route": "/technicians",
       "theme": "light",
       "width": 1440,
       "height": 960,
@@ -187,27 +33,14 @@
         "width": 1440,
         "height": 960
       }
-    },
-    {
-      "id": "dashboard-mobile",
-      "src": "screenshots/dashboard-mobile.png",
-      "title": "Dashboard · Mobile",
-      "alt": "Daily job counts, revenue, outstanding invoices and today’s schedule.",
-      "route": "/",
-      "theme": "light",
-      "width": 390,
-      "height": 844,
-      "viewport": {
-        "width": 390,
-        "height": 844
-      }
     }
   ],
   "cover": {
     "light": "schedule",
     "dark": "schedule-dark",
     "title": "OpenFieldService",
-    "subtitle": "Dispatch your team. Keep every visit connected."
+    "subtitle": "Plan the work. Assign the right person. Keep every visit connected.",
+    "headline": "Your team.\nEvery visit.\nConnected."
   },
   "features": [
     {
@@ -218,8 +51,7 @@
       "background": "#eef2ed",
       "alt": "Conceptual floating daily schedule with a slightly overlapping technician assignment panel.",
       "sources": [
-        "schedule",
-        "technicians"
+        "src/client/components/schedule-view.tsx"
       ],
       "kind": "conceptual-ui"
     },
@@ -231,7 +63,7 @@
       "background": "#f3efe9",
       "alt": "Conceptual floating job checklist with a slightly overlapping materials panel.",
       "sources": [
-        "job"
+        "src/client/components/job-detail.tsx"
       ],
       "kind": "conceptual-ui"
     },
@@ -243,7 +75,7 @@
       "background": "#eef0f6",
       "alt": "Conceptual floating equipment service history with an overlapping schedule-job panel.",
       "sources": [
-        "equipment"
+        "src/client/components/asset-detail.tsx"
       ],
       "kind": "conceptual-ui"
     },
@@ -255,8 +87,7 @@
       "background": "#f5eeed",
       "alt": "Conceptual floating itemized invoice with an overlapping manual invoice-status panel.",
       "sources": [
-        "invoice",
-        "job"
+        "src/client/components/invoice-detail.tsx"
       ],
       "kind": "conceptual-ui"
     }

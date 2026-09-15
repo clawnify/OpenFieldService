@@ -1,6 +1,6 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="readme-banner-dark.png" />
-  <img src="readme-banner.png" alt="OpenFieldService weekly dispatch with technician assignments" width="100%" />
+  <img src="readme-banner.png" alt="OpenFieldService — weekly dispatch with a floating conceptual technician assignment panel" width="100%" />
 </picture>
 
 # OpenFieldService: The Open-Source PestPac & ServiceTitan Alternative
@@ -21,7 +21,7 @@ Conceptual UI illustrations of the app’s main capabilities, with fictional exa
 | **Equipment history** | **Invoicing** |
 | [![Equipment history](previews/equipment-history.png)](previews/equipment-history.png) | [![Itemized invoicing](previews/invoicing.png)](previews/invoicing.png) |
 
-[Browse all 14 screenshots and the capture workflow](screenshots/README.md).
+[README cover sources and micro UI preview workflow](screenshots/README.md).
 
 ## What Is It?
 

@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync } from
 import { resolve, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { conceptStyles, renderConcept } from './feature-concepts.mjs';
+import { conceptStyles, renderConcept, renderAssignment } from './feature-concepts.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const manifest = JSON.parse(readFileSync(resolve(root, 'screenshots/manifest.json'), 'utf8'));
@@ -23,6 +23,7 @@ function png(path) {
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const shots = new Map();
 for (const shot of manifest.screenshots) {
+  if (![manifest.cover.light, manifest.cover.dark].includes(shot.id)) throw new Error(`Screenshot is not a cover source: ${shot.id}`);
   if (shots.has(shot.id) || !shot.alt || !shot.route) throw new Error(`Invalid screenshot entry: ${shot.id}`);
   const actual = png(local(shot.src));
   if (actual.width !== shot.width || actual.height !== shot.height) throw new Error(`Dimensions changed: ${shot.id}`);
@@ -43,18 +44,27 @@ h1{position:absolute;left:80px;top:142px;margin:0;font-size:66px;line-height:1.1
 .frame img{display:block;width:100%;height:auto}.dark{color:#efeeed}.dark .subtitle,.dark .footer{color:#b3b1ac}.dark .frame{border-color:#383733}
 `;
 const html = (title, body, background, classes = '') => `<!doctype html><html lang="en"><meta charset="utf-8"><title>${escape(title)}</title><style>${style}</style><body class="${classes}" style="background:${background}">${body}</body></html>`;
+const coverStyles = `
+.cover-upgrade{color:#222820}.cover-upgrade:before{content:"";position:absolute;left:520px;top:160px;width:1000px;height:830px;background:radial-gradient(ellipse,#d7e5db,transparent 70%)}
+.cover-upgrade .cover-brand{left:80px;top:67px;gap:14px}.cover-upgrade .cover-brand img{width:46px;height:46px;border-radius:12px}.cover-upgrade .cover-brand h1{font-size:34px;letter-spacing:-1px}
+.cover-upgrade .hero-copy{position:absolute;left:80px;top:292px;width:500px}.hero-copy h2{font-size:74px;line-height:1.04;letter-spacing:-3.4px;font-weight:650;margin:0;white-space:pre-line}.hero-copy p{font-size:24px;line-height:1.5;color:#697067;margin:28px 0 0;max-width:420px}
+.cover-upgrade .frame{left:633px;top:235px;width:870px;height:580px;border:0;border-radius:20px;transform:rotate(-3deg);box-shadow:0 2px 3px #29362708,0 20px 40px -16px #29362730,0 45px 70px -38px #29362750}
+.cover-upgrade .assignment-ui{left:990px;top:742px;width:470px;padding:25px 28px}.cover-upgrade .hero-meta{position:absolute;left:80px;bottom:74px;color:#587260;font-size:16px;letter-spacing:.2px}
+.cover-upgrade.dark{color:#eef2eb}.cover-upgrade.dark:before{background:radial-gradient(ellipse,#2b4034,transparent 70%)}.cover-upgrade.dark .hero-copy p{color:#a6b2a7}.cover-upgrade.dark .hero-meta{color:#a2b8a8}.cover-upgrade.dark .frame{box-shadow:0 0 0 1px #364039,0 30px 70px -30px #0009}
+.cover-upgrade.dark .assignment-ui{background:#222b24;border-color:#39443b;color:#eef2eb;box-shadow:0 0 0 1px #364039,0 20px 35px -18px #0009}.cover-upgrade.dark .muted,.cover-upgrade.dark .label{color:#a6b2a7}.cover-upgrade.dark .avatar,.cover-upgrade.dark .checkmark{background:#354a3a;color:#b7d4bb}
+`;
 const outputs = [];
 for (const theme of ['light', 'dark']) {
   const shot = shots.get(manifest.cover[theme]);
   if (!shot || shot.theme !== theme) throw new Error(`Cover requires a real ${theme} screenshot`);
   outputs.push({ id: `cover-${theme}`, src: theme === 'light' ? 'readme-banner.png' : 'readme-banner-dark.png', width: 1600, height: 1000,
     title: manifest.cover.title, alt: `${manifest.cover.title} — ${manifest.cover.subtitle}`, theme,
-    html: html(`${manifest.cover.title} cover`, `<div class="cover-brand"><img src="${icon}" alt=""><h1>${escape(manifest.cover.title)}</h1></div><p class="subtitle">${escape(manifest.cover.subtitle)}</p><div class="frame"><img src="${shot.uri}" alt="${escape(shot.alt)}"></div><div class="footer">Open source · Self-hostable · Example data</div>`, theme === 'dark' ? '#0d1117' : '#f5f3ef', `cover ${theme}`),
+    html: html(`${manifest.cover.title} cover`, `<style>${conceptStyles}${coverStyles}</style><div class="cover-brand"><img src="${icon}" alt=""><h1>${escape(manifest.cover.title)}</h1></div><div class="hero-copy"><h2>${escape(manifest.cover.headline)}</h2><p>${escape(manifest.cover.subtitle)}</p></div><div class="frame"><img src="${shot.uri}" alt="${escape(shot.alt)}"></div>${renderAssignment()}<div class="hero-meta">Open source · Self-hostable</div>`, theme === 'dark' ? '#141c17' : '#eef2ed', `cover cover-upgrade ${theme}`),
   });
 }
 for (const feature of manifest.features) {
   for (const source of feature.sources) {
-    if (!shots.has(source)) throw new Error(`Unknown reference screenshot: ${source}`);
+    if (!existsSync(local(source))) throw new Error(`Missing feature source: ${source}`);
   }
   const panels = renderConcept(feature.id);
   outputs.push({ id: feature.id, src: `previews/${feature.id}.png`, width: 1600, height: 1000, title: feature.title, alt: feature.alt, theme: 'light',
@@ -87,7 +97,7 @@ if (command === 'build') {
     const actual = png(local(output.src));
     if (actual.width !== output.width || actual.height !== output.height || receipts[output.id]?.composition !== sha(output.html) || receipts[output.id]?.png !== sha(actual.bytes)) throw new Error(`Stale output: ${output.id}. Rebuild and capture again.`);
   }
-  const catalogue = new Map([...manifest.screenshots, ...outputs].map(entry => [entry.id, entry]));
+  const catalogue = new Map(outputs.filter(entry => manifest.features.some(feature => feature.id === entry.id)).map(entry => [entry.id, entry]));
   const images = manifest.carousel.map(id => {
     const entry = catalogue.get(id);
     if (!entry) throw new Error(`Unknown carousel image: ${id}`);
