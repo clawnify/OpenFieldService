@@ -21,8 +21,6 @@ Conceptual UI illustrations of the app’s main capabilities, with fictional exa
 | **Equipment history** | **Invoicing** |
 | [![Equipment history](previews/equipment-history.png)](previews/equipment-history.png) | [![Itemized invoicing](previews/invoicing.png)](previews/invoicing.png) |
 
-[README cover sources and micro UI preview workflow](screenshots/README.md).
-
 ## What Is It?
 
 OpenFieldService is a production-ready field service management platform designed for the OpenClaw community. Think of it as an open-source alternative to **PestPac**, **ServiceTitan**, **FieldWork**, **Jobber**, or **Housecall Pro** — a complete scheduling and dispatch system you can self-host, customize, and embed in any SaaS product.
