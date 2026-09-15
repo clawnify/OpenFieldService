@@ -1,5 +1,6 @@
+import { useState } from "preact/hooks";
 import { useApp } from "../context";
-import { CalendarClock, LayoutDashboard, Briefcase, Users, Wrench, Settings, CalendarDays, FileText, Package } from "lucide-preact";
+import { PanelLeft, CalendarClock, LayoutDashboard, Briefcase, Users, Wrench, Settings, CalendarDays, FileText, Package } from "lucide-preact";
 import type { View } from "../types";
 
 const navItems: { view: View; path: string; label: string; icon: typeof LayoutDashboard }[] = [
@@ -10,25 +11,30 @@ const navItems: { view: View; path: string; label: string; icon: typeof LayoutDa
   { view: "technicians", path: "/technicians", label: "Technicians", icon: Wrench },
   { view: "invoices", path: "/invoices", label: "Invoices", icon: FileText },
   { view: "materials", path: "/materials", label: "Materials", icon: Package },
-  { view: "services", path: "/services", label: "Service Types", icon: Settings },
+  { view: "services", path: "/services", label: "Service types", icon: Settings },
 ];
 
 export function Sidebar({ currentView }: { currentView: View }) {
   const { navigate, stats } = useApp();
 
+  const [collapsed, setCollapsed] = useState(false);
+
   return (
-    <aside class="sidebar">
+    <aside class={`sidebar ${collapsed ? "collapsed" : ""}`}>
       <div class="sidebar-brand">
         <div class="sidebar-brand-icon">
           <CalendarClock size={16} />
         </div>
-        Field Scheduler
+        <span class="sidebar-brand-name">OpenFieldService</span>
+        <button class="btn-icon" aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} onClick={() => setCollapsed(!collapsed)}><PanelLeft size={16} /></button>
       </div>
       <nav class="sidebar-nav">
         <div class="sidebar-section-title">Menu</div>
         {navItems.map((item) => (
           <button
             key={item.view}
+            title={item.label}
+            aria-current={(currentView === item.view || (currentView === "assets" && item.view === "customers")) ? "page" : undefined}
             class={`sidebar-item ${(currentView === item.view || (currentView === "assets" && item.view === "customers")) ? "active" : ""}`}
             onClick={() => navigate(item.path)}
           >

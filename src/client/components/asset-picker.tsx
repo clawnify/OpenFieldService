@@ -3,7 +3,7 @@ import { api } from "../api";
 import { useApp } from "../context";
 import type { Asset, Job } from "../types";
 
-export function AssetPicker({ customerId, value, onChange }: { customerId: number; value: number | null; onChange: (id: number | null) => void }) {
+export function AssetPicker({ customerId, value, onChange, initialAsset }: { customerId: string; value: string | null; onChange: (id: string | null) => void; initialAsset?: Asset }) {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [search, setSearch] = useState("");
   const [total, setTotal] = useState(0);
@@ -21,9 +21,9 @@ export function AssetPicker({ customerId, value, onChange }: { customerId: numbe
   }, [customerId, search, revision]);
   return <div class="equipment-picker">
     <label class="form-group">Find equipment<input type="search" disabled={!customerId} value={search} placeholder="Name, serial number, or model" onInput={(e) => setSearch(e.currentTarget.value)} /></label>
-    <label class="form-group">Equipment (optional)<select value={value ?? ""} disabled={!customerId || loading || !!error} onChange={(e) => onChange(e.currentTarget.value ? Number(e.currentTarget.value) : null)}>
+    <label class="form-group">Equipment (optional)<select value={value ?? ""} disabled={!customerId || loading || !!error} onChange={(e) => onChange(e.currentTarget.value ? e.currentTarget.value : null)}>
       <option value="">No equipment — customer job</option>
-      {value != null && !assets.some((a) => a.id === value) && <option value={value}>Linked equipment #{value}</option>}
+      {value != null && !assets.some((a) => a.id === value) && <option value={value}>{initialAsset?.id === value && initialAsset.customer_id === customerId ? `${initialAsset.name} · ${initialAsset.serial_number} · ${initialAsset.site_name}` : `Linked equipment #${value}`}</option>}
       {assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · {asset.serial_number} · {asset.site_name}{asset.status === "retired" ? " (retired)" : ""}</option>)}
     </select></label>
     {loading && <p role="status">Loading equipment…</p>}

@@ -35,16 +35,16 @@ export function App() {
   // Load detail when URL has an ID
   useEffect(() => {
     if (view === "jobs" && id) {
-      appState.selectJob(parseInt(id, 10));
+      appState.selectJob(id);
     } else if (view === "customers" && id) {
-      appState.selectCustomer(parseInt(id, 10));
+      appState.selectCustomer(id);
     } else if (view === "invoices" && id) {
-      appState.selectInvoice(parseInt(id, 10));
+      appState.selectInvoice(id);
     }
   }, [view, id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const renderMain = () => {
-    if (view === "assets" && id) return <AssetDetail key={id} id={Number(id)} />;
+    if (view === "assets" && id) return <AssetDetail key={id} id={id} />;
     if (view === "jobs" && id && appState.selectedJob) return <JobDetail />;
     if (view === "customers" && id && appState.selectedCustomer) return <CustomerDetail />;
     if (view === "invoices" && id && appState.selectedInvoice) return <InvoiceDetail />;

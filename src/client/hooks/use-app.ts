@@ -157,16 +157,20 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
   const setJobsPage = useCallback((page: number) => setJobsPag((p) => ({ ...p, page })), []);
 
   const addJob = useCallback(async (data: {
-    customer_id: number; asset_id?: number | null; technician_id?: number | null; service_type_id?: number | null;
+    customer_id: string; asset_id?: string | null; technician_id?: string | null; service_type_id?: string | null;
     scheduled_date: string; scheduled_time?: string; duration?: number; price?: number;
     address?: string; notes?: string; priority?: Priority; is_recurring?: number; recurrence_interval?: string;
   }) => {
-    await api("POST", "/api/jobs", data);
-    await fetchJobs(jobsPag, jobsSearch, jobsStatusFilter);
-    await Promise.all([fetchStats(), fetchSchedule(scheduleStart, scheduleEnd)]);
+    const job = await api<Job>("POST", "/api/jobs", data);
+    try {
+      await Promise.all([fetchJobs(jobsPag, jobsSearch, jobsStatusFilter), fetchStats(), fetchSchedule(scheduleStart, scheduleEnd)]);
+    } catch {
+      setError(`Job ${job.identifier} was created, but some lists could not refresh. Reload to update them.`);
+    }
+    return job;
   }, [jobsPag, jobsSearch, jobsStatusFilter, scheduleStart, scheduleEnd, fetchJobs, fetchStats, fetchSchedule]);
 
-  const updateJob = useCallback(async (id: number, data: Partial<Job>) => {
+  const updateJob = useCallback(async (id: string, data: Partial<Job>) => {
     await api("PUT", `/api/jobs/${id}`, data);
     await fetchJobs(jobsPag, jobsSearch, jobsStatusFilter);
     if (selectedJob && selectedJob.id === id) {
@@ -176,26 +180,26 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
     await Promise.all([fetchStats(), fetchSchedule(scheduleStart, scheduleEnd)]);
   }, [jobsPag, jobsSearch, jobsStatusFilter, selectedJob, scheduleStart, scheduleEnd, fetchJobs, fetchStats, fetchSchedule]);
 
-  const deleteJob = useCallback(async (id: number) => {
+  const deleteJob = useCallback(async (id: string) => {
     await api("DELETE", `/api/jobs/${id}`);
     if (selectedJob && selectedJob.id === id) { setSelectedJob(null); navigate("/jobs"); }
     await fetchJobs(jobsPag, jobsSearch, jobsStatusFilter);
     await Promise.all([fetchStats(), fetchSchedule(scheduleStart, scheduleEnd)]);
   }, [jobsPag, jobsSearch, jobsStatusFilter, selectedJob, scheduleStart, scheduleEnd, navigate, fetchJobs, fetchStats, fetchSchedule]);
 
-  const selectJob = useCallback(async (id: number | null) => {
+  const selectJob = useCallback(async (id: string | null) => {
     if (id === null) { setSelectedJob(null); return; }
     const res = await api<{ job: Job }>("GET", `/api/jobs/${id}`);
     setSelectedJob(res.job);
   }, []);
 
-  const addJobNote = useCallback(async (jobId: number, content: string) => {
+  const addJobNote = useCallback(async (jobId: string, content: string) => {
     await api("POST", `/api/jobs/${jobId}/notes`, { content });
     const res = await api<{ job: Job }>("GET", `/api/jobs/${jobId}`);
     setSelectedJob(res.job);
   }, []);
 
-  const deleteJobNote = useCallback(async (noteId: number) => {
+  const deleteJobNote = useCallback(async (noteId: string) => {
     await api("DELETE", `/api/notes/${noteId}`);
     if (selectedJob) {
       const res = await api<{ job: Job }>("GET", `/api/jobs/${selectedJob.id}`);
@@ -205,13 +209,13 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
 
   // ── Checklist ──
 
-  const addChecklistItem = useCallback(async (jobId: number, label: string) => {
+  const addChecklistItem = useCallback(async (jobId: string, label: string) => {
     await api("POST", `/api/jobs/${jobId}/checklist`, { label });
     const res = await api<{ job: Job }>("GET", `/api/jobs/${jobId}`);
     setSelectedJob(res.job);
   }, []);
 
-  const toggleChecklistItem = useCallback(async (itemId: number) => {
+  const toggleChecklistItem = useCallback(async (itemId: string) => {
     await api("PUT", `/api/checklist/${itemId}`);
     if (selectedJob) {
       const res = await api<{ job: Job }>("GET", `/api/jobs/${selectedJob.id}`);
@@ -219,7 +223,7 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
     }
   }, [selectedJob]);
 
-  const deleteChecklistItem = useCallback(async (itemId: number) => {
+  const deleteChecklistItem = useCallback(async (itemId: string) => {
     await api("DELETE", `/api/checklist/${itemId}`);
     if (selectedJob) {
       const res = await api<{ job: Job }>("GET", `/api/jobs/${selectedJob.id}`);
@@ -229,13 +233,13 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
 
   // ── Job Materials ──
 
-  const addJobMaterial = useCallback(async (jobId: number, materialId: number, quantity: number) => {
+  const addJobMaterial = useCallback(async (jobId: string, materialId: string, quantity: number) => {
     await api("POST", `/api/jobs/${jobId}/materials`, { material_id: materialId, quantity });
     const res = await api<{ job: Job }>("GET", `/api/jobs/${jobId}`);
     setSelectedJob(res.job);
   }, []);
 
-  const deleteJobMaterial = useCallback(async (id: number) => {
+  const deleteJobMaterial = useCallback(async (id: string) => {
     await api("DELETE", `/api/job-materials/${id}`);
     if (selectedJob) {
       const res = await api<{ job: Job }>("GET", `/api/jobs/${selectedJob.id}`);
@@ -245,7 +249,7 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
 
   // ── Invoice from job ──
 
-  const createInvoiceFromJob = useCallback(async (jobId: number) => {
+  const createInvoiceFromJob = useCallback(async (jobId: string) => {
     await api("POST", `/api/jobs/${jobId}/invoice`);
     await fetchInvoices(invoicesPag, invoicesStatusFilter);
     await fetchStats();
@@ -262,7 +266,7 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
     await Promise.all([fetchStats(), fetchLookups()]);
   }, [customersPag, customersSearch, fetchCustomers, fetchStats, fetchLookups]);
 
-  const updateCustomer = useCallback(async (id: number, data: Partial<Customer>) => {
+  const updateCustomer = useCallback(async (id: string, data: Partial<Customer>) => {
     await api("PUT", `/api/customers/${id}`, data);
     await fetchCustomers(customersPag, customersSearch);
     await fetchLookups();
@@ -273,7 +277,7 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
     }
   }, [customersPag, customersSearch, selectedCustomer, fetchCustomers, fetchLookups]);
 
-  const deleteCustomer = useCallback(async (id: number) => {
+  const deleteCustomer = useCallback(async (id: string) => {
     await api("DELETE", `/api/customers/${id}`);
     if (selectedCustomer && selectedCustomer.id === id) {
       setSelectedCustomer(null);
@@ -284,7 +288,7 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
     await Promise.all([fetchStats(), fetchLookups()]);
   }, [customersPag, customersSearch, selectedCustomer, navigate, fetchCustomers, fetchStats, fetchLookups]);
 
-  const selectCustomer = useCallback(async (id: number | null) => {
+  const selectCustomer = useCallback(async (id: string | null) => {
     if (id === null) { setSelectedCustomer(null); setSelectedCustomerJobs([]); return; }
     const res = await api<{ customer: Customer; jobs: Job[] }>("GET", `/api/customers/${id}`);
     setSelectedCustomer(res.customer);
@@ -299,13 +303,13 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
     await Promise.all([fetchStats(), fetchLookups()]);
   }, [fetchTechnicians, fetchStats, fetchLookups]);
 
-  const updateTechnician = useCallback(async (id: number, data: Partial<Technician>) => {
+  const updateTechnician = useCallback(async (id: string, data: Partial<Technician>) => {
     await api("PUT", `/api/technicians/${id}`, data);
     await fetchTechnicians();
     await fetchLookups();
   }, [fetchTechnicians, fetchLookups]);
 
-  const deleteTechnician = useCallback(async (id: number) => {
+  const deleteTechnician = useCallback(async (id: string) => {
     await api("DELETE", `/api/technicians/${id}`);
     await fetchTechnicians();
     await Promise.all([fetchStats(), fetchLookups()]);
@@ -319,12 +323,12 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
     await fetchStats();
   }, [fetchServiceTypes, fetchStats]);
 
-  const updateServiceType = useCallback(async (id: number, data: Partial<ServiceType>) => {
+  const updateServiceType = useCallback(async (id: string, data: Partial<ServiceType>) => {
     await api("PUT", `/api/service-types/${id}`, data);
     await fetchServiceTypes();
   }, [fetchServiceTypes]);
 
-  const deleteServiceType = useCallback(async (id: number) => {
+  const deleteServiceType = useCallback(async (id: string) => {
     await api("DELETE", `/api/service-types/${id}`);
     await fetchServiceTypes();
     await fetchStats();
@@ -337,12 +341,12 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
     await fetchMaterials();
   }, [fetchMaterials]);
 
-  const updateMaterial = useCallback(async (id: number, data: Partial<Material>) => {
+  const updateMaterial = useCallback(async (id: string, data: Partial<Material>) => {
     await api("PUT", `/api/materials/${id}`, data);
     await fetchMaterials();
   }, [fetchMaterials]);
 
-  const deleteMaterial = useCallback(async (id: number) => {
+  const deleteMaterial = useCallback(async (id: string) => {
     await api("DELETE", `/api/materials/${id}`);
     await fetchMaterials();
   }, [fetchMaterials]);
@@ -351,13 +355,13 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
 
   const setInvoicesPage = useCallback((page: number) => setInvoicesPag((p) => ({ ...p, page })), []);
 
-  const addInvoice = useCallback(async (data: { customer_id: number; job_id?: number | null; tax_rate?: number; notes?: string; due_date?: string; lines: { description: string; quantity: number; unit_price: number }[] }) => {
+  const addInvoice = useCallback(async (data: { customer_id: string; job_id?: string | null; tax_rate?: number; notes?: string; due_date?: string; lines: { description: string; quantity: number; unit_price: number }[] }) => {
     await api("POST", "/api/invoices", data);
     await fetchInvoices(invoicesPag, invoicesStatusFilter);
     await fetchStats();
   }, [invoicesPag, invoicesStatusFilter, fetchInvoices, fetchStats]);
 
-  const updateInvoice = useCallback(async (id: number, data: Partial<Invoice>) => {
+  const updateInvoice = useCallback(async (id: string, data: Partial<Invoice>) => {
     await api("PUT", `/api/invoices/${id}`, data);
     await fetchInvoices(invoicesPag, invoicesStatusFilter);
     if (selectedInvoice && selectedInvoice.id === id) {
@@ -367,14 +371,14 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
     await fetchStats();
   }, [invoicesPag, invoicesStatusFilter, selectedInvoice, fetchInvoices, fetchStats]);
 
-  const deleteInvoice = useCallback(async (id: number) => {
+  const deleteInvoice = useCallback(async (id: string) => {
     await api("DELETE", `/api/invoices/${id}`);
     if (selectedInvoice && selectedInvoice.id === id) { setSelectedInvoice(null); navigate("/invoices"); }
     await fetchInvoices(invoicesPag, invoicesStatusFilter);
     await fetchStats();
   }, [invoicesPag, invoicesStatusFilter, selectedInvoice, navigate, fetchInvoices, fetchStats]);
 
-  const selectInvoice = useCallback(async (id: number | null) => {
+  const selectInvoice = useCallback(async (id: string | null) => {
     if (id === null) { setSelectedInvoice(null); return; }
     const res = await api<{ invoice: Invoice }>("GET", `/api/invoices/${id}`);
     setSelectedInvoice(res.invoice);

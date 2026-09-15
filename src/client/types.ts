@@ -5,12 +5,12 @@ export type Priority = "low" | "normal" | "high" | "urgent";
 export type InvoiceStatus = "draft" | "sent" | "paid" | "overdue" | "cancelled";
 
 export interface Job {
-  id: number;
+  id: string;
   identifier: string;
-  customer_id: number;
-  asset_id: number | null;
-  technician_id: number | null;
-  service_type_id: number | null;
+  customer_id: string;
+  asset_id: string | null;
+  technician_id: string | null;
+  service_type_id: string | null;
   status: JobStatus;
   priority: Priority;
   scheduled_date: string;
@@ -37,7 +37,7 @@ export interface Job {
 }
 
 export interface Customer {
-  id: number;
+  id: string;
   name: string;
   email: string;
   phone: string;
@@ -52,7 +52,7 @@ export interface Customer {
 }
 
 export interface Technician {
-  id: number;
+  id: string;
   name: string;
   email: string;
   phone: string;
@@ -63,7 +63,7 @@ export interface Technician {
 }
 
 export interface ServiceType {
-  id: number;
+  id: string;
   name: string;
   description: string;
   default_duration: number;
@@ -73,22 +73,22 @@ export interface ServiceType {
 }
 
 export interface JobNote {
-  id: number;
-  job_id: number;
+  id: string;
+  job_id: string;
   content: string;
   created_at: string;
 }
 
 export interface ChecklistItem {
-  id: number;
-  job_id: number;
+  id: string;
+  job_id: string;
   label: string;
   checked: number;
   sort_order: number;
 }
 
 export interface Material {
-  id: number;
+  id: string;
   name: string;
   unit: string;
   unit_cost: number;
@@ -97,9 +97,9 @@ export interface Material {
 }
 
 export interface JobMaterial {
-  id: number;
-  job_id: number;
-  material_id: number;
+  id: string;
+  job_id: string;
+  material_id: string;
   material_name?: string;
   material_unit?: string;
   quantity: number;
@@ -107,10 +107,10 @@ export interface JobMaterial {
 }
 
 export interface Invoice {
-  id: number;
+  id: string;
   identifier: string;
-  customer_id: number;
-  job_id: number | null;
+  customer_id: string;
+  job_id: string | null;
   status: InvoiceStatus;
   subtotal: number;
   tax_rate: number;
@@ -127,8 +127,8 @@ export interface Invoice {
 }
 
 export interface InvoiceLine {
-  id: number;
-  invoice_id: number;
+  id: string;
+  invoice_id: string;
   description: string;
   quantity: number;
   unit_price: number;
@@ -155,20 +155,20 @@ export interface PaginatedState {
 }
 
 export interface CustomerLookup {
-  id: number;
+  id: string;
   name: string;
   address: string;
 }
 
 export interface TechnicianLookup {
-  id: number;
+  id: string;
   name: string;
   color: string;
 }
 
 export interface Site {
-  id: number;
-  customer_id: number;
+  id: string;
+  customer_id: string;
   name: string;
   address: string;
   contact_name: string;
@@ -182,9 +182,9 @@ export interface Site {
 }
 
 export interface Asset {
-  id: number;
-  customer_id: number;
-  site_id: number;
+  id: string;
+  customer_id: string;
+  site_id: string;
   name: string;
   serial_number: string;
   manufacturer: string;
@@ -203,10 +203,10 @@ export interface Asset {
 }
 
 export interface AssetHistory {
-  id: number;
-  asset_id: number;
-  job_id: number | null;
-  available_job_id: number | null;
+  id: string;
+  asset_id: string;
+  job_id: string | null;
+  available_job_id: string | null;
   summary: string;
   details: string;
   created_at: string;

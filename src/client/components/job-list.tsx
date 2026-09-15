@@ -54,12 +54,12 @@ export function JobList() {
         </div>
       </div>
 
-      <div class="card">
+      <div class="table-scroll">
         {jobs.length === 0 ? (
           <div class="empty-state">
-            <p>No jobs found</p>
-            <button class="btn btn-primary" onClick={() => setShowCreate(true)}>
-              Create your first job
+            <p>{jobsSearch || jobsStatusFilter ? "No jobs match these filters." : "Schedule your first service visit."}</p>
+            <button class="btn" onClick={() => { if (jobsSearch || jobsStatusFilter) { setJobsSearch(""); setJobsStatusFilter(""); } else setShowCreate(true); }}>
+              {jobsSearch || jobsStatusFilter ? "Clear filters" : "Create your first job"}
             </button>
           </div>
         ) : (
@@ -73,7 +73,7 @@ export function JobList() {
                 <th>Service</th>
                 <th>Technician</th>
                 <th>Status</th>
-                <th>Price</th>
+                <th class="text-right">Price</th>
                 {isAgent && <th>Actions</th>}
               </tr>
             </thead>
@@ -82,6 +82,7 @@ export function JobList() {
                 <JobRow key={job.id} job={job} />
               ))}
             </tbody>
+            <tfoot><tr><td colSpan={7}>This page · {jobs.length} jobs</td><td class="text-right">${jobs.reduce((total, job) => total + job.price, 0).toFixed(2)}</td>{isAgent && <td />}</tr></tfoot>
           </table>
         )}
       </div>

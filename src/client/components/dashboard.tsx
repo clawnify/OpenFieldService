@@ -1,3 +1,4 @@
+import { StatusBadge } from "./status-badge";
 import { useApp } from "../context";
 import { Briefcase, Users, CalendarCheck, DollarSign, Clock, CheckCircle, FileText, AlertCircle } from "lucide-preact";
 
@@ -15,7 +16,7 @@ export function Dashboard() {
 
       <div class="stats-grid">
         <button class="stat-card" onClick={() => navigate("/jobs")}>
-          <div class="stat-icon" style={{ background: "#3b82f614", color: "#3b82f6" }}>
+          <div class="stat-icon">
             <Briefcase size={20} />
           </div>
           <div class="stat-info">
@@ -24,7 +25,7 @@ export function Dashboard() {
           </div>
         </button>
         <button class="stat-card" onClick={() => navigate("/customers")}>
-          <div class="stat-icon" style={{ background: "#8b5cf614", color: "#8b5cf6" }}>
+          <div class="stat-icon">
             <Users size={20} />
           </div>
           <div class="stat-info">
@@ -33,7 +34,7 @@ export function Dashboard() {
           </div>
         </button>
         <button class="stat-card" onClick={() => navigate("/schedule")}>
-          <div class="stat-icon" style={{ background: "#f59e0b14", color: "#f59e0b" }}>
+          <div class="stat-icon">
             <Clock size={20} />
           </div>
           <div class="stat-info">
@@ -42,7 +43,7 @@ export function Dashboard() {
           </div>
         </button>
         <div class="stat-card">
-          <div class="stat-icon" style={{ background: "#16a34a14", color: "#16a34a" }}>
+          <div class="stat-icon">
             <CalendarCheck size={20} />
           </div>
           <div class="stat-info">
@@ -51,7 +52,7 @@ export function Dashboard() {
           </div>
         </div>
         <div class="stat-card">
-          <div class="stat-icon" style={{ background: "#0891b214", color: "#0891b2" }}>
+          <div class="stat-icon">
             <CheckCircle size={20} />
           </div>
           <div class="stat-info">
@@ -60,7 +61,7 @@ export function Dashboard() {
           </div>
         </div>
         <div class="stat-card">
-          <div class="stat-icon" style={{ background: "#16a34a14", color: "#16a34a" }}>
+          <div class="stat-icon">
             <DollarSign size={20} />
           </div>
           <div class="stat-info">
@@ -69,7 +70,7 @@ export function Dashboard() {
           </div>
         </div>
         <button class="stat-card" onClick={() => navigate("/invoices")}>
-          <div class="stat-icon" style={{ background: "#f59e0b14", color: "#f59e0b" }}>
+          <div class="stat-icon">
             <FileText size={20} />
           </div>
           <div class="stat-info">
@@ -79,7 +80,7 @@ export function Dashboard() {
         </button>
         {stats.invoices_overdue > 0 && (
           <button class="stat-card" onClick={() => navigate("/invoices")}>
-            <div class="stat-icon" style={{ background: "#dc262614", color: "#dc2626" }}>
+            <div class="stat-icon">
               <AlertCircle size={20} />
             </div>
             <div class="stat-info">
@@ -93,7 +94,7 @@ export function Dashboard() {
       {todayJobs.length > 0 && (
         <div class="section">
           <h2 class="section-title">Today's Schedule</h2>
-          <div class="card">
+          <div class="table-scroll">
             <table class="table">
               <thead>
                 <tr>
@@ -112,8 +113,8 @@ export function Dashboard() {
                     <td>{job.customer_name}</td>
                     <td>
                       {job.technician_name ? (
-                        <span class="tech-pill" style={{ borderColor: job.technician_color || "#ccc" }}>
-                          <span class="tech-dot" style={{ background: job.technician_color || "#ccc" }} />
+                        <span class="tech-pill" style={{ borderColor: job.technician_color || "var(--text-muted)" }}>
+                          <span class="tech-dot" style={{ background: job.technician_color || "var(--text-muted)" }} />
                           {job.technician_name}
                         </span>
                       ) : (
@@ -121,9 +122,7 @@ export function Dashboard() {
                       )}
                     </td>
                     <td>
-                      <span class="status-badge-sm" style={{ color: job.status === "completed" ? "#16a34a" : "#3b82f6" }}>
-                        {job.status}
-                      </span>
+                      <StatusBadge status={job.status} />
                     </td>
                   </tr>
                 ))}

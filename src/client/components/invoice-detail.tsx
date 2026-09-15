@@ -1,23 +1,14 @@
+import { StatusBadge } from "./status-badge";
 import { useApp } from "../context";
 import { ArrowLeft, Trash2 } from "lucide-preact";
 import type { InvoiceStatus } from "../types";
 
 const ALL_STATUSES: InvoiceStatus[] = ["draft", "sent", "paid", "overdue", "cancelled"];
 
-const STATUS_COLORS: Record<InvoiceStatus, string> = {
-  draft: "#6b7280",
-  sent: "#3b82f6",
-  paid: "#16a34a",
-  overdue: "#dc2626",
-  cancelled: "#9ca3af",
-};
-
 export function InvoiceDetail() {
   const { selectedInvoice: invoice, navigate, updateInvoice, deleteInvoice } = useApp();
 
   if (!invoice) return null;
-
-  const color = STATUS_COLORS[(invoice.status as InvoiceStatus)] || "#6b7280";
 
   return (
     <div class="page">
@@ -36,10 +27,7 @@ export function InvoiceDetail() {
         <div class="detail-main">
           <div class="detail-title-row">
             <span class="identifier-lg">{invoice.identifier}</span>
-            <span class="status-badge" style={{ background: `${color}14`, color, borderColor: `${color}30` }}>
-              <span class="status-dot" style={{ background: color }} />
-              {invoice.status}
-            </span>
+            <StatusBadge status={invoice.status} />
           </div>
 
           <div class="detail-meta-grid">
@@ -68,7 +56,7 @@ export function InvoiceDetail() {
           {/* Line items */}
           <div class="detail-section">
             <h3>Line Items</h3>
-            <div class="card">
+            <div class="table-scroll">
               <table class="table">
                 <thead>
                   <tr><th>Description</th><th>Qty</th><th>Unit Price</th><th class="text-right">Total</th></tr>

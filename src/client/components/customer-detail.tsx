@@ -35,7 +35,7 @@ export function CustomerDetail() {
           {editing ? (
             <>
               <button class="btn" onClick={() => setEditing(false)}><X size={14} /> Cancel</button>
-              <button class="btn btn-primary" onClick={saveEdit}><Save size={14} /> Save</button>
+              <button class="btn" onClick={saveEdit}><Save size={14} /> Save</button>
             </>
           ) : (
             <>
@@ -116,7 +116,7 @@ export function CustomerDetail() {
             {jobs.length === 0 ? (
               <p class="text-muted">No jobs yet</p>
             ) : (
-              <div class="card">
+              <div class="table-scroll">
                 <table class="table">
                   <thead>
                     <tr><th>ID</th><th>Date</th><th>Service</th><th>Technician</th><th>Status</th><th>Price</th></tr>

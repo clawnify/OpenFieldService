@@ -4,8 +4,9 @@ import { useApp } from "../context";
 import type { Asset, AssetHistory, Site } from "../types";
 import { AssetForm } from "./equipment-forms";
 import { Pagination } from "./pagination";
+import { CreateJob } from "./create-job";
 
-export function AssetDetail({ id }: { id: number }) {
+export function AssetDetail({ id }: { id: string }) {
   const { navigate } = useApp();
   const [detail, setDetail] = useState<{ asset: Asset; site: Site } | null>(null);
   const [history, setHistory] = useState<AssetHistory[]>([]);
@@ -15,6 +16,7 @@ export function AssetDetail({ id }: { id: number }) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [editSites, setEditSites] = useState<Site[] | null>(null);
+  const [scheduling, setScheduling] = useState(false);
   useEffect(() => {
     let current = true;
     setError(""); setLoading(true);
@@ -31,10 +33,14 @@ export function AssetDetail({ id }: { id: number }) {
   };
   return <div class="page equipment-page">
     <div class="page-header"><button class="btn" onClick={() => navigate(detail ? `/customers/${detail.asset.customer_id}` : "/customers")}>Back to customer</button>
-      <button class="btn btn-primary" disabled={!detail || loading} onClick={edit}>Edit equipment</button></div>
+      <div class="equipment-actions">
+        <button class="btn" disabled={!detail || loading} onClick={edit}>Edit equipment</button>
+        <button class="btn btn-primary" disabled={!detail || loading || !!error} onClick={() => setScheduling(true)}>Schedule job</button>
+      </div></div>
     {error && <p class="equipment-error" role="alert">{error} <button class="btn" onClick={() => setRevision((n) => n + 1)}>Retry</button></p>}
     {loading ? <p role="status">Loading equipment…</p> : detail && <>
-      <h2>{detail.asset.name}</h2><p class="text-muted">{detail.asset.customer_name} · {detail.asset.site_name}</p>
+      <div class="equipment-record"><aside class="equipment-rail">
+      <h1>{detail.asset.name}</h1><p class="text-muted">{detail.asset.customer_name} · {detail.asset.site_name}</p>
       <dl class="equipment-facts">{[
         ["Serial number", detail.asset.serial_number], ["Manufacturer", detail.asset.manufacturer], ["Model", detail.asset.model],
         ["Lifecycle status", detail.asset.status.replaceAll("_", " ")], ["Installed", detail.asset.installation_date], ["Commissioned", detail.asset.commissioning_date],
@@ -47,15 +53,16 @@ export function AssetDetail({ id }: { id: number }) {
         {detail.site.access_instructions && <p class="detail-notes"><strong>Access: </strong>{detail.site.access_instructions}</p>}
         {detail.site.safety_notes && <p class="detail-notes"><strong>Safety: </strong>{detail.site.safety_notes}</p>}
       </section>
-      <section class="detail-section"><h3>Equipment history ({total})</h3>
+      </aside><section class="detail-section equipment-timeline"><h3>Equipment history ({total})</h3>
         <ol class="equipment-history">{history.map((event) => <li key={event.id} class="card equipment-card">
           <div class="equipment-heading"><strong>{event.summary}</strong><time dateTime={event.created_at.replace(" ", "T") + "Z"}>{new Date(event.created_at.replace(" ", "T") + "Z").toLocaleString()}</time></div>
           {event.details && <p class="detail-notes">{event.details}</p>}
           {event.available_job_id && <button class="btn btn-sm" onClick={() => navigate(`/jobs/${event.available_job_id}`)}>View job, checklist & materials</button>}
         </li>)}</ol>
         <Pagination pag={{ page, total, limit: 50 }} setPage={setPage} />
-      </section>
+      </section></div>
     </>}
     {editSites && detail && <AssetForm customerId={detail.asset.customer_id} asset={detail.asset} sites={editSites} onClose={() => setEditSites(null)} onSaved={() => { setEditSites(null); setPage(1); setRevision((n) => n + 1); }} />}
+    {scheduling && detail && <CreateJob initialAsset={detail.asset} onClose={() => setScheduling(false)} onCreated={(job) => navigate(`/jobs/${job.id}`)} />}
   </div>;
 }

@@ -6,8 +6,8 @@ export const equipmentApp = new OpenAPIHono({
     if (!result.success) return c.json({ error: result.error.issues.map((issue) => issue.message).join("; ") }, 400);
   },
 });
-const id = z.number().int().positive();
-const params = z.object({ id: z.coerce.number().int().positive() });
+const id = z.string().uuid();
+const params = z.object({ id });
 const text = z.string().trim().max(500);
 const date = z.union([z.literal(""), z.string().date()]);
 const error = z.object({ error: z.string() });
@@ -49,7 +49,7 @@ const historySchema = z.object({
 });
 const pagination = z.object({ page: z.coerce.number().int().positive().default(1), search: z.string().max(200).default("") });
 
-async function update(table: "sites" | "assets", resourceId: number, data: Record<string, unknown>) {
+async function update(table: "sites" | "assets", resourceId: string, data: Record<string, unknown>) {
   const fields = Object.keys(data);
   if (!fields.length) return;
   await run(`UPDATE ${table} SET ${fields.map((key) => `${key} = ?`).join(", ")}, updated_at = datetime('now') WHERE id = ?`, [...Object.values(data), resourceId]);
@@ -81,8 +81,8 @@ equipmentApp.openapi(createRoute({
   const { id } = c.req.valid("param");
   if (!await get("SELECT id FROM customers WHERE id = ?", [id])) return c.json({ error: "Customer not found" }, 404);
   const data = c.req.valid("json");
-  const result = await run(`INSERT INTO sites (customer_id, ${Object.keys(data).join(", ")}) VALUES (?, ${Object.keys(data).map(() => "?").join(", ")})`, [id, ...Object.values(data)]);
-  return c.json((await get<Site>("SELECT * FROM sites WHERE id = ?", [result.lastInsertRowid]))!, 201);
+  const site = await get<Site>(`INSERT INTO sites (customer_id, ${Object.keys(data).join(", ")}) VALUES (?, ${Object.keys(data).map(() => "?").join(", ")}) RETURNING *`, [id, ...Object.values(data)]);
+  return c.json(site!, 201);
 });
 
 equipmentApp.openapi(createRoute({
@@ -119,8 +119,8 @@ equipmentApp.openapi(createRoute({
   const message = invalidDates(data);
   if (message) return c.json({ error: message }, 400);
   try {
-    const result = await run(`INSERT INTO assets (customer_id, ${Object.keys(data).join(", ")}) VALUES (?, ${Object.keys(data).map(() => "?").join(", ")})`, [id, ...Object.values(data)]);
-    return c.json((await get<Asset>(assetSelect + " WHERE a.id = ?", [result.lastInsertRowid]))!, 201);
+    const asset = await get<Asset>(`INSERT INTO assets (customer_id, ${Object.keys(data).join(", ")}) VALUES (?, ${Object.keys(data).map(() => "?").join(", ")}) RETURNING *`, [id, ...Object.values(data)]);
+    return c.json((await get<Asset>(assetSelect + " WHERE a.id = ?", [asset!.id]))!, 201);
   } catch (err) {
     if (duplicateSerial(err)) return c.json({ error: "This customer already has equipment with that serial number" }, 409);
     throw err;
@@ -167,6 +167,6 @@ equipmentApp.openapi(createRoute({
   const total = await get<{ n: number }>("SELECT COUNT(*) AS n FROM asset_history WHERE asset_id = ?", [id]);
   const history = await query<z.infer<typeof historySchema>>(`SELECT h.*, j.id AS available_job_id FROM asset_history h
     LEFT JOIN jobs j ON j.id = h.job_id AND j.customer_id = (SELECT customer_id FROM assets WHERE id = h.asset_id)
-    WHERE h.asset_id = ? ORDER BY h.id DESC LIMIT 50 OFFSET ?`, [id, (page - 1) * 50]);
+    WHERE h.asset_id = ? ORDER BY h.created_at DESC, h.rowid DESC LIMIT 50 OFFSET ?`, [id, (page - 1) * 50]);
   return c.json({ history, total: total!.n }, 200);
 });

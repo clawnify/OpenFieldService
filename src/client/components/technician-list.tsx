@@ -6,7 +6,7 @@ import { Plus, Trash2, Edit3 } from "lucide-preact";
 export function TechnicianList() {
   const { technicians, updateTechnician, deleteTechnician, isAgent } = useApp();
   const [showCreate, setShowCreate] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({ name: "", email: "", phone: "", color: "" });
 
   const startEdit = (t: typeof technicians[0]) => {
@@ -14,7 +14,7 @@ export function TechnicianList() {
     setEditingId(t.id);
   };
 
-  const saveEdit = async (id: number) => {
+  const saveEdit = async (id: string) => {
     await updateTechnician(id, editForm);
     setEditingId(null);
   };
@@ -28,11 +28,11 @@ export function TechnicianList() {
         </button>
       </div>
 
-      <div class="card">
+      <div class="table-scroll">
         {technicians.length === 0 ? (
           <div class="empty-state">
             <p>No technicians yet</p>
-            <button class="btn btn-primary" onClick={() => setShowCreate(true)}>
+            <button class="btn" onClick={() => setShowCreate(true)}>
               Add your first technician
             </button>
           </div>
@@ -68,7 +68,7 @@ export function TechnicianList() {
                       </td>
                       <td>
                         <div class="action-btns">
-                          <button class="btn btn-sm btn-primary" onClick={() => saveEdit(t.id)}>Save</button>
+                          <button class="btn btn-sm" onClick={() => saveEdit(t.id)}>Save</button>
                           <button class="btn btn-sm" onClick={() => setEditingId(null)}>Cancel</button>
                         </div>
                       </td>

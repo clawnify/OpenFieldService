@@ -14,8 +14,8 @@ export function JobRow({ job }: { job: Job }) {
       <td>{job.customer_name || "—"}</td>
       <td>
         {job.service_type_name ? (
-          <span class="service-pill" style={{ borderColor: job.service_type_color || "#ccc" }}>
-            <span class="service-dot" style={{ background: job.service_type_color || "#ccc" }} />
+          <span class="service-pill" style={{ borderColor: job.service_type_color || "var(--text-muted)" }}>
+            <span class="service-dot" style={{ background: job.service_type_color || "var(--text-muted)" }} />
             {job.service_type_name}
           </span>
         ) : (
@@ -24,8 +24,8 @@ export function JobRow({ job }: { job: Job }) {
       </td>
       <td>
         {job.technician_name ? (
-          <span class="tech-pill" style={{ borderColor: job.technician_color || "#ccc" }}>
-            <span class="tech-dot" style={{ background: job.technician_color || "#ccc" }} />
+          <span class="tech-pill" style={{ borderColor: job.technician_color || "var(--text-muted)" }}>
+            <span class="tech-dot" style={{ background: job.technician_color || "var(--text-muted)" }} />
             {job.technician_name}
           </span>
         ) : (

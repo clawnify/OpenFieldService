@@ -1,8 +1,7 @@
-import { useState } from "preact/hooks";
+import { StatusBadge } from "./status-badge";
 import { useApp } from "../context";
 import { Pagination } from "./pagination";
-import { Search, Trash2 } from "lucide-preact";
-import type { InvoiceStatus } from "../types";
+import { Trash2 } from "lucide-preact";
 
 const STATUSES: { value: string; label: string }[] = [
   { value: "", label: "All" },
@@ -12,14 +11,6 @@ const STATUSES: { value: string; label: string }[] = [
   { value: "overdue", label: "Overdue" },
   { value: "cancelled", label: "Cancelled" },
 ];
-
-const STATUS_COLORS: Record<InvoiceStatus, string> = {
-  draft: "#6b7280",
-  sent: "#3b82f6",
-  paid: "#16a34a",
-  overdue: "#dc2626",
-  cancelled: "#9ca3af",
-};
 
 export function InvoiceList() {
   const {
@@ -47,7 +38,7 @@ export function InvoiceList() {
         </div>
       </div>
 
-      <div class="card">
+      <div class="table-scroll">
         {invoices.length === 0 ? (
           <div class="empty-state">
             <p>No invoices yet</p>
@@ -62,26 +53,22 @@ export function InvoiceList() {
                 <th>Job</th>
                 <th>Status</th>
                 <th>Due Date</th>
-                <th>Total</th>
+                <th class="text-right">Total</th>
                 {isAgent && <th>Actions</th>}
               </tr>
             </thead>
             <tbody>
               {invoices.map((inv) => {
-                const color = STATUS_COLORS[(inv.status as InvoiceStatus)] || "#6b7280";
                 return (
                   <tr key={inv.id} class="table-row clickable" onClick={() => navigate(`/invoices/${inv.id}`)}>
                     <td><span class="identifier">{inv.identifier}</span></td>
                     <td>{inv.customer_name || "—"}</td>
                     <td class="text-muted">{inv.job_identifier || "—"}</td>
                     <td>
-                      <span class="status-badge" style={{ background: `${color}14`, color, borderColor: `${color}30` }}>
-                        <span class="status-dot" style={{ background: color }} />
-                        {inv.status}
-                      </span>
+                      <StatusBadge status={inv.status} />
                     </td>
                     <td class="text-muted">{inv.due_date || "—"}</td>
-                    <td class="text-bold">${inv.total.toFixed(2)}</td>
+                    <td class="text-bold text-right">${inv.total.toFixed(2)}</td>
                     {isAgent && (
                       <td>
                         <button class="btn-icon danger" onClick={(e) => { e.stopPropagation(); deleteInvoice(inv.id); }}>
@@ -93,6 +80,7 @@ export function InvoiceList() {
                 );
               })}
             </tbody>
+            <tfoot><tr><td colSpan={5}>This page · {invoices.length} invoices</td><td class="text-right">${invoices.reduce((total, invoice) => total + invoice.total, 0).toFixed(2)}</td>{isAgent && <td />}</tr></tfoot>
           </table>
         )}
       </div>

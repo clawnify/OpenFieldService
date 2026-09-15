@@ -3,16 +3,16 @@ import type { ComponentChildren } from "preact";
 import { api } from "../api";
 import type { Asset, Site } from "../types";
 
-export function EquipmentDialog({ title, onClose, children }: { title: string; onClose: () => void; children: ComponentChildren }) {
+export function EquipmentDialog({ title, onClose, children, busy = false }: { title: string; onClose: () => void; children: ComponentChildren; busy?: boolean }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => { ref.current?.showModal(); }, []);
-  return <dialog ref={ref} class="modal equipment-dialog" aria-label={title} onClose={onClose}>
-    <div class="modal-header"><h2>{title}</h2><button type="button" class="btn-icon" aria-label="Close" onClick={onClose}>×</button></div>
+  return <dialog ref={ref} class="modal equipment-dialog" aria-label={title} onClose={onClose} onCancel={(event) => { if (busy) event.preventDefault(); }}>
+    <div class="modal-header"><h2>{title}</h2><button type="button" class="btn-icon" aria-label="Close" disabled={busy} onClick={onClose}>×</button></div>
     {children}
   </dialog>;
 }
 
-export function SiteForm({ customerId, site, onSaved, onClose }: { customerId: number; site?: Site; onSaved: () => void; onClose: () => void }) {
+export function SiteForm({ customerId, site, onSaved, onClose }: { customerId: string; site?: Site; onSaved: () => void; onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const submit = async (event: Event) => {
@@ -42,7 +42,7 @@ export function SiteForm({ customerId, site, onSaved, onClose }: { customerId: n
   </EquipmentDialog>;
 }
 
-export function AssetForm({ customerId, sites, asset, onSaved, onClose }: { customerId: number; sites: Site[]; asset?: Asset; onSaved: () => void; onClose: () => void }) {
+export function AssetForm({ customerId, sites, asset, onSaved, onClose }: { customerId: string; sites: Site[]; asset?: Asset; onSaved: () => void; onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const submit = async (event: Event) => {
@@ -50,7 +50,7 @@ export function AssetForm({ customerId, sites, asset, onSaved, onClose }: { cust
     const data = Object.fromEntries(new FormData(event.currentTarget as HTMLFormElement));
     setBusy(true); setError("");
     try {
-      await api(asset ? "PUT" : "POST", asset ? `/api/assets/${asset.id}` : `/api/customers/${customerId}/assets`, { ...data, site_id: Number(data.site_id) });
+      await api(asset ? "PUT" : "POST", asset ? `/api/assets/${asset.id}` : `/api/customers/${customerId}/assets`, { ...data, site_id: data.site_id });
       onSaved();
     } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   };
