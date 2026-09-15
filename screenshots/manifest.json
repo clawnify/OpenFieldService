@@ -212,144 +212,59 @@
   "features": [
     {
       "id": "dispatch",
-      "title": "The whole week, at a glance.",
-      "subtitle": "See who’s going where, with every visit on one schedule.",
+      "title": "The right person.\nThe right place.",
+      "subtitle": "Assign a technician. See the day’s visits together.",
       "eyebrow": "01 / DISPATCH",
       "background": "#eef2ed",
-      "alt": "Weekly dispatch preview showing seven days of technician-assigned service visits.",
-      "panels": [
-        {
-          "source": "schedule",
-          "crop": [
-            299,
-            93,
-            1116,
-            463
-          ],
-          "left": 88,
-          "top": 325,
-          "width": 1424
-        }
-      ]
+      "alt": "Conceptual floating daily schedule with a slightly overlapping technician assignment panel.",
+      "sources": [
+        "schedule",
+        "technicians"
+      ],
+      "kind": "conceptual-ui"
     },
     {
       "id": "job-work",
-      "title": "Check the work. Log the parts.",
-      "subtitle": "The visit checklist and materials used stay with the job.",
+      "title": "Every step.\nEvery part.",
+      "subtitle": "Work through the checklist. Keep track of the materials used.",
       "eyebrow": "02 / SERVICE VISITS",
       "background": "#f3efe9",
-      "alt": "Two actual job UI crops showing completed and remaining checklist tasks and the materials used.",
-      "panels": [
-        {
-          "source": "job",
-          "crop": [
-            299,
-            699,
-            833,
-            268
-          ],
-          "left": 80,
-          "top": 325,
-          "width": 1040
-        },
-        {
-          "source": "job",
-          "crop": [
-            299,
-            1050,
-            833,
-            179
-          ],
-          "left": 450,
-          "top": 705,
-          "width": 1040
-        }
-      ]
+      "alt": "Conceptual floating job checklist with a slightly overlapping materials panel.",
+      "sources": [
+        "job"
+      ],
+      "kind": "conceptual-ui"
     },
     {
       "id": "equipment-history",
-      "title": "Know the machine’s history.",
-      "subtitle": "Serial numbers, site details and past service visits, together.",
+      "title": "Every visit\nleaves a record.",
+      "subtitle": "See what happened last time. Schedule the next visit from the equipment record.",
       "eyebrow": "03 / EQUIPMENT",
       "background": "#eef0f6",
-      "alt": "Actual equipment record with serial and warranty dates beside its service history.",
-      "panels": [
-        {
-          "source": "equipment",
-          "crop": [
-            299,
-            93,
-            250,
-            462
-          ],
-          "left": 108,
-          "top": 325,
-          "width": 300
-        },
-        {
-          "source": "equipment",
-          "crop": [
-            598,
-            93,
-            817,
-            464
-          ],
-          "left": 456,
-          "top": 325,
-          "width": 1036
-        }
-      ]
+      "alt": "Conceptual floating equipment service history with an overlapping schedule-job panel.",
+      "sources": [
+        "equipment"
+      ],
+      "kind": "conceptual-ui"
     },
     {
       "id": "invoicing",
-      "title": "From service visit to invoice.",
-      "subtitle": "Keep line items, tax and payment status connected to the work.",
+      "title": "From service\nto invoice.",
+      "subtitle": "Bring the work, the parts and the total together.",
       "eyebrow": "04 / INVOICING",
       "background": "#f5eeed",
-      "alt": "Actual invoice detail with itemized maintenance, filter replacements, tax, total and payment status.",
-      "panels": [
-        {
-          "source": "invoice",
-          "crop": [
-            299,
-            93,
-            833,
-            439
-          ],
-          "left": 110,
-          "top": 325,
-          "width": 1040
-        },
-        {
-          "source": "invoice",
-          "crop": [
-            1156,
-            93,
-            260,
-            402
-          ],
-          "left": 1190,
-          "top": 345,
-          "width": 300
-        }
-      ]
+      "alt": "Conceptual floating itemized invoice with an overlapping manual invoice-status panel.",
+      "sources": [
+        "invoice",
+        "job"
+      ],
+      "kind": "conceptual-ui"
     }
   ],
   "carousel": [
     "dispatch",
     "job-work",
     "equipment-history",
-    "invoicing",
-    "dashboard",
-    "schedule",
-    "customers",
-    "customer",
-    "technicians",
-    "services",
-    "materials",
-    "invoices",
-    "job",
-    "invoice",
-    "equipment"
+    "invoicing"
   ]
 }

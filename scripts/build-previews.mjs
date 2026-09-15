@@ -1,9 +1,10 @@
-// Compose from saved screenshots. Chrome capture is deliberately handled by
+// Build screenshot-based covers and recreated conceptual feature illustrations. Chrome capture is deliberately handled by
 // TaskWindow; this script never attaches a second debugger or launches Chrome.
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { conceptStyles, renderConcept } from './feature-concepts.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const manifest = JSON.parse(readFileSync(resolve(root, 'screenshots/manifest.json'), 'utf8'));
@@ -35,8 +36,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#1
 .brand img{width:34px;height:34px;border-radius:9px}.eyebrow{position:absolute;left:80px;top:76px;font-size:16px;letter-spacing:2px;font-weight:600}
 h1{position:absolute;left:80px;top:142px;margin:0;font-size:66px;line-height:1.1;letter-spacing:-2.7px;font-weight:650}
 .subtitle{position:absolute;left:82px;top:229px;margin:0;font-size:25px;color:#646360;line-height:1.4}
-.panel{position:absolute;overflow:hidden;background:white;border-radius:14px;box-shadow:0 0 0 1px #1b1a1914,0 16px 45px -20px #1b1a1944}
-.panel img{position:absolute;max-width:none;display:block}.footer{position:absolute;bottom:30px;left:80px;font-size:14px;color:#646360}
+.footer{position:absolute;bottom:30px;left:80px;font-size:14px;color:#646360}
 .cover-brand{position:absolute;left:80px;top:57px;display:flex;align-items:center;gap:17px}.cover-brand img{width:62px;height:62px;border-radius:16px}
 .cover-brand h1{position:static;font-size:59px;letter-spacing:-2px}.cover .subtitle{top:145px;font-size:26px}
 .cover .frame{position:absolute;left:80px;top:230px;width:1440px;height:680px;border-radius:15px;overflow:hidden;border:1px solid #1b1a1920;box-shadow:0 24px 70px -32px #1b1a1960}
@@ -53,17 +53,12 @@ for (const theme of ['light', 'dark']) {
   });
 }
 for (const feature of manifest.features) {
-  const panels = feature.panels.map(panel => {
-    const shot = shots.get(panel.source);
-    if (!shot) throw new Error(`Unknown source: ${panel.source}`);
-    const [x, y, width, height] = panel.crop;
-    if (![x,y,width,height,panel.left,panel.top,panel.width].every(Number.isFinite) || x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > shot.width || y + height > shot.height) throw new Error(`Crop outside screenshot: ${feature.id}`);
-    const scale = panel.width / width;
-    if (panel.top + height * scale > 945 || panel.left + panel.width > 1540) throw new Error(`Panel outside safe area: ${feature.id}`);
-    return `<div class="panel" style="left:${panel.left}px;top:${panel.top}px;width:${panel.width}px;height:${height * scale}px"><img src="${shot.uri}" alt="${escape(shot.alt)}" style="width:${shot.width * scale}px;height:${shot.height * scale}px;left:${-x * scale}px;top:${-y * scale}px"></div>`;
-  }).join('');
+  for (const source of feature.sources) {
+    if (!shots.has(source)) throw new Error(`Unknown reference screenshot: ${source}`);
+  }
+  const panels = renderConcept(feature.id);
   outputs.push({ id: feature.id, src: `previews/${feature.id}.png`, width: 1600, height: 1000, title: feature.title, alt: feature.alt, theme: 'light',
-    html: html(feature.title, `<div class="brand"><img src="${icon}" alt="">OpenFieldService</div><div class="eyebrow">${escape(feature.eyebrow)}</div><h1>${escape(feature.title)}</h1><p class="subtitle">${escape(feature.subtitle)}</p>${panels}<div class="footer">Actual app UI · Example data</div>`, feature.background),
+    html: html(feature.title, `<style>${conceptStyles}</style><div class="brand"><img src="${icon}" alt="">OpenFieldService</div><div class="eyebrow">${escape(feature.eyebrow)}</div><div class="copy"><h1>${escape(feature.title)}</h1><p>${escape(feature.subtitle)}</p></div>${panels}<div class="footer">Illustrative UI · Example data</div>`, feature.background, `concept ${feature.id}`),
   });
 }
 const [command = 'build', id, source] = process.argv.slice(2);
@@ -96,7 +91,7 @@ if (command === 'build') {
   const images = manifest.carousel.map(id => {
     const entry = catalogue.get(id);
     if (!entry) throw new Error(`Unknown carousel image: ${id}`);
-    return { src: entry.src, alt: entry.alt, caption: `${entry.title} · Example data`, width: entry.width, height: entry.height };
+    return { src: entry.src, alt: entry.alt, caption: `${entry.title.replaceAll('\n', ' ')} · ${manifest.features.some(f => f.id === id) ? 'Illustrative UI' : 'Example data'}`, width: entry.width, height: entry.height };
   });
   if (command === 'export') {
     // Existing website AppImage[] contract. Prefix these repo-relative paths

@@ -13,7 +13,7 @@ Built with **Preact + Hono + SQLite**. Ships with a clean dashboard UI, weekly c
 
 ## See it in action
 
-Real app screens with fictional example data. Open an image to see the details.
+Conceptual UI illustrations of the app’s main capabilities, with fictional example data. Open an image to see the details.
 
 | Dispatch | Job checklists & materials |
 | --- | --- |

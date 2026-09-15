@@ -9,12 +9,16 @@ test('saved preview pipeline rejects stale compositions and invalid captures', (
   const directory = mkdtempSync(join(tmpdir(), 'ofs-preview-check-'));
   try {
     mkdirSync(join(directory, 'scripts'));
-    for (const path of ['scripts/build-previews.mjs', 'screenshots', 'previews', 'icon.svg', 'readme-banner.png', 'readme-banner-dark.png']) {
+    for (const path of ['scripts/build-previews.mjs', 'scripts/feature-concepts.mjs', 'screenshots', 'previews', 'icon.svg', 'readme-banner.png', 'readme-banner-dark.png']) {
       cpSync(new URL('../' + path, import.meta.url), join(directory, path), { recursive: true });
     }
     const run = (...args) => spawnSync(process.execPath, ['scripts/build-previews.mjs', ...args], { cwd: directory, encoding: 'utf8' });
     assert.equal(run('check').status, 0);
     assert.equal(run('build').status, 0);
+    const concept = readFileSync(join(directory, '.preview-build/dispatch.html'), 'utf8');
+    assert.ok(!concept.includes('data:image/png'), 'feature illustrations must not embed screenshots');
+    assert.match(concept, /Illustrative UI/);
+    assert.match(concept, /Conceptual technician assignment/);
     const cover = readFileSync(join(directory, 'readme-banner.png'));
     const wrongSize = run('import', 'cover-light', 'screenshots/dashboard-mobile.png');
     assert.notEqual(wrongSize.status, 0);
@@ -27,9 +31,9 @@ test('saved preview pipeline rejects stale compositions and invalid captures', (
     manifest.features[0].title = 'Changed headline';
     writeFileSync(manifestPath, JSON.stringify(manifest));
     assert.match(run('check').stderr, /Stale output: dispatch/);
-    manifest.features[0].panels[0].crop[0] = 9999;
+    manifest.features[0].sources[0] = 'missing-reference';
     writeFileSync(manifestPath, JSON.stringify(manifest));
-    assert.match(run('build').stderr, /Crop outside screenshot/);
+    assert.match(run('build').stderr, /Unknown reference screenshot/);
     writeFileSync(manifestPath, original);
 
     const gallery = join(directory, 'previews/website-gallery.json');

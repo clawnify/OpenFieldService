@@ -1,26 +1,26 @@
 {
   "dispatch": {
-    "composition": "3c75309a4a28ffb1808b6711dafa398258604cbebb002309251fc6bfddcc31f6",
-    "png": "e66898f7a1b5b0f9b473cb7ee1a417081b07ad5a9fed1a4a7ff3a0d1415474c0"
+    "composition": "2283e480a5486442e12e33ea527c295197282749cfb7db759d4236a90bcedab8",
+    "png": "38979798d1fad1dadb1409163547d39b7c7a5ec6199913329d5e031510cbdf20"
   },
   "job-work": {
-    "composition": "be427802d400c4570e3102367032316a9619b70039747ecb38556ba8ff86bbd4",
-    "png": "7ccfa1141828c6bbd62c11d43a872fc9a8f4dd6c72798d9761c4b30270dd6f9d"
+    "composition": "9712ddc909229fedc2372f68cacdd11754282794a6e80514d8c54942dbeca041",
+    "png": "ebccd07050327cd33095ab836fb3e2ac3b1e302de285f730c9a6f4fac76149dd"
   },
   "equipment-history": {
-    "composition": "56f1de32c46372b1ceeefc3dff3d6bd44918cd6afd075c2d88a200717a5983f5",
-    "png": "48eefe9ac4adc7b6ce2653904cdf582da705d5c9ea22a6b88dfb147e25028d3c"
+    "composition": "7381e5ba4fc46b5c185c8d548a751217b251688300492a39db01280749178e1c",
+    "png": "87025cb5400b6c4afc71817acd2ae070c3542edaec8fdc5c64da0b171ab37999"
   },
   "invoicing": {
-    "composition": "46fc9b6f1116a7ddf513a24761dc904c64ca391308ab56670e99e1733521030b",
-    "png": "88ee6c8145f2d8f507ef21e50c2ec1ec0c964f706119b4b6d67fcc3ab62ba8db"
+    "composition": "aba064925eae2514e6692fb6f855e5698a057f2c085253a769d6602eef07514d",
+    "png": "bbde392fb06e2e9680f63897becbae0ecad8c8edb19b1f37cea66c7046222ab6"
   },
   "cover-light": {
-    "composition": "c17612ca54acb4e11cf868fda9757c44f57fd088c3a42b736baaa988b819a240",
+    "composition": "21cbe30dc015007844424508701d8582563e7d7c61ecf5af1e468fe74599ad26",
     "png": "433ed599805750a7454d5b30941bd59280526c853e9b573ec6829af2b2d9204f"
   },
   "cover-dark": {
-    "composition": "0b245f02ce8110c447966cc1e1a66b76ce944cc83455dfdca2d0ea1affb39051",
+    "composition": "ed0b47c7848d7548e58237fcb99f968347f4528335a03c26242c30425443ffed",
     "png": "140fe763dfa6362936117ba3180cefa7379cdb3bc494417d1e663aa6098b53ec"
   }
 }

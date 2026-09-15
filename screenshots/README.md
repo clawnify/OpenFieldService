@@ -1,8 +1,9 @@
 # App screenshots and preview assets
 
 The source is the running app. Save screenshots here first; select one for the
-README cover and compose feature cards from its real UI. Website previews use
-these assets directly, without trying to recover a screenshot from a banner.
+README cover. Recreate conceptual feature illustrations in HTML/CSS/SVG, using
+the screenshots and app code as references. The website carousel uses the
+illustrations directly.
 
 Captured with TaskWindow on 15 September 2026 using a separate local database
 and fictional customers. Desktop: 1440×960; mobile: 390×844. Job and customer
@@ -25,16 +26,21 @@ details use full-page captures so content below the fold is preserved.
 ## What controls the output
 
 - [manifest.json](manifest.json): screenshot routes, dimensions, themes,
-  captions, cover selection, feature crop rectangles and carousel order.
-- [../previews/](../previews/): four 1600×1000 feature cards composed from saved
-  UI crops. Headlines are editorial; the pictured controls and data are real.
+  captions, cover selection, feature reference ids, illustration metadata and carousel order.
+- [../previews/](../previews/): four 1600×1000 conceptual feature illustrations. The UI is
+  recreated with enlarged labels, simplified content, softly lit backgrounds
+  and slightly overlapping floating panels. These are illustrative views of
+  existing capabilities, not literal application screens.
 - [../readme-banner.png](../readme-banner.png) and
   [dark variant](../readme-banner-dark.png): 1600×1000 covers, selected through
   `cover.light` and `cover.dark`. README uses a theme-aware `<picture>`.
 - [../previews/website-gallery.json](../previews/website-gallery.json): ordered
   image data with `src`, `alt`, `caption`, `width` and `height` for the website.
+- [../scripts/feature-concepts.mjs](../scripts/feature-concepts.mjs): reusable
+  HTML/CSS/SVG source for each conceptual UI composition. Feature PNGs contain
+  no embedded screenshots.
 - [../scripts/build-previews.mjs](../scripts/build-previews.mjs): validates PNG
-  sizes and crop bounds, builds HTML compositions, imports TaskWindow captures,
+  sizes and reference ids, builds HTML compositions, imports TaskWindow captures,
   and rejects stale outputs using hashes of the composition and saved PNG.
 
 ## Recapture safely
@@ -73,8 +79,12 @@ manifest describe the original capture; use the new routes when recapturing.
 4. Review every screenshot, including table edges and below-fold content.
    Update manifest dates, source revision, routes and actual PNG dimensions.
    Never replace customer data in the DOM to invent a feature.
-5. Update crop rectangles if the source layout changed. Keep full screenshots
-   intact. Crops must retain legible context and must not imply missing features.
+5. Keep raw screenshots intact. Update the feature illustrations in
+   `scripts/feature-concepts.mjs` as capabilities change. Focus each image on
+   one relatable task, with large readable labels and at most two related
+   floating panels. Overlap their edges slightly; leave key content visible.
+   Use layers, soft shadows and background colour to integrate the panels.
+   Keep the “Illustrative UI” label and do not imply unbuilt features.
 
 ## Build the cover and feature cards
 
@@ -95,7 +105,7 @@ pnpm previews:check
 ```
 
 `import` validates dimensions and records the rendered composition's hash.
-After changing source screenshots, the icon, cover choice or composition,
+After changing source screenshots, the icon, cover choice or conceptual illustration,
 rebuild and recapture the affected outputs. `check` catches stale or missing
 PNGs. Review the images visually as well; a hash does not prove a good capture.
 `.preview-build/` is disposable, ignored by Git and outside the shipped app.
@@ -115,8 +125,9 @@ const images = gallery.map(image => ({
 
 These objects match the current website's `AppImage` shape. Omit `bannerTop`:
 these are standalone images. Use `object-fit: contain` and the supplied aspect
-ratio to show the whole composition. Feature cards lead the carousel; full UI
-screens follow. Dark and mobile captures stay in the source gallery as variants.
+ratio to show the whole composition. The carousel contains the four conceptual
+feature illustrations. Full screenshots, dark and mobile captures remain in
+the source gallery as documentation and cover references.
 Copy assets at build time or use a pinned Git commit URL so an app update does
 not silently change a published website. Lazy-load slides after the first.
 
