@@ -12,6 +12,11 @@ test('saved preview pipeline rejects stale compositions and invalid captures', (
     for (const path of ['scripts/build-previews.mjs', 'scripts/feature-concepts.mjs', 'screenshots', 'previews', 'icon.svg', 'readme-banner.png', 'readme-banner-dark.png']) {
       cpSync(new URL('../' + path, import.meta.url), join(directory, path), { recursive: true });
     }
+    const references = JSON.parse(readFileSync(join(directory, 'screenshots/manifest.json'), 'utf8')).features.flatMap(feature => feature.sources);
+    for (const path of new Set(references)) {
+      mkdirSync(join(directory, path, '..'), { recursive: true });
+      cpSync(new URL('../' + path, import.meta.url), join(directory, path));
+    }
     const run = (...args) => spawnSync(process.execPath, ['scripts/build-previews.mjs', ...args], { cwd: directory, encoding: 'utf8' });
     assert.equal(run('check').status, 0);
     assert.equal(run('build').status, 0);
@@ -20,7 +25,7 @@ test('saved preview pipeline rejects stale compositions and invalid captures', (
     assert.ok(!concept.includes('Illustrative UI'), 'feature images should not include a disclaimer footer');
     assert.match(concept, /Conceptual technician assignment/);
     const cover = readFileSync(join(directory, 'readme-banner.png'));
-    const wrongSize = run('import', 'cover-light', 'screenshots/dashboard-mobile.png');
+    const wrongSize = run('import', 'cover-light', 'screenshots/schedule.png');
     assert.notEqual(wrongSize.status, 0);
     assert.match(wrongSize.stderr, /Expected 1600×1000/);
     assert.deepEqual(readFileSync(join(directory, 'readme-banner.png')), cover, 'invalid input must not overwrite the cover');
@@ -33,7 +38,15 @@ test('saved preview pipeline rejects stale compositions and invalid captures', (
     assert.match(run('check').stderr, /Stale output: dispatch/);
     manifest.features[0].sources[0] = 'missing-reference';
     writeFileSync(manifestPath, JSON.stringify(manifest));
-    assert.match(run('build').stderr, /Unknown reference screenshot/);
+    assert.match(run('build').stderr, /Missing feature source/);
+    const extraScreenshot = JSON.parse(original);
+    extraScreenshot.screenshots.push({ ...extraScreenshot.screenshots[0], id: 'unused' });
+    writeFileSync(manifestPath, JSON.stringify(extraScreenshot));
+    assert.match(run('check').stderr, /Screenshot is not a cover source/);
+    const screenshotCarousel = JSON.parse(original);
+    screenshotCarousel.carousel.push(screenshotCarousel.cover.light);
+    writeFileSync(manifestPath, JSON.stringify(screenshotCarousel));
+    assert.match(run('export').stderr, /Unknown carousel image/);
     writeFileSync(manifestPath, original);
 
     const gallery = join(directory, 'previews/website-gallery.json');

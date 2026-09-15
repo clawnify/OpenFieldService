@@ -21,7 +21,7 @@ Conceptual UI illustrations of the app’s main capabilities, with fictional exa
 | **Equipment history** | **Invoicing** |
 | [![Equipment history](previews/equipment-history.png)](previews/equipment-history.png) | [![Itemized invoicing](previews/invoicing.png)](previews/invoicing.png) |
 
-[Browse all 14 screenshots and the capture workflow](screenshots/README.md).
+[README cover sources and micro UI preview workflow](screenshots/README.md).
 
 ## What Is It?
 

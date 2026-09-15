@@ -23,6 +23,7 @@ function png(path) {
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const shots = new Map();
 for (const shot of manifest.screenshots) {
+  if (![manifest.cover.light, manifest.cover.dark].includes(shot.id)) throw new Error(`Screenshot is not a cover source: ${shot.id}`);
   if (shots.has(shot.id) || !shot.alt || !shot.route) throw new Error(`Invalid screenshot entry: ${shot.id}`);
   const actual = png(local(shot.src));
   if (actual.width !== shot.width || actual.height !== shot.height) throw new Error(`Dimensions changed: ${shot.id}`);
@@ -54,7 +55,7 @@ for (const theme of ['light', 'dark']) {
 }
 for (const feature of manifest.features) {
   for (const source of feature.sources) {
-    if (!shots.has(source)) throw new Error(`Unknown reference screenshot: ${source}`);
+    if (!existsSync(local(source))) throw new Error(`Missing feature source: ${source}`);
   }
   const panels = renderConcept(feature.id);
   outputs.push({ id: feature.id, src: `previews/${feature.id}.png`, width: 1600, height: 1000, title: feature.title, alt: feature.alt, theme: 'light',
@@ -87,7 +88,7 @@ if (command === 'build') {
     const actual = png(local(output.src));
     if (actual.width !== output.width || actual.height !== output.height || receipts[output.id]?.composition !== sha(output.html) || receipts[output.id]?.png !== sha(actual.bytes)) throw new Error(`Stale output: ${output.id}. Rebuild and capture again.`);
   }
-  const catalogue = new Map([...manifest.screenshots, ...outputs].map(entry => [entry.id, entry]));
+  const catalogue = new Map(outputs.filter(entry => manifest.features.some(feature => feature.id === entry.id)).map(entry => [entry.id, entry]));
   const images = manifest.carousel.map(id => {
     const entry = catalogue.get(id);
     if (!entry) throw new Error(`Unknown carousel image: ${id}`);

@@ -1,32 +1,17 @@
-# App screenshots and preview assets
+# README cover sources and micro UI previews
 
-The source is the running app. Save screenshots here first; select one for the
-README cover. Recreate conceptual feature illustrations in HTML/CSS/SVG, using
-the screenshots and app code as references. The website carousel uses the
-illustrations directly.
+Keep only the screenshots needed to generate the README covers:
+[light schedule](schedule.png) and [dark schedule](schedule-dark.png).
+The four conceptual micro UI previews live in [../previews/](../previews/)
+and are recreated in HTML/CSS/SVG, grounded in the app code and running app.
 
-Captured with TaskWindow on 15 September 2026 using a separate local database
-and fictional customers. Desktop: 1440×960; mobile: 390×844. Job and customer
-details use full-page captures so content below the fold is preserved.
-
-## Saved sections
-
-| Section | Screenshot |
-| --- | --- |
-| Dashboard | [Daily overview](dashboard.png) · [Mobile](dashboard-mobile.png) |
-| Schedule | [Weekly dispatch](schedule.png) · [Dark](schedule-dark.png) |
-| Jobs | [Job list](jobs.png) · [Job workspace](job.png) |
-| Customers | [Directory](customers.png) · [Customer record](customer.png) |
-| Equipment | [Record and service history](equipment.png) |
-| Technicians | [Team and workloads](technicians.png) |
-| Service types | [Services, durations and prices](services.png) |
-| Materials | [Stock and unit costs](materials.png) |
-| Invoices | [Invoice list](invoices.png) · [Invoice detail](invoice.png) |
+Cover sources were captured with TaskWindow on 15 September 2026 using a
+separate local database and fictional customers, at 1440×960.
 
 ## What controls the output
 
 - [manifest.json](manifest.json): screenshot routes, dimensions, themes,
-  captions, cover selection, feature reference ids, illustration metadata and carousel order.
+  captions, cover selection, feature source-code paths, illustration metadata and carousel order.
 - [../previews/](../previews/): four 1600×1000 conceptual feature illustrations. The UI is
   recreated with enlarged labels, simplified content, softly lit backgrounds
   and slightly overlapping floating panels. These are illustrative views of
@@ -40,7 +25,7 @@ details use full-page captures so content below the fold is preserved.
   HTML/CSS/SVG source for each conceptual UI composition. Feature PNGs contain
   no embedded screenshots.
 - [../scripts/build-previews.mjs](../scripts/build-previews.mjs): validates PNG
-  sizes and reference ids, builds HTML compositions, imports TaskWindow captures,
+  sizes and source-code paths, builds HTML compositions, imports TaskWindow captures,
   and rejects stale outputs using hashes of the composition and saved PNG.
 
 ## Recapture safely
@@ -68,18 +53,19 @@ day so the dashboard and calendar contain visits. The UUIDs in the committed
 manifest describe the original capture; use the new routes when recapturing.
 
 1. Open the app through TaskWindow. Use its responsive view at 1440×960 and
-   verify the page's `innerWidth`; for mobile use 390×844. Desktop captures in
-   this set use its emulated touch viewport.
+   verify the page's `innerWidth`. Capture only the selected README cover view
+   in light and dark themes; this set uses an emulated touch viewport.
 2. Wait for fonts, data and nested equipment lookups. Confirm no loading,
    errors, open menus or browser chrome obscure the view. Screenshot with
    `save_to_disk: true`, then copy the PNG into this folder.
 3. Capture real dark styling for the selected cover view. This set activated
    the existing `(prefers-color-scheme: dark)` CSS media rule through CSSOM in
    the disposable capture tab. Reload to reset; no source styling was changed.
-4. Review every screenshot, including table edges and below-fold content.
+4. Review both cover screenshots, including table edges.
    Update manifest dates, source revision, routes and actual PNG dimensions.
    Never replace customer data in the DOM to invent a feature.
-5. Keep raw screenshots intact. Update the feature illustrations in
+5. Keep only the selected cover screenshots in this folder. Inspect other app
+   sections as needed without saving a screenshot gallery. Update the feature illustrations in
    `scripts/feature-concepts.mjs` as capabilities change. Focus each image on
    one relatable task, with large readable labels and at most two related
    floating panels. Overlap their edges slightly; leave key content visible.
@@ -114,7 +100,7 @@ PNGs. Review the images visually as well; a hash does not prove a good capture.
 
 ## Use in the template carousel
 
-Copy the referenced `screenshots/` and `previews/` PNGs to the website's static
+Copy only the exported `previews/` PNGs to the website's static
 assets, preserving those subpaths under `/assets/apps/open-fieldservice/`.
 Import the exported JSON and map each `src` to that prefix:
 
@@ -128,11 +114,11 @@ const images = gallery.map(image => ({
 These objects match the current website's `AppImage` shape. Omit `bannerTop`:
 these are standalone images. Use `object-fit: contain` and the supplied aspect
 ratio to show the whole composition. The carousel contains the four conceptual
-feature illustrations. Full screenshots, dark and mobile captures remain in
-the source gallery as documentation and cover references.
+feature illustrations. The two raw cover sources stay in this repository
+solely to regenerate the README images.
 Copy assets at build time or use a pinned Git commit URL so an app update does
 not silently change a published website. Lazy-load slides after the first.
 
 This repository supplies the assets and export; publishing the website is a
 separate step. The manifest's single `screenshot` URL points to the raw schedule
-on `main` and becomes available when this change is merged.
+on `main`.
