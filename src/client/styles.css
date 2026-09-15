@@ -880,6 +880,10 @@ body {
   text-align: center;
 }
 
+.schedule-toolbar .page-header-right { flex-wrap: wrap; }
+.schedule-range { font-size: 14px; font-weight: 600; text-align: center; }
+.schedule-add-job { margin: 4px; align-self: stretch; }
+
 /* ── Checklist ───────────────────────────────────────────────────────── */
 
 .checklist-list {

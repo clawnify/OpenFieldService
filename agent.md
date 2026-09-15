@@ -25,6 +25,7 @@ Use this template when the user wants to:
 - Read `/api/openapi.json` for live request schemas. Record and relationship IDs are UUID strings; never parse them as numbers or invent sequential IDs.
 - Keep readable job/invoice labels separate from record IDs.
 - To service a known machine, open its `/assets/:id` page and choose **Schedule job**. The customer and equipment are selected; the API resolves a blank address from the current site.
+- On `/schedule`, choose **Add job** under a day to prefill its date, or **New job** for today (Monday when viewing another week). Saving keeps the calendar open and follows the saved date if it moved to another week.
 - An upgrade-required response means the database needs the explicit UUID migration. Back up and preserve existing records; never reset the database to fix this error.
 
 ## Customization guide
