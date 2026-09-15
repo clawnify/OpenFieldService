@@ -1,3 +1,4 @@
+import { weekRange } from "../calendar";
 import { useState, useCallback, useEffect } from "preact/hooks";
 import { api } from "../api";
 import type {
@@ -37,13 +38,9 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
 
   // Schedule
-  const today = new Date();
-  const monday = new Date(today);
-  monday.setDate(today.getDate() - today.getDay() + 1);
-  const sunday = new Date(monday);
-  sunday.setDate(monday.getDate() + 6);
-  const [scheduleStart, setScheduleStart] = useState(monday.toISOString().split("T")[0]);
-  const [scheduleEnd, setScheduleEnd] = useState(sunday.toISOString().split("T")[0]);
+  const [monday, sunday] = weekRange();
+  const [scheduleStart, setScheduleStart] = useState(monday);
+  const [scheduleEnd, setScheduleEnd] = useState(sunday);
   const [scheduleJobs, setScheduleJobs] = useState<Job[]>([]);
 
   // Lookups

@@ -1,4 +1,7 @@
-<img src="readme-banner.png" alt="OpenFieldService preview" width="100%" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="readme-banner-dark.png" />
+  <img src="readme-banner.png" alt="OpenFieldService weekly dispatch with technician assignments" width="100%" />
+</picture>
 
 # OpenFieldService: The Open-Source PestPac & ServiceTitan Alternative
 
@@ -7,6 +10,18 @@
 A field service scheduling and business management app for service companies — pest control, HVAC, plumbing, cleaning, landscaping, and more. Part of the [OpenClaw](https://github.com/openclaw/openclaw) ecosystem. Zero cloud dependencies — runs locally with SQLite.
 
 Built with **Preact + Hono + SQLite**. Ships with a clean dashboard UI, weekly calendar view, job management, customer database, invoicing, materials tracking, and technician dispatch.
+
+## See it in action
+
+Real app screens with fictional example data. Open an image to see the details.
+
+| Dispatch | Job checklists & materials |
+| --- | --- |
+| [![Weekly dispatch](previews/dispatch.png)](previews/dispatch.png) | [![Job checklists and materials](previews/job-work.png)](previews/job-work.png) |
+| **Equipment history** | **Invoicing** |
+| [![Equipment history](previews/equipment-history.png)](previews/equipment-history.png) | [![Itemized invoicing](previews/invoicing.png)](previews/invoicing.png) |
+
+[Browse all 14 screenshots and the capture workflow](screenshots/README.md).
 
 ## What Is It?
 

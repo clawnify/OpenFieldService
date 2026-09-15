@@ -1,0 +1,107 @@
+[
+  {
+    "src": "previews/dispatch.png",
+    "alt": "Weekly dispatch preview showing seven days of technician-assigned service visits.",
+    "caption": "The whole week, at a glance. · Example data",
+    "width": 1600,
+    "height": 1000
+  },
+  {
+    "src": "previews/job-work.png",
+    "alt": "Two actual job UI crops showing completed and remaining checklist tasks and the materials used.",
+    "caption": "Check the work. Log the parts. · Example data",
+    "width": 1600,
+    "height": 1000
+  },
+  {
+    "src": "previews/equipment-history.png",
+    "alt": "Actual equipment record with serial and warranty dates beside its service history.",
+    "caption": "Know the machine’s history. · Example data",
+    "width": 1600,
+    "height": 1000
+  },
+  {
+    "src": "previews/invoicing.png",
+    "alt": "Actual invoice detail with itemized maintenance, filter replacements, tax, total and payment status.",
+    "caption": "From service visit to invoice. · Example data",
+    "width": 1600,
+    "height": 1000
+  },
+  {
+    "src": "screenshots/dashboard.png",
+    "alt": "Daily job counts, revenue, outstanding invoices and today’s schedule.",
+    "caption": "Dashboard · Example data",
+    "width": 1440,
+    "height": 960
+  },
+  {
+    "src": "screenshots/schedule.png",
+    "alt": "A Monday-to-Sunday schedule with customer visits, service types and assigned technicians.",
+    "caption": "Weekly dispatch · Example data",
+    "width": 1440,
+    "height": 960
+  },
+  {
+    "src": "screenshots/customers.png",
+    "alt": "Customer directory with contact details, addresses and job counts.",
+    "caption": "Customers · Example data",
+    "width": 1440,
+    "height": 960
+  },
+  {
+    "src": "screenshots/customer.png",
+    "alt": "Juniper House’s contact details, sites, installed equipment and service history.",
+    "caption": "Customer record · Example data",
+    "width": 1440,
+    "height": 977
+  },
+  {
+    "src": "screenshots/technicians.png",
+    "alt": "Technician directory with assigned colours, active workloads and availability.",
+    "caption": "Technicians · Example data",
+    "width": 1440,
+    "height": 960
+  },
+  {
+    "src": "screenshots/services.png",
+    "alt": "Configurable services with duration, default pricing and category colours.",
+    "caption": "Service types · Example data",
+    "width": 1440,
+    "height": 960
+  },
+  {
+    "src": "screenshots/materials.png",
+    "alt": "Materials catalog with unit costs and stock quantities.",
+    "caption": "Materials & inventory · Example data",
+    "width": 1440,
+    "height": 960
+  },
+  {
+    "src": "screenshots/invoices.png",
+    "alt": "Invoice list with paid, sent and overdue statuses, due dates and totals.",
+    "caption": "Invoices · Example data",
+    "width": 1440,
+    "height": 960
+  },
+  {
+    "src": "screenshots/job.png",
+    "alt": "A service visit with customer details, linked equipment, checklist, materials and activity.",
+    "caption": "Job workspace · Example data",
+    "width": 1440,
+    "height": 1429
+  },
+  {
+    "src": "screenshots/invoice.png",
+    "alt": "Itemized maintenance invoice with quantities, tax, total and payment status.",
+    "caption": "Invoice detail · Example data",
+    "width": 1440,
+    "height": 960
+  },
+  {
+    "src": "screenshots/equipment.png",
+    "alt": "Rooftop air handler serial, warranty dates, site access and linked service history.",
+    "caption": "Equipment history · Example data",
+    "width": 1440,
+    "height": 960
+  }
+]

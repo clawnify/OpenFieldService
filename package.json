@@ -8,7 +8,10 @@
     "build": "vite build",
     "db:setup": "node scripts/setup-db.mjs",
     "test": "node --test tests/*.test.mjs",
-    "db:migrate-uuids": "node scripts/setup-db.mjs --migrate-uuids"
+    "db:migrate-uuids": "node scripts/setup-db.mjs --migrate-uuids",
+    "previews:build": "node scripts/build-previews.mjs build",
+    "previews:check": "node scripts/build-previews.mjs check",
+    "previews:export": "node scripts/build-previews.mjs export"
   },
   "dependencies": {
     "@clawnify/app": "^0.1.0",
