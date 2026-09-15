@@ -21,8 +21,8 @@ export function Sidebar({ currentView }: { currentView: View }) {
   const [collapsed, setCollapsed] = useState(false);
 
   if (embedded) {
-    const icons = ["home", "calendar-days", "briefcase", "users", "wrench", "file-text", "package", "settings"];
-    return <AppNav title="Field Service" icon="wrench" active={currentView === "assets" ? "customers" : currentView}
+    const icons = ["home", "calendar-days", "briefcase", "users", "settings", "file-text", "package", "settings"];
+    return <AppNav title="Field Service" icon="settings" active={currentView === "assets" ? "customers" : currentView}
       groups={[{ items: navItems.map((item, index) => ({
         id: item.view, label: item.label, href: item.path, icon: icons[index],
         home: item.view === "dashboard",
