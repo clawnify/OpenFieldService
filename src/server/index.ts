@@ -1,8 +1,9 @@
 import { createApp, createRoute, z } from "@clawnify/app";
+import type { DBEnv } from "@clawnify/db";
 import { query, get, run } from "./db.js";
 import { equipmentApp } from "./equipment.js";
 
-type Env = { Bindings: { DB: D1Database } };
+type Env = { Bindings: DBEnv };
 
 const app = createApp<Env>({
   title: "OpenFieldService",
@@ -11,7 +12,13 @@ const app = createApp<Env>({
     "Field service scheduling and business management with customers, technicians, service types, and job tracking.",
 });
 
-app.use("*", async (_c, next) => {
+let uuidReady = false;
+app.use("*", async (c, next) => {
+  if (!uuidReady) {
+    const column = await get<{ type: string }>("SELECT type FROM pragma_table_info('customers') WHERE name = 'id'");
+    if (column?.type !== "TEXT") return c.json({ error: "Database upgrade required: back up the database and apply the UUID migration before using this version." }, 503);
+    uuidReady = true;
+  }
   await ensureSeeded();
   await next();
 });
@@ -32,22 +39,22 @@ const META_DEFAULTS: Array<[string, string]> = [
 ];
 
 /** id, name, description, default_duration, default_price, color */
-const DEMO_SERVICE_TYPES: Array<[number, string, string, number, number, string]> = [
-  [1, "Standard Service", "Standard service visit", 60, 150, "#16a34a"],
-  [2, "Inspection", "On-site inspection and assessment", 45, 75, "#0891b2"],
-  [3, "Emergency", "Urgent same-day service call", 90, 300, "#dc2626"],
-  [4, "Follow-up", "Follow-up visit after initial service", 30, 50, "#9333ea"],
-  [5, "Installation", "Equipment or system installation", 120, 400, "#ea580c"],
-  [6, "Maintenance", "Routine maintenance visit", 60, 125, "#ca8a04"],
+const DEMO_SERVICE_TYPES: Array<[string, string, string, number, number, string]> = [
+  ["5a0a7cf3-6450-4c09-aed2-3e0cf4c6e4ba", "Standard Service", "Standard service visit", 60, 150, "#16a34a"],
+  ["7bdeae08-1581-4054-b7e2-10cfac6ace0a", "Inspection", "On-site inspection and assessment", 45, 75, "#0891b2"],
+  ["65cfd387-d2a4-4d08-bf51-69e9d4b4e3c0", "Emergency", "Urgent same-day service call", 90, 300, "#dc2626"],
+  ["1816835c-6e27-4cfe-a0bf-c9f634e10e0c", "Follow-up", "Follow-up visit after initial service", 30, 50, "#9333ea"],
+  ["c5602a3e-5407-40a7-8f05-adbfb9838ebd", "Installation", "Equipment or system installation", 120, 400, "#ea580c"],
+  ["eea3c561-5658-4195-bd61-a678c5113ca3", "Maintenance", "Routine maintenance visit", 60, 125, "#ca8a04"],
 ];
 
 /** id, name, unit, unit_cost, in_stock */
-const DEMO_MATERIALS: Array<[number, string, string, number, number]> = [
-  [1, "Service Fee", "ea", 0, 999],
-  [2, "Filter Replacement", "ea", 25, 50],
-  [3, "Sealant", "tube", 12, 30],
-  [4, "Travel Surcharge", "ea", 35, 999],
-  [5, "Disposable Supplies", "kit", 8, 100],
+const DEMO_MATERIALS: Array<[string, string, string, number, number]> = [
+  ["4d7b2e93-24ed-4230-b56f-c7bbced6993d", "Service Fee", "ea", 0, 999],
+  ["c0e9d6ae-cac3-4b10-955e-fb0c9f459f1e", "Filter Replacement", "ea", 25, 50],
+  ["7fafaeef-2f0b-4706-8185-a88786aeff5b", "Sealant", "tube", 12, 30],
+  ["9c14838e-2289-4dc6-a9a1-3f27f23d2ddf", "Travel Surcharge", "ea", 35, 999],
+  ["278ff03f-8d20-4e0e-ba7c-93da37fdff60", "Disposable Supplies", "kit", 8, 100],
 ];
 
 let seeded = false; // per-isolate fast path; the COUNT re-checks are cheap
@@ -94,7 +101,7 @@ const ErrorSchema = z.object({ error: z.string() }).openapi("Error");
 const OkSchema = z.object({ ok: z.boolean() }).openapi("Ok");
 
 const CustomerSchema = z.object({
-  id: z.number().int(),
+  id: z.string().uuid(),
   name: z.string(),
   email: z.string(),
   phone: z.string(),
@@ -109,7 +116,7 @@ const CustomerSchema = z.object({
 }).openapi("Customer");
 
 const TechnicianSchema = z.object({
-  id: z.number().int(),
+  id: z.string().uuid(),
   name: z.string(),
   email: z.string(),
   phone: z.string(),
@@ -120,7 +127,7 @@ const TechnicianSchema = z.object({
 }).openapi("Technician");
 
 const ServiceTypeSchema = z.object({
-  id: z.number().int(),
+  id: z.string().uuid(),
   name: z.string(),
   description: z.string(),
   default_duration: z.number().int(),
@@ -130,19 +137,19 @@ const ServiceTypeSchema = z.object({
 }).openapi("ServiceType");
 
 const JobNoteSchema = z.object({
-  id: z.number().int(),
-  job_id: z.number().int(),
+  id: z.string().uuid(),
+  job_id: z.string().uuid(),
   content: z.string(),
   created_at: z.string(),
 }).openapi("JobNote");
 
 const JobSchema = z.object({
-  id: z.number().int(),
+  id: z.string().uuid(),
   identifier: z.string(),
-  customer_id: z.number().int(),
-  asset_id: z.number().int().nullable(),
-  technician_id: z.number().int().nullable(),
-  service_type_id: z.number().int().nullable(),
+  customer_id: z.string().uuid(),
+  asset_id: z.string().uuid().nullable(),
+  technician_id: z.string().uuid().nullable(),
+  service_type_id: z.string().uuid().nullable(),
   status: z.string(),
   priority: z.string(),
   scheduled_date: z.string(),
@@ -166,30 +173,24 @@ const JobSchema = z.object({
   updated_at: z.string(),
 }).openapi("Job");
 
-const IdParam = z.object({ id: z.string().openapi({ description: "Resource ID" }) });
+const IdParam = z.object({ id: z.string().uuid().openapi({ description: "Resource ID" }) });
 
 // ── Helpers ────────────────────────────────────────────────────────
 
 async function nextIdentifier(): Promise<string> {
   const prefix = await get<{ value: string }>("SELECT value FROM _meta WHERE key = 'identifier_prefix'");
-  const counter = await get<{ value: string }>("SELECT value FROM _meta WHERE key = 'job_counter'");
-  const next = parseInt(counter?.value || "0", 10) + 1;
-  await run(
-    "INSERT INTO _meta (key, value) VALUES ('job_counter', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    [String(next)],
+  const counter = await get<{ value: string }>(
+    "INSERT INTO _meta (key, value) VALUES ('job_counter', '1') ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1 RETURNING value"
   );
-  return `${prefix?.value || "JOB"}-${next}`;
+  return `${prefix?.value || "JOB"}-${counter!.value}`;
 }
 
 async function nextInvoiceIdentifier(): Promise<string> {
   const prefix = await get<{ value: string }>("SELECT value FROM _meta WHERE key = 'invoice_prefix'");
-  const counter = await get<{ value: string }>("SELECT value FROM _meta WHERE key = 'invoice_counter'");
-  const next = parseInt(counter?.value || "0", 10) + 1;
-  await run(
-    "INSERT INTO _meta (key, value) VALUES ('invoice_counter', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    [String(next)],
+  const counter = await get<{ value: string }>(
+    "INSERT INTO _meta (key, value) VALUES ('invoice_counter', '1') ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1 RETURNING value"
   );
-  return `${prefix?.value || "INV"}-${next}`;
+  return `${prefix?.value || "INV"}-${counter!.value}`;
 }
 
 // ── Stats ──────────────────────────────────────────────────────────
@@ -295,7 +296,7 @@ app.openapi(listJobs, async (c) => {
     params
   );
 
-  const jobs = await query<Record<string, unknown>>(
+  const jobs = await query<z.infer<typeof JobSchema>>(
     `SELECT j.*, c.name as customer_name, c.phone as customer_phone,
        t.name as technician_name, t.color as technician_color,
        st.name as service_type_name, st.color as service_type_color
@@ -324,7 +325,7 @@ const getJob = createRoute({
 
 app.openapi(getJob, async (c) => {
   const { id } = c.req.valid("param");
-  const job = await get<Record<string, unknown>>(
+  const job = await get<z.infer<typeof JobSchema>>(
     `SELECT j.*, c.name as customer_name, c.phone as customer_phone,
        t.name as technician_name, t.color as technician_color,
        st.name as service_type_name, st.color as service_type_color
@@ -336,7 +337,7 @@ app.openapi(getJob, async (c) => {
     [id]
   );
   if (!job) return c.json({ error: "Job not found" }, 404);
-  const notes = await query<Record<string, unknown>>(
+  const notes = await query<z.infer<typeof JobNoteSchema>>(
     "SELECT * FROM job_notes WHERE job_id = ? ORDER BY created_at DESC", [id]
   );
   const checklist = await query<Record<string, unknown>>(
@@ -345,7 +346,7 @@ app.openapi(getJob, async (c) => {
   const jobMaterials = await query<Record<string, unknown>>(
     `SELECT jm.*, m.name as material_name, m.unit as material_unit
      FROM job_materials jm LEFT JOIN materials m ON jm.material_id = m.id
-     WHERE jm.job_id = ? ORDER BY jm.id ASC`, [id]
+     WHERE jm.job_id = ? ORDER BY jm.rowid ASC`, [id]
   );
   return c.json({ job: { ...job, job_notes: notes, checklist, job_materials: jobMaterials } }, 200);
 });
@@ -356,10 +357,10 @@ const createJob = createRoute({
   request: {
     body: {
       content: { "application/json": { schema: z.object({
-        customer_id: z.number().int(),
-        asset_id: z.number().int().positive().nullable().optional(),
-        technician_id: z.number().int().nullable().optional(),
-        service_type_id: z.number().int().nullable().optional(),
+        customer_id: z.string().uuid(),
+        asset_id: z.string().uuid().nullable().optional(),
+        technician_id: z.string().uuid().nullable().optional(),
+        service_type_id: z.string().uuid().nullable().optional(),
         status: z.string().optional(),
         priority: z.string().optional(),
         scheduled_date: z.string(),
@@ -437,7 +438,7 @@ app.openapi(createJob, async (c) => {
     ]
   );
 
-  const job = await get<Record<string, unknown>>(
+  const job = await get<z.infer<typeof JobSchema>>(
     `SELECT j.*, c.name as customer_name, c.phone as customer_phone,
        t.name as technician_name, t.color as technician_color,
        st.name as service_type_name, st.color as service_type_color
@@ -458,10 +459,10 @@ const updateJob = createRoute({
     params: IdParam,
     body: {
       content: { "application/json": { schema: z.object({
-        customer_id: z.number().int().optional(),
-        asset_id: z.number().int().positive().nullable().optional(),
-        technician_id: z.number().int().nullable().optional(),
-        service_type_id: z.number().int().nullable().optional(),
+        customer_id: z.string().uuid().optional(),
+        asset_id: z.string().uuid().nullable().optional(),
+        technician_id: z.string().uuid().nullable().optional(),
+        service_type_id: z.string().uuid().nullable().optional(),
         status: z.string().optional(),
         priority: z.string().optional(),
         scheduled_date: z.string().optional(),
@@ -541,10 +542,7 @@ const addJobNote = createRoute({
 app.openapi(addJobNote, async (c) => {
   const { id } = c.req.valid("param");
   const { content } = c.req.valid("json");
-  await run("INSERT INTO job_notes (job_id, content) VALUES (?, ?)", [id, content]);
-  const note = await get<Record<string, unknown>>(
-    "SELECT * FROM job_notes WHERE job_id = ? ORDER BY id DESC LIMIT 1", [id]
-  );
+  const note = await get<z.infer<typeof JobNoteSchema>>("INSERT INTO job_notes (job_id, content) VALUES (?, ?) RETURNING *", [id, content]);
   return c.json(note!, 201);
 });
 
@@ -598,7 +596,7 @@ app.openapi(listCustomers, async (c) => {
   }
 
   const countRow = await get<{ count: number }>(`SELECT COUNT(*) as count FROM customers c ${where}`, params);
-  const customers = await query<Record<string, unknown>>(
+  const customers = await query<z.infer<typeof CustomerSchema>>(
     `SELECT c.*, COALESCE(jc.cnt, 0) as job_count
      FROM customers c
      LEFT JOIN (SELECT customer_id, COUNT(*) as cnt FROM jobs GROUP BY customer_id) jc ON jc.customer_id = c.id
@@ -616,13 +614,13 @@ const listAllCustomers = createRoute({
   responses: {
     200: {
       description: "All customers (for dropdowns)",
-      content: { "application/json": { schema: z.object({ customers: z.array(z.object({ id: z.number().int(), name: z.string(), address: z.string() })) }) } },
+      content: { "application/json": { schema: z.object({ customers: z.array(z.object({ id: z.string().uuid(), name: z.string(), address: z.string() })) }) } },
     },
   },
 });
 
 app.openapi(listAllCustomers, async (c) => {
-  const customers = await query<Record<string, unknown>>("SELECT id, name, address FROM customers ORDER BY name ASC");
+  const customers = await query<Pick<z.infer<typeof CustomerSchema>, "id" | "name" | "address">>("SELECT id, name, address FROM customers ORDER BY name ASC");
   return c.json({ customers }, 200);
 });
 
@@ -638,9 +636,9 @@ const getCustomer = createRoute({
 
 app.openapi(getCustomer, async (c) => {
   const { id } = c.req.valid("param");
-  const customer = await get<Record<string, unknown>>("SELECT * FROM customers WHERE id = ?", [id]);
+  const customer = await get<z.infer<typeof CustomerSchema>>("SELECT * FROM customers WHERE id = ?", [id]);
   if (!customer) return c.json({ error: "Customer not found" }, 404);
-  const jobs = await query<Record<string, unknown>>(
+  const jobs = await query<z.infer<typeof JobSchema>>(
     `SELECT j.*, t.name as technician_name, t.color as technician_color,
        st.name as service_type_name, st.color as service_type_color
      FROM jobs j
@@ -678,12 +676,11 @@ const createCustomer = createRoute({
 
 app.openapi(createCustomer, async (c) => {
   const data = c.req.valid("json");
-  await run(
-    "INSERT INTO customers (name, email, phone, address, city, state, zip, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  const customer = await get<z.infer<typeof CustomerSchema>>(
+    "INSERT INTO customers (name, email, phone, address, city, state, zip, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
     [data.name, data.email || "", data.phone || "", data.address || "",
     data.city || "", data.state || "", data.zip || "", data.notes || ""]
   );
-  const customer = await get<Record<string, unknown>>("SELECT * FROM customers ORDER BY id DESC LIMIT 1");
   return c.json(customer!, 201);
 });
 
@@ -761,7 +758,7 @@ const listTechnicians = createRoute({
 });
 
 app.openapi(listTechnicians, async (c) => {
-  const technicians = await query<Record<string, unknown>>(
+  const technicians = await query<z.infer<typeof TechnicianSchema>>(
     `SELECT t.*, COALESCE(jc.cnt, 0) as job_count
      FROM technicians t
      LEFT JOIN (SELECT technician_id, COUNT(*) as cnt FROM jobs WHERE status IN ('scheduled','confirmed','in_progress') GROUP BY technician_id) jc ON jc.technician_id = t.id
@@ -776,13 +773,13 @@ const listAllTechnicians = createRoute({
   responses: {
     200: {
       description: "Active technicians (for dropdowns)",
-      content: { "application/json": { schema: z.object({ technicians: z.array(z.object({ id: z.number().int(), name: z.string(), color: z.string() })) }) } },
+      content: { "application/json": { schema: z.object({ technicians: z.array(z.object({ id: z.string().uuid(), name: z.string(), color: z.string() })) }) } },
     },
   },
 });
 
 app.openapi(listAllTechnicians, async (c) => {
-  const technicians = await query<Record<string, unknown>>(
+  const technicians = await query<Pick<z.infer<typeof TechnicianSchema>, "id" | "name" | "color">>(
     "SELECT id, name, color FROM technicians WHERE active = 1 ORDER BY name ASC"
   );
   return c.json({ technicians }, 200);
@@ -808,11 +805,10 @@ const createTechnician = createRoute({
 
 app.openapi(createTechnician, async (c) => {
   const data = c.req.valid("json");
-  await run(
-    "INSERT INTO technicians (name, email, phone, color) VALUES (?, ?, ?, ?)",
+  const tech = await get<z.infer<typeof TechnicianSchema>>(
+    "INSERT INTO technicians (name, email, phone, color) VALUES (?, ?, ?, ?) RETURNING *",
     [data.name, data.email || "", data.phone || "", data.color || "#16a34a"]
   );
-  const tech = await get<Record<string, unknown>>("SELECT * FROM technicians ORDER BY id DESC LIMIT 1");
   return c.json(tech!, 201);
 });
 
@@ -882,7 +878,7 @@ const listServiceTypes = createRoute({
 });
 
 app.openapi(listServiceTypes, async (c) => {
-  const types = await query<Record<string, unknown>>("SELECT * FROM service_types ORDER BY name ASC");
+  const types = await query<z.infer<typeof ServiceTypeSchema>>("SELECT * FROM service_types ORDER BY name ASC");
   return c.json({ service_types: types }, 200);
 });
 
@@ -907,11 +903,10 @@ const createServiceType = createRoute({
 
 app.openapi(createServiceType, async (c) => {
   const data = c.req.valid("json");
-  await run(
-    "INSERT INTO service_types (name, description, default_duration, default_price, color) VALUES (?, ?, ?, ?, ?)",
+  const st = await get<z.infer<typeof ServiceTypeSchema>>(
+    "INSERT INTO service_types (name, description, default_duration, default_price, color) VALUES (?, ?, ?, ?, ?) RETURNING *",
     [data.name, data.description || "", data.default_duration || 60, data.default_price || 0, data.color || "#6b7280"]
   );
-  const st = await get<Record<string, unknown>>("SELECT * FROM service_types ORDER BY id DESC LIMIT 1");
   return c.json(st!, 201);
 });
 
@@ -995,7 +990,7 @@ app.openapi(getSchedule, async (c) => {
     where += " AND j.technician_id = ?";
     params.push(q.technician_id);
   }
-  const jobs = await query<Record<string, unknown>>(
+  const jobs = await query<z.infer<typeof JobSchema>>(
     `SELECT j.*, c.name as customer_name, c.phone as customer_phone,
        t.name as technician_name, t.color as technician_color,
        st.name as service_type_name, st.color as service_type_color
@@ -1071,7 +1066,7 @@ const listMaterials = createRoute({
     200: {
       description: "All materials",
       content: { "application/json": { schema: z.object({ materials: z.array(z.object({
-        id: z.number().int(),
+        id: z.string().uuid(),
         name: z.string(),
         unit: z.string(),
         unit_cost: z.number(),
@@ -1083,7 +1078,7 @@ const listMaterials = createRoute({
 });
 
 app.openapi(listMaterials, async (c) => {
-  const materials = await query<Record<string, unknown>>("SELECT * FROM materials ORDER BY name ASC");
+  const materials = await query<{ id: string; name: string; unit: string; unit_cost: number; in_stock: number; created_at: string }>("SELECT * FROM materials ORDER BY name ASC");
   return c.json({ materials }, 200);
 });
 
@@ -1162,7 +1157,7 @@ const addJobMaterial = createRoute({
   request: {
     params: IdParam,
     body: { content: { "application/json": { schema: z.object({
-      material_id: z.number().int(),
+      material_id: z.string().uuid(),
       quantity: z.number(),
       unit_cost: z.number().optional(),
     }) } } },
@@ -1276,7 +1271,7 @@ app.openapi(getInvoice, async (c) => {
   );
   if (!invoice) return c.json({ error: "Invoice not found" }, 404);
   const lines = await query<Record<string, unknown>>(
-    "SELECT * FROM invoice_lines WHERE invoice_id = ? ORDER BY id ASC", [id]
+    "SELECT * FROM invoice_lines WHERE invoice_id = ? ORDER BY rowid ASC", [id]
   );
   return c.json({ invoice: { ...invoice, lines } }, 200);
 });
@@ -1286,8 +1281,8 @@ const createInvoice = createRoute({
   path: "/api/invoices",
   request: {
     body: { content: { "application/json": { schema: z.object({
-      customer_id: z.number().int(),
-      job_id: z.number().int().nullable().optional(),
+      customer_id: z.string().uuid(),
+      job_id: z.string().uuid().nullable().optional(),
       tax_rate: z.number().optional(),
       notes: z.string().optional(),
       due_date: z.string().optional(),
@@ -1323,7 +1318,7 @@ app.openapi(createInvoice, async (c) => {
     data.notes || "", data.due_date || ""]
   );
 
-  const invoice = await get<{ id: number }>("SELECT id FROM invoices WHERE identifier = ?", [identifier]);
+  const invoice = await get<{ id: string }>("SELECT id FROM invoices WHERE identifier = ?", [identifier]);
   for (const line of data.lines) {
     const lineTotal = line.quantity * line.unit_price;
     await run(
@@ -1400,7 +1395,7 @@ const invoiceFromJob = createRoute({
 
 app.openapi(invoiceFromJob, async (c) => {
   const { id } = c.req.valid("param");
-  const job = await get<Record<string, unknown>>(
+  const job = await get<z.infer<typeof JobSchema>>(
     `SELECT j.*, st.name as service_type_name FROM jobs j
      LEFT JOIN service_types st ON j.service_type_id = st.id WHERE j.id = ?`, [id]
   );
@@ -1436,7 +1431,7 @@ app.openapi(invoiceFromJob, async (c) => {
     [identifier, job.customer_id, job.id, subtotal, subtotal]
   );
 
-  const inv = await get<{ id: number }>("SELECT id FROM invoices WHERE identifier = ?", [identifier]);
+  const inv = await get<{ id: string }>("SELECT id FROM invoices WHERE identifier = ?", [identifier]);
   for (const line of lines) {
     await run(
       "INSERT INTO invoice_lines (invoice_id, description, quantity, unit_price, total) VALUES (?, ?, ?, ?, ?)",

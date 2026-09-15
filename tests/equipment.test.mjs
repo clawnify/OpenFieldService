@@ -15,6 +15,8 @@ const env = { ...process.env, WRANGLER_SEND_METRICS: "false", CI: "true" };
 let server;
 let base;
 let logs = "";
+let legacyId;
+const missingId = "00000000-0000-4000-8000-000000000000";
 function cli(args) { return execFileSync(process.execPath, [wrangler, ...args], { env, encoding: "utf8" }); }
 function sql(command) { return JSON.parse(cli(["d1", "execute", "open-fieldservice-db", "--local", "--persist-to", directory, "--command", command, "--json"]))[0].results; }
 async function api(method, path, body, status = 200) {
@@ -28,9 +30,11 @@ before(async () => {
   // Frozen pre-equipment schema ensures the upgrade is exercised with real data.
   cli(["d1", "execute", "open-fieldservice-db", "--local", "--persist-to", directory, "--file", "tests/fixtures/job-centric.sql"]);
   sql("INSERT INTO customers(id,name,address) VALUES (1,'Legacy customer','Original address'); INSERT INTO jobs(id,identifier,customer_id,notes) VALUES (1,'LEGACY-1',1,'Keep this history')");
-  for (let i = 0; i < 2; i++) execFileSync(process.execPath, ["scripts/setup-db.mjs", directory], { env, encoding: "utf8" });
-  assert.equal(sql("SELECT asset_id FROM jobs WHERE id = 1")[0].asset_id, null);
-  assert.equal(sql("SELECT notes FROM jobs WHERE id = 1")[0].notes, "Keep this history");
+  for (let i = 0; i < 2; i++) execFileSync(process.execPath, ["scripts/setup-db.mjs", "--migrate-uuids", directory], { env, encoding: "utf8" });
+  legacyId = sql("SELECT id FROM jobs WHERE identifier = 'LEGACY-1'")[0].id;
+  assert.match(legacyId, /^[0-9a-f-]{36}$/);
+  assert.equal(sql("SELECT asset_id FROM jobs WHERE identifier = 'LEGACY-1'")[0].asset_id, null);
+  assert.equal(sql("SELECT notes FROM jobs WHERE identifier = 'LEGACY-1'")[0].notes, "Keep this history");
   const socket = createServer().listen(0, "127.0.0.1");
   await once(socket, "listening");
   const port = socket.address().port;
@@ -54,10 +58,10 @@ after(async () => {
 test("equipment lifecycle remains optional and preserves history across moves", async (t) => {
   let customer, other, first, second, foreign, asset, job;
   await t.test("existing and ordinary jobs work without equipment", async () => {
-    const { job: legacy } = await api("GET", "/api/jobs/1");
+    const { job: legacy } = await api("GET", `/api/jobs/${legacyId}`);
     assert.equal(legacy.asset_id, null);
     assert.equal(legacy.notes, "Keep this history");
-    await api("PUT", "/api/jobs/1", { status: "completed" });
+    await api("PUT", `/api/jobs/${legacyId}`, { status: "completed" });
     customer = await api("POST", "/api/customers", { name: "Equipment customer", address: "Customer office" }, 201);
     other = await api("POST", "/api/customers", { name: "Another customer" }, 201);
     const ordinary = await api("POST", "/api/jobs", { customer_id: customer.id, scheduled_date: "2026-09-15" }, 201);
@@ -90,7 +94,7 @@ test("equipment lifecycle remains optional and preserves history across moves", 
     assert.equal((await api("GET", `/api/customers/${customer.id}/assets?search=ah-001`)).total, 1);
     assert.equal((await api("GET", `/api/customers/${other.id}/assets`)).total, 0);
     await api("GET", `/api/customers/${customer.id}/assets?page=0`, undefined, 400);
-    await api("GET", "/api/assets/999999", undefined, 404);
+    await api("GET", `/api/assets/${missingId}`, undefined, 404);
   });
   await t.test("linked jobs snapshot the site address and reject cross-customer links", async () => {
     job = await api("POST", "/api/jobs", { customer_id: customer.id, asset_id: asset.id, scheduled_date: "2026-09-15", notes: "Inspect vibration" }, 201);
@@ -98,7 +102,7 @@ test("equipment lifecycle remains optional and preserves history across moves", 
     assert.equal(job.address, "1 North Road");
     await api("POST", "/api/jobs", { customer_id: other.id, asset_id: asset.id, scheduled_date: "2026-09-15" }, 400);
     await api("PUT", `/api/jobs/${job.id}`, { customer_id: other.id }, 400);
-    await api("PUT", "/api/jobs/1", { asset_id: asset.id }, 400);
+    await api("PUT", `/api/jobs/${legacyId}`, { asset_id: asset.id }, 400);
     const note = await api("POST", `/api/jobs/${job.id}/notes`, { content: "Replaced worn belt" }, 201);
     await api("PUT", `/api/jobs/${job.id}`, { status: "completed", completion_notes: "Vibration resolved" });
     assert.ok(note.id);
@@ -132,9 +136,43 @@ test("equipment lifecycle remains optional and preserves history across moves", 
     const secondPage = await api("GET", `/api/assets/${asset.id}/history?page=2`);
     assert.equal(firstPage.history.length, 50);
     assert.ok(secondPage.history.length > 0);
-    assert.ok(firstPage.history.at(-1).id > secondPage.history[0].id);
+    assert.ok(secondPage.history.every((event) => !firstPage.history.some((first) => first.id === event.id)));
     const openapi = await api("GET", "/api/openapi.json");
     assert.ok(openapi.paths["/api/assets/{id}/history"]);
     assert.ok(openapi.paths["/api/customers/{id}/sites"]);
   });
+});
+
+
+test("UUID API contracts cover all record types and concurrent creation", async () => {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const customers = await Promise.all(Array.from({ length: 8 }, (_, i) => api("POST", "/api/customers", { name: `Concurrent ${i}` }, 201)));
+  customers.forEach((customer, i) => { assert.match(customer.id, uuid); assert.equal(customer.name, `Concurrent ${i}`); });
+  assert.equal(new Set(customers.map((c) => c.id)).size, 8);
+  const customer = customers[0];
+  const tech = await api("POST", "/api/technicians", { name: "UUID technician" }, 201);
+  const service = await api("POST", "/api/service-types", { name: "UUID inspection", default_price: 125 }, 201);
+  assert.match(tech.id, uuid); assert.match(service.id, uuid);
+  const jobs = await Promise.all(Array.from({ length: 4 }, () => api("POST", "/api/jobs", { customer_id: customer.id, technician_id: tech.id, service_type_id: service.id, scheduled_date: "2026-09-15" }, 201)));
+  assert.equal(new Set(jobs.map((job) => job.identifier)).size, 4);
+  const job = jobs[0];
+  assert.match(job.id, uuid); assert.equal(job.technician_id, tech.id); assert.equal(job.price, 125);
+  await api("POST", `/api/jobs/${job.id}/checklist`, { label: "Check UUID relations" }, 201);
+  await api("POST", "/api/materials", { name: "UUID seal", unit_cost: 10 }, 201);
+  const material = (await api("GET", "/api/materials")).materials.find((m) => m.name === "UUID seal");
+  assert.match(material.id, uuid);
+  await api("POST", `/api/jobs/${job.id}/materials`, { material_id: material.id, quantity: 2 }, 201);
+  const detail = (await api("GET", `/api/jobs/${job.id}`)).job;
+  assert.match(detail.checklist[0].id, uuid); assert.match(detail.job_materials[0].id, uuid);
+  await api("PUT", `/api/checklist/${detail.checklist[0].id}`, { checked: 1 });
+  const invoiceResult = await api("POST", `/api/jobs/${job.id}/invoice`, undefined, 201);
+  assert.match(invoiceResult.invoice_id, uuid);
+  const invoice = (await api("GET", `/api/invoices/${invoiceResult.invoice_id}`)).invoice;
+  assert.equal(invoice.job_id, job.id); assert.equal(invoice.total, 145);
+  assert.ok(invoice.lines.every((line) => uuid.test(line.id) && line.invoice_id === invoice.id));
+  await api("GET", "/api/jobs/1", undefined, 400);
+  await api("POST", "/api/jobs", { customer_id: 1, scheduled_date: "2026-09-15" }, 400);
+  await api("POST", `/api/jobs/${job.id}/materials`, { material_id: 1, quantity: 1 }, 400);
+  await api("PUT", `/api/jobs/${job.id}`, { technician_id: null });
+  assert.equal((await api("GET", `/api/jobs/${job.id}`)).job.technician_id, null);
 });

@@ -69,7 +69,7 @@ export function ScheduleView() {
                   <button
                     key={job.id}
                     class="schedule-job"
-                    style={{ borderLeftColor: job.technician_color || job.service_type_color || "#16a34a" }}
+                    style={{ "--category": job.technician_color || job.service_type_color || "var(--info)" }}
                     onClick={() => navigate(`/jobs/${job.id}`)}
                   >
                     <div class="schedule-job-time">{job.scheduled_time}</div>

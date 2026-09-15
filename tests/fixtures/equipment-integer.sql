@@ -1,6 +1,6 @@
 -- Customers
 CREATE TABLE IF NOT EXISTS customers (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random() % 4) + 1, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))) CHECK(length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND length(replace(id, '-', '')) = 32 AND lower(replace(id, '-', '')) NOT GLOB '*[^0-9a-f]*'),
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   email TEXT DEFAULT '',
   phone TEXT DEFAULT '',
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS customers (
 
 -- Technicians (field workers)
 CREATE TABLE IF NOT EXISTS technicians (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random() % 4) + 1, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))) CHECK(length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND length(replace(id, '-', '')) = 32 AND lower(replace(id, '-', '')) NOT GLOB '*[^0-9a-f]*'),
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   email TEXT DEFAULT '',
   phone TEXT DEFAULT '',
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS technicians (
 
 -- Service types (configurable per vertical)
 CREATE TABLE IF NOT EXISTS service_types (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random() % 4) + 1, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))) CHECK(length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND length(replace(id, '-', '')) = 32 AND lower(replace(id, '-', '')) NOT GLOB '*[^0-9a-f]*'),
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   description TEXT DEFAULT '',
   default_duration INTEGER NOT NULL DEFAULT 60,
@@ -37,12 +37,12 @@ CREATE TABLE IF NOT EXISTS service_types (
 
 -- Jobs (scheduled service visits)
 CREATE TABLE IF NOT EXISTS jobs (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random() % 4) + 1, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))) CHECK(length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND length(replace(id, '-', '')) = 32 AND lower(replace(id, '-', '')) NOT GLOB '*[^0-9a-f]*'),
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   identifier TEXT NOT NULL UNIQUE,
-  customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
-  asset_id TEXT REFERENCES assets(id) ON DELETE RESTRICT,
-  technician_id TEXT REFERENCES technicians(id) ON DELETE SET NULL,
-  service_type_id TEXT REFERENCES service_types(id) ON DELETE SET NULL,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  asset_id INTEGER REFERENCES assets(id) ON DELETE RESTRICT,
+  technician_id INTEGER REFERENCES technicians(id) ON DELETE SET NULL,
+  service_type_id INTEGER REFERENCES service_types(id) ON DELETE SET NULL,
   status TEXT NOT NULL DEFAULT 'scheduled',
   priority TEXT NOT NULL DEFAULT 'normal',
   scheduled_date TEXT NOT NULL DEFAULT (date('now')),
@@ -61,16 +61,16 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 -- Job history / activity log
 CREATE TABLE IF NOT EXISTS job_notes (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random() % 4) + 1, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))) CHECK(length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND length(replace(id, '-', '')) = 32 AND lower(replace(id, '-', '')) NOT GLOB '*[^0-9a-f]*'),
-  job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   content TEXT NOT NULL,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
 -- Checklist items per job (inspection forms, task lists)
 CREATE TABLE IF NOT EXISTS job_checklist (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random() % 4) + 1, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))) CHECK(length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND length(replace(id, '-', '')) = 32 AND lower(replace(id, '-', '')) NOT GLOB '*[^0-9a-f]*'),
-  job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   label TEXT NOT NULL,
   checked INTEGER NOT NULL DEFAULT 0,
   sort_order INTEGER NOT NULL DEFAULT 0
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS job_checklist (
 
 -- Materials / inventory used on jobs
 CREATE TABLE IF NOT EXISTS materials (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random() % 4) + 1, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))) CHECK(length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND length(replace(id, '-', '')) = 32 AND lower(replace(id, '-', '')) NOT GLOB '*[^0-9a-f]*'),
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   unit TEXT NOT NULL DEFAULT 'ea',
   unit_cost REAL NOT NULL DEFAULT 0,
@@ -87,19 +87,19 @@ CREATE TABLE IF NOT EXISTS materials (
 );
 
 CREATE TABLE IF NOT EXISTS job_materials (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random() % 4) + 1, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))) CHECK(length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND length(replace(id, '-', '')) = 32 AND lower(replace(id, '-', '')) NOT GLOB '*[^0-9a-f]*'),
-  job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-  material_id TEXT NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  material_id INTEGER NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
   quantity REAL NOT NULL DEFAULT 1,
   unit_cost REAL NOT NULL DEFAULT 0
 );
 
 -- Invoices
 CREATE TABLE IF NOT EXISTS invoices (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random() % 4) + 1, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))) CHECK(length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND length(replace(id, '-', '')) = 32 AND lower(replace(id, '-', '')) NOT GLOB '*[^0-9a-f]*'),
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   identifier TEXT NOT NULL UNIQUE,
-  customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
-  job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
   status TEXT NOT NULL DEFAULT 'draft',
   subtotal REAL NOT NULL DEFAULT 0,
   tax_rate REAL NOT NULL DEFAULT 0,
@@ -113,8 +113,8 @@ CREATE TABLE IF NOT EXISTS invoices (
 );
 
 CREATE TABLE IF NOT EXISTS invoice_lines (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random() % 4) + 1, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))) CHECK(length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND length(replace(id, '-', '')) = 32 AND lower(replace(id, '-', '')) NOT GLOB '*[^0-9a-f]*'),
-  invoice_id TEXT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
   description TEXT NOT NULL,
   quantity REAL NOT NULL DEFAULT 1,
   unit_price REAL NOT NULL DEFAULT 0,
@@ -152,8 +152,8 @@ CREATE INDEX IF NOT EXISTS idx_invoice_lines_invoice ON invoice_lines(invoice_id
 
 -- Optional equipment lifecycle: records are retained, equipment is retired rather than deleted.
 CREATE TABLE IF NOT EXISTS sites (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random() % 4) + 1, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))) CHECK(length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND length(replace(id, '-', '')) = 32 AND lower(replace(id, '-', '')) NOT GLOB '*[^0-9a-f]*'),
-  customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
   name TEXT NOT NULL,
   address TEXT NOT NULL DEFAULT '',
   contact_name TEXT NOT NULL DEFAULT '',
@@ -169,9 +169,9 @@ CREATE TABLE IF NOT EXISTS sites (
 CREATE INDEX IF NOT EXISTS idx_sites_customer ON sites(customer_id, name);
 
 CREATE TABLE IF NOT EXISTS assets (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random() % 4) + 1, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))) CHECK(length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND length(replace(id, '-', '')) = 32 AND lower(replace(id, '-', '')) NOT GLOB '*[^0-9a-f]*'),
-  customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
-  site_id TEXT NOT NULL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+  site_id INTEGER NOT NULL,
   name TEXT NOT NULL,
   serial_number TEXT NOT NULL COLLATE NOCASE,
   manufacturer TEXT NOT NULL DEFAULT '',
@@ -194,14 +194,14 @@ CREATE INDEX IF NOT EXISTS idx_jobs_asset ON jobs(asset_id);
 -- History is captured in the same statement as a change. job_id is a logical
 -- reference: the snapshot survives deletion or reassignment of the original job.
 CREATE TABLE IF NOT EXISTS asset_history (
-  id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random() % 4) + 1, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))) CHECK(length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND length(replace(id, '-', '')) = 32 AND lower(replace(id, '-', '')) NOT GLOB '*[^0-9a-f]*'),
-  asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE RESTRICT,
-  job_id TEXT,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE RESTRICT,
+  job_id INTEGER,
   summary TEXT NOT NULL,
   details TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_asset_history_asset ON asset_history(asset_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_asset_history_asset ON asset_history(asset_id, id);
 
 CREATE TRIGGER IF NOT EXISTS asset_registered AFTER INSERT ON assets BEGIN
   INSERT INTO asset_history(asset_id, summary, details)

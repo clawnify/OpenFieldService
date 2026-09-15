@@ -33,7 +33,7 @@ export function CreateCustomer({ onClose }: { onClose: () => void }) {
     <div class="modal-overlay" onClick={onClose}>
       <div class="modal" onClick={(e) => e.stopPropagation()}>
         <div class="modal-header">
-          <h2>New Customer</h2>
+          <h2>New customer</h2>
           <button class="btn-icon" onClick={onClose}><X size={18} /></button>
         </div>
         <form onSubmit={handleSubmit}>

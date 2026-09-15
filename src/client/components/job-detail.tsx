@@ -38,7 +38,7 @@ export function JobDetail() {
 
   const handleAddMaterial = async () => {
     if (!materialId) return;
-    await addJobMaterial(job.id, parseInt(materialId, 10), parseFloat(materialQty) || 1);
+    await addJobMaterial(job.id, materialId, parseFloat(materialQty) || 1);
     setMaterialId("");
     setMaterialQty("1");
     setShowAddMaterial(false);
@@ -51,7 +51,7 @@ export function JobDetail() {
           <ArrowLeft size={16} /> Back
         </button>
         <div class="page-header-right">
-          <button class="btn" onClick={() => createInvoiceFromJob(job.id)}>
+          <button class="btn btn-primary" onClick={() => createInvoiceFromJob(job.id)}>
             <FileText size={14} /> Create Invoice
           </button>
           <button class="btn btn-danger" onClick={() => deleteJob(job.id)}>
@@ -95,8 +95,8 @@ export function JobDetail() {
               <div class="detail-meta-item">
                 <Wrench size={14} />
                 <span class="detail-meta-label">Service</span>
-                <span class="service-pill" style={{ borderColor: job.service_type_color || "#ccc" }}>
-                  <span class="service-dot" style={{ background: job.service_type_color || "#ccc" }} />
+                <span class="service-pill" style={{ borderColor: job.service_type_color || "var(--text-muted)" }}>
+                  <span class="service-dot" style={{ background: job.service_type_color || "var(--text-muted)" }} />
                   {job.service_type_name}
                 </span>
               </div>
@@ -105,8 +105,8 @@ export function JobDetail() {
               <User size={14} />
               <span class="detail-meta-label">Technician</span>
               {job.technician_name ? (
-                <span class="tech-pill" style={{ borderColor: job.technician_color || "#ccc" }}>
-                  <span class="tech-dot" style={{ background: job.technician_color || "#ccc" }} />
+                <span class="tech-pill" style={{ borderColor: job.technician_color || "var(--text-muted)" }}>
+                  <span class="tech-dot" style={{ background: job.technician_color || "var(--text-muted)" }} />
                   {job.technician_name}
                 </span>
               ) : (
@@ -131,7 +131,7 @@ export function JobDetail() {
               {(job.checklist || []).map((item) => (
                 <div key={item.id} class="checklist-item">
                   <button class="checklist-toggle" onClick={() => toggleChecklistItem(item.id)}>
-                    {item.checked ? <CheckSquare size={16} color="#16a34a" /> : <Square size={16} />}
+                    {item.checked ? <CheckSquare size={16} color="var(--success)" /> : <Square size={16} />}
                   </button>
                   <span class={item.checked ? "checklist-done" : ""}>{item.label}</span>
                   {isAgent && (
@@ -150,7 +150,7 @@ export function JobDetail() {
                 placeholder="Add checklist item..."
                 onKeyDown={(e) => e.key === "Enter" && handleAddChecklist()}
               />
-              <button class="btn btn-primary btn-sm" onClick={handleAddChecklist}>
+              <button class="btn btn-sm" onClick={handleAddChecklist}>
                 <Plus size={14} />
               </button>
             </div>
@@ -160,7 +160,7 @@ export function JobDetail() {
           <div class="detail-section">
             <h3><Package size={16} style={{ verticalAlign: "text-bottom" }} /> Materials Used</h3>
             {(job.job_materials || []).length > 0 && (
-              <div class="card" style={{ marginBottom: 12 }}>
+              <div class="table-scroll" style={{ marginBottom: 12 }}>
                 <table class="table">
                   <thead>
                     <tr><th>Material</th><th>Qty</th><th>Unit Cost</th><th>Total</th>{isAgent && <th></th>}</tr>
@@ -190,7 +190,7 @@ export function JobDetail() {
                   ))}
                 </select>
                 <input type="number" value={materialQty} onInput={(e) => setMaterialQty((e.target as HTMLInputElement).value)} style={{ width: 70 }} min="0.1" step="0.1" />
-                <button class="btn btn-primary btn-sm" onClick={handleAddMaterial}>Add</button>
+                <button class="btn btn-sm" onClick={handleAddMaterial}>Add</button>
                 <button class="btn btn-sm" onClick={() => setShowAddMaterial(false)}>Cancel</button>
               </div>
             ) : (
@@ -211,7 +211,7 @@ export function JobDetail() {
                 placeholder="Add a note..."
                 onKeyDown={(e) => e.key === "Enter" && handleAddNote()}
               />
-              <button class="btn btn-primary btn-sm" onClick={handleAddNote}>
+              <button class="btn btn-sm" onClick={handleAddNote}>
                 <Send size={14} />
               </button>
             </div>
@@ -255,7 +255,7 @@ export function JobDetail() {
               value={job.technician_id || ""}
               onChange={(e) => {
                 const val = (e.target as HTMLSelectElement).value;
-                updateJob(job.id, { technician_id: val ? parseInt(val, 10) : null });
+                updateJob(job.id, { technician_id: val || null });
               }}
             >
               <option value="">Unassigned</option>

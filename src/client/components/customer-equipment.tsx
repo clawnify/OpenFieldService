@@ -5,7 +5,7 @@ import type { Asset, Site } from "../types";
 import { AssetForm, SiteForm } from "./equipment-forms";
 import { Pagination } from "./pagination";
 
-export function CustomerEquipment({ customerId }: { customerId: number }) {
+export function CustomerEquipment({ customerId }: { customerId: string }) {
   const { navigate } = useApp();
   const [sites, setSites] = useState<Site[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);

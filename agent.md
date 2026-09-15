@@ -20,6 +20,13 @@ Use this template when the user wants to:
 - Track jobs, customers, and invoices for a field service operation
 - Build an alternative to PestPac, ServiceTitan, Jobber, Housecall Pro, or Fieldwork
 
+## Record IDs and equipment
+
+- Read `/api/openapi.json` for live request schemas. Record and relationship IDs are UUID strings; never parse them as numbers or invent sequential IDs.
+- Keep readable job/invoice labels separate from record IDs.
+- To service a known machine, open its `/assets/:id` page and choose **Schedule job**. The customer and equipment are selected; the API resolves a blank address from the current site.
+- An upgrade-required response means the database needs the explicit UUID migration. Back up and preserve existing records; never reset the database to fix this error.
+
 ## Customization guide
 
 When customizing for a specific business vertical:

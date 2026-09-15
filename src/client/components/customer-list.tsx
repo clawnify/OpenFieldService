@@ -32,12 +32,12 @@ export function CustomerList() {
         </div>
       </div>
 
-      <div class="card">
+      <div class="table-scroll">
         {customers.length === 0 ? (
           <div class="empty-state">
-            <p>No customers found</p>
-            <button class="btn btn-primary" onClick={() => setShowCreate(true)}>
-              Add your first customer
+            <p>{customersSearch ? "No customers match your search." : "Add a customer to start scheduling service."}</p>
+            <button class="btn" onClick={() => customersSearch ? setCustomersSearch("") : setShowCreate(true)}>
+              {customersSearch ? "Clear search" : "Add your first customer"}
             </button>
           </div>
         ) : (

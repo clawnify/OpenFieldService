@@ -5,7 +5,7 @@ import { Plus, Trash2, Edit3 } from "lucide-preact";
 export function MaterialList() {
   const { materials, addMaterial, updateMaterial, deleteMaterial, isAgent, setError } = useApp();
   const [showCreate, setShowCreate] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({ name: "", unit: "", unit_cost: 0, in_stock: 0 });
   const [newForm, setNewForm] = useState({ name: "", unit: "ea", unit_cost: 0, in_stock: 0 });
 
@@ -14,7 +14,7 @@ export function MaterialList() {
     setEditingId(m.id);
   };
 
-  const saveEdit = async (id: number) => {
+  const saveEdit = async (id: string) => {
     await updateMaterial(id, editForm);
     setEditingId(null);
   };
@@ -35,11 +35,11 @@ export function MaterialList() {
         </button>
       </div>
 
-      <div class="card">
+      <div class="table-scroll">
         {materials.length === 0 && !showCreate ? (
           <div class="empty-state">
             <p>No materials yet</p>
-            <button class="btn btn-primary" onClick={() => setShowCreate(true)}>
+            <button class="btn" onClick={() => setShowCreate(true)}>
               Add your first material
             </button>
           </div>
@@ -63,7 +63,7 @@ export function MaterialList() {
                   <td><input type="number" value={newForm.in_stock} onInput={(e) => setNewForm({ ...newForm, in_stock: parseFloat((e.target as HTMLInputElement).value) || 0 })} class="inline-input" style={{ width: 80 }} /></td>
                   <td>
                     <div class="action-btns">
-                      <button class="btn btn-sm btn-primary" onClick={handleCreate}>Add</button>
+                      <button class="btn btn-sm" onClick={handleCreate}>Add</button>
                       <button class="btn btn-sm" onClick={() => setShowCreate(false)}>Cancel</button>
                     </div>
                   </td>
@@ -79,7 +79,7 @@ export function MaterialList() {
                       <td><input type="number" value={editForm.in_stock} onInput={(e) => setEditForm({ ...editForm, in_stock: parseFloat((e.target as HTMLInputElement).value) || 0 })} class="inline-input" style={{ width: 80 }} /></td>
                       <td>
                         <div class="action-btns">
-                          <button class="btn btn-sm btn-primary" onClick={() => saveEdit(m.id)}>Save</button>
+                          <button class="btn btn-sm" onClick={() => saveEdit(m.id)}>Save</button>
                           <button class="btn btn-sm" onClick={() => setEditingId(null)}>Cancel</button>
                         </div>
                       </td>

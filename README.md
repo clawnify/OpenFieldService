@@ -47,7 +47,7 @@ OpenFieldService is **vertical-agnostic** — configure service types, pricing, 
 - **Activity log** — timestamped notes on every job for internal communication
 - **Dashboard** — at-a-glance KPIs: today's schedule, upcoming jobs, revenue, outstanding invoices
 - **Search & filter** — find jobs by status, search customers by name/phone/address
-- **URL routing** — bookmarkable pages (`/jobs`, `/customers/123`, `/invoices`, `/schedule`)
+- **URL routing** — bookmarkable pages (`/jobs`, `/customers/:uuid`, `/invoices`, `/schedule`)
 - **Dual-mode UI** — human-optimized + AI-agent-optimized (`?agent`)
 
 ## Quickstart
@@ -59,7 +59,7 @@ pnpm install
 pnpm run dev
 ```
 
-Open the local URL printed by Vite (usually `http://localhost:5173`). The API runs on port 8787. Local D1 data persists in `.wrangler/state/`. `pnpm run dev` creates the schema and upgrades existing local jobs with the optional equipment link.
+Open the local URL printed by Vite (usually `http://localhost:5173`). The API runs on port 8787. Local D1 data persists in `.wrangler/state/`. `pnpm run dev` creates the schema for a fresh database. Existing integer-ID databases require the explicit UUID migration below.
 
 ### Sites and equipment (optional)
 
@@ -68,6 +68,11 @@ contacts, timezones, access instructions, and safety notes. Register each piece
 of equipment with its serial number and site; serial numbers are unique within
 a customer, ignoring case. Search by name, serial number, or model and open an
 equipment card to view its bookmarkable detail page (`/assets/:id`).
+
+From an equipment detail page, choose **Schedule job** to open the job form with
+the customer and equipment already selected. Choose a date, service, and technician;
+saving opens the new job. Changing the customer clears the equipment selection.
+Cancel returns to the equipment record without creating a job.
 
 When creating a job, optionally select equipment. A blank job address uses the
 equipment site's address, falling back to the customer address if the site has
@@ -87,15 +92,49 @@ hierarchies, support cases, maintenance plans, parts applicability, coverage
 adjudication, customer portals, and telemetry ingestion are not included.
 Warranty dates are recorded; coverage decisions are not inferred from them.
 
-For an existing local checkout, `pnpm run db:setup` adds the nullable equipment
-link without dropping or rewriting jobs, then applies the additive schema.
-Clawnify deployments use the platform's additive schema reconciliation. If you
-operate D1 directly, apply the same nullable column addition and declared schema
-to your database through your normal migration process before running the new API.
+### UUID record IDs and existing databases
 
-Run `pnpm test` to exercise the previous schema upgrade (twice, with existing
-data) and the equipment workflows against a temporary local Wrangler/D1 instance.
-The test creates and removes its own database; it does not use a remote database.
+Every record uses a UUID: customers, jobs, sites, equipment, technicians,
+service types, notes, checklist items, materials, invoices, invoice lines, and
+history events. API relationships and detail URLs use UUID strings. Readable
+job/invoice labels (`JOB-42`, `INV-8`) remain for staff; their counters are atomic.
+
+**Existing databases require a migration before this version can run.** An
+additive deployment schema update cannot change primary-key types. The API
+returns an upgrade-required error on the old schema instead of accepting writes.
+
+For local Wrangler/D1, stop the app and back up `.wrangler/state/`, then run:
+
+```bash
+pnpm db:migrate-uuids
+pnpm dev
+```
+
+The migration copies records with UUIDs, remaps every relationship, checks row
+counts and foreign keys, and replaces the tables in one atomic D1 batch. Retained
+history (including references to deleted jobs), timestamps, display labels, and
+counter values survive. Repeating the migration is a no-op. Custom tables, indexes, columns, and
+triggers require an explicit migration rather than silently dropping them.
+Old numeric bookmarks/API IDs must be replaced with UUIDs; find the record by
+its existing name, serial number, or job/invoice label.
+
+The setup script is **local only**. For an existing hosted database, stop writes,
+back it up, and apply an equivalent migration using its actual schema through
+your database administration process **before deploying this code**. The migration
+builder is `scripts/uuid-migration.mjs`; it accepts the schema, actual table
+columns, and trigger names. Never reset a populated database to adopt UUIDs.
+
+Run `pnpm test` for migration preservation/rollback checks and real local D1
+workflows, including UUID relations, concurrent record creation, and invoicing.
+Tests create and remove their own databases and never use a remote database.
+
+### Appearance
+
+The UI follows the Clawnify app instruction system: white content, a warm neutral
+sidebar, ink primary actions, semantic status badges, full-width tables, and
+compact stat tiles. Shared colours, spacing, and radii live in
+`src/client/tokens.css`. Dark mode follows the system appearance. On phones,
+controls grow to touch size and tables scroll within their own region.
 
 ### Agent Mode (for OpenClaw / Claude Code)
 
@@ -116,17 +155,18 @@ Claude Code can interact with the scheduler through the REST API:
 
 ```bash
 # Create a customer
-curl -X POST http://localhost:3004/api/customers \
+curl -X POST http://localhost:8787/api/customers \
   -H "Content-Type: application/json" \
   -d '{"name": "John Smith", "phone": "(555) 123-4567", "address": "123 Main St", "city": "Austin", "state": "TX"}'
 
 # Schedule a job
-curl -X POST http://localhost:3004/api/jobs \
+curl -X POST http://localhost:8787/api/jobs \
   -H "Content-Type: application/json" \
-  -d '{"customer_id": 1, "service_type_id": 1, "technician_id": 1, "scheduled_date": "2025-01-15", "scheduled_time": "09:00"}'
+  -d '{"customer_id": "<customer-uuid>", "service_type_id": "<service-type-uuid>", "technician_id": "<technician-uuid>", "scheduled_date": "2025-01-15", "scheduled_time": "09:00"}'
 
-# Generate an invoice from a completed job
-curl -X POST http://localhost:3004/api/jobs/1/invoice
+# Generate an invoice using the UUID returned when the job was created
+JOB_ID="<job-uuid>"
+curl -X POST "http://localhost:8787/api/jobs/$JOB_ID/invoice"
 ```
 
 ## Tech Stack
