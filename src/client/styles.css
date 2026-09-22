@@ -32,6 +32,24 @@ body {
   font-size: 14px;
 }
 
+.connection-banner {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px var(--gutter);
+  color: var(--warning);
+  background: var(--warning-tint);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.connection-banner span { flex: 1; }
+.connection-banner .btn { color: inherit; }
+
 /* ── Sidebar ─────────────────────────────────────────────────────────── */
 
 .sidebar {
@@ -1071,6 +1089,10 @@ button.stat-card:hover { background: var(--surface-sunken); box-shadow: var(--sh
   .sidebar, .sidebar.collapsed { width: 100%; }
   .sidebar.collapsed .sidebar-item span { display: inline; }
   .sidebar-brand { display: none; }
+  .connection-banner { align-items: flex-start; flex-wrap: wrap; }
+  .connection-banner > span { flex-basis: calc(100% - 24px); }
+  .connection-banner .btn { margin-left: 24px; }
+  .connection-banner .btn + .btn { margin-left: 0; }
   .error-banner { left: 16px; right: 16px; max-width: none; bottom: max(16px, env(safe-area-inset-bottom)); }
   .table { min-width: 640px; }
 }

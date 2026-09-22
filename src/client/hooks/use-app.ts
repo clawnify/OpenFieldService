@@ -1,4 +1,4 @@
-import { weekRange } from "../calendar";
+import { calendarDate, weekRange } from "../calendar";
 import { useState, useCallback, useEffect } from "preact/hooks";
 import { api } from "../api";
 import type {
@@ -97,6 +97,14 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
   const fetchSchedule = useCallback(async (start: string, end: string) => {
     const data = await api<{ jobs: Job[] }>("GET", `/api/schedule?start=${start}&end=${end}`);
     setScheduleJobs(data.jobs);
+    const today = calendarDate(new Date());
+    if (today >= start && today <= end && navigator.onLine) {
+      void Promise.allSettled(
+        data.jobs
+          .filter((job) => job.scheduled_date === today)
+          .map((job) => api<{ job: Job }>("GET", `/api/jobs/${job.id}`)),
+      );
+    }
   }, []);
 
   const fetchLookups = useCallback(async () => {
@@ -186,6 +194,7 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
 
   const selectJob = useCallback(async (id: string | null) => {
     if (id === null) { setSelectedJob(null); return; }
+    setSelectedJob(null);
     const res = await api<{ job: Job }>("GET", `/api/jobs/${id}`);
     setSelectedJob(res.job);
   }, []);
