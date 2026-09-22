@@ -307,4 +307,4 @@ This project is part of the [OpenClaw](https://github.com/openclaw/openclaw) eco
 
 ## License
 
-AGPL-3.0
+[MIT](LICENSE)
