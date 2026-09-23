@@ -58,6 +58,7 @@ OpenFieldService is **vertical-agnostic** — configure service types, pricing, 
 - **Materials tracking** — log materials used on each job with costs, maintain inventory
 - **Job checklists** — inspection forms and task lists per job with check/uncheck
 - **Activity log** — timestamped notes on every job for internal communication
+- **Customer context on every job** — lifetime job count, last completed service, and paid invoice revenue without leaving the work order
 - **Dashboard** — at-a-glance KPIs: today's schedule, upcoming jobs, revenue, outstanding invoices
 - **Search & filter** — find jobs by status, search customers by name/phone/address
 - **URL routing** — bookmarkable pages (`/jobs`, `/customers/:uuid`, `/invoices`, `/schedule`)
@@ -261,7 +262,7 @@ invoice_lines(id, invoice_id, description, quantity, unit_price, total)
 | GET | `/api/schedule` | Jobs within date range (calendar view) |
 | GET | `/api/jobs` | List jobs (paginated, filterable by status) |
 | POST | `/api/jobs` | Create a job |
-| GET | `/api/jobs/:id` | Job detail with notes, checklist, materials |
+| GET | `/api/jobs/:id` | Job detail with notes, checklist, materials, and customer service context |
 | PUT | `/api/jobs/:id` | Update a job |
 | DELETE | `/api/jobs/:id` | Delete a job |
 | POST | `/api/jobs/:id/notes` | Add a job note |

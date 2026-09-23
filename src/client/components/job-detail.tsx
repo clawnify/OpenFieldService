@@ -115,6 +115,35 @@ export function JobDetail() {
             </div>
           </div>
 
+          <section class="customer-context" aria-labelledby="customer-context-heading">
+            <div class="customer-context-heading">
+              <h3 id="customer-context-heading">Customer history</h3>
+              <button class="btn btn-sm" onClick={() => navigate(`/customers/${job.customer_id}`)}>
+                Open customer
+              </button>
+            </div>
+            <div class="customer-context-grid">
+              <div class="customer-context-item">
+                <strong>{job.customer_job_count ?? 1}</strong>
+                <span>Lifetime jobs</span>
+              </div>
+              <div class="customer-context-item">
+                {job.customer_last_service_id ? (
+                  <button class="customer-context-link" onClick={() => navigate(`/jobs/${job.customer_last_service_id}`)}>
+                    {job.customer_last_service_identifier} · {job.customer_last_service_date}
+                  </button>
+                ) : (
+                  <strong>None yet</strong>
+                )}
+                <span>Last completed service</span>
+              </div>
+              <div class="customer-context-item">
+                <strong>${(job.customer_lifetime_revenue ?? 0).toFixed(2)}</strong>
+                <span>Paid invoice revenue</span>
+              </div>
+            </div>
+          </section>
+
           {job.notes && (
             <div class="detail-section">
               <h3>Notes</h3>
