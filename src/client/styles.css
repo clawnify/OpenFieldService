@@ -467,6 +467,49 @@ body {
   color: var(--text-muted);
 }
 
+.customer-context {
+  padding: 16px;
+  background: var(--card-bg);
+  box-shadow: var(--shadow-edge);
+  border-radius: var(--radius);
+}
+
+.customer-context-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.customer-context-heading h3 { margin: 0; font-size: 15px; font-weight: 600; }
+
+.customer-context-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.customer-context-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.customer-context-item strong, .customer-context-link { font-size: 16px; font-weight: 600; }
+.customer-context-item span { color: var(--text-muted); font-size: 13px; }
+.customer-context-link {
+  width: fit-content;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
+}
+
+.customer-context-link:hover { text-decoration-color: currentColor; }
+
 .detail-section {
   margin-top: 24px;
 }
@@ -1066,6 +1109,7 @@ button.stat-card:hover { background: var(--surface-sunken); box-shadow: var(--sh
   .equipment-timeline { border-top: 1px solid var(--border); padding-top: 24px; }
   .schedule-grid { grid-template-columns: 1fr; }
   .schedule-day { min-height: 80px; }
+  .customer-context-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 640px) {
   .sidebar, .sidebar.collapsed { width: 100%; }

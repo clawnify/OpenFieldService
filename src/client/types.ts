@@ -29,6 +29,11 @@ export interface Job {
   technician_color?: string | null;
   service_type_name?: string | null;
   service_type_color?: string | null;
+  customer_job_count?: number;
+  customer_lifetime_revenue?: number;
+  customer_last_service_id?: string | null;
+  customer_last_service_identifier?: string | null;
+  customer_last_service_date?: string | null;
   job_notes?: JobNote[];
   checklist?: ChecklistItem[];
   job_materials?: JobMaterial[];
