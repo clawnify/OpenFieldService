@@ -49,6 +49,7 @@ body {
 
 .connection-banner span { flex: 1; }
 .connection-banner .btn { color: inherit; }
+.connection-banner.ready { color: var(--info); background: var(--info-tint); }
 
 /* ── Sidebar ─────────────────────────────────────────────────────────── */
 

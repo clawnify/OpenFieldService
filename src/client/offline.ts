@@ -1,5 +1,6 @@
 export const OFFLINE_DATA_EVENT = "openfieldservice:offline-data";
 export const LIVE_DATA_EVENT = "openfieldservice:live-data";
+export const SAVED_DATA_CHANGE_EVENT = "openfieldservice:saved-data-change";
 
 const DATA_CACHE = "openfieldservice-data-v1";
 let savedDataActive = false;
@@ -18,6 +19,7 @@ export async function cacheOfflineResponse(path: string, response: Response): Pr
   if (!("caches" in window)) return;
   const cache = await caches.open(DATA_CACHE);
   await cache.put(requestFor(path), response);
+  window.dispatchEvent(new Event(SAVED_DATA_CHANGE_EVENT));
 }
 
 export async function getOfflineResponse(path: string): Promise<Response | undefined> {
@@ -40,8 +42,16 @@ export function isUsingSavedData(): boolean {
   return savedDataActive;
 }
 
+export async function hasSavedFieldData(): Promise<boolean> {
+  if (!("caches" in window)) return false;
+  if (!(await caches.keys()).includes(DATA_CACHE)) return false;
+  const cache = await caches.open(DATA_CACHE);
+  return (await cache.keys()).length > 0;
+}
+
 export async function clearSavedFieldData(): Promise<void> {
   if ("caches" in window) await caches.delete(DATA_CACHE);
+  window.dispatchEvent(new Event(SAVED_DATA_CHANGE_EVENT));
 }
 
 export async function prepareOfflineSupport(): Promise<void> {

@@ -151,9 +151,10 @@ marks saved data, and create, edit, delete, and week-navigation controls stay di
 until live data returns. Jobs outside the saved set say that they must be opened online
 first instead of showing an empty record.
 
-Offline data can contain customer details. Use **Clear saved data** in the connection
-banner before handing a device to another person. Offline writes are deliberately not
-queued: a job update must reach the server before the app claims it was saved.
+Offline data can contain customer details. While saved data exists, the connection banner
+stays available online so you can use **Clear saved data** before handing a device to
+another person. Offline writes are deliberately not queued: a job update must reach the
+server before the app claims it was saved.
 
 ### Appearance
 
