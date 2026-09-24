@@ -62,6 +62,7 @@ OpenFieldService is **vertical-agnostic** — configure service types, pricing, 
 - **Search & filter** — find jobs by status, search customers by name/phone/address
 - **URL routing** — bookmarkable pages (`/jobs`, `/customers/:uuid`, `/invoices`, `/schedule`)
 - **Dual-mode UI** — human-optimized + AI-agent-optimized (`?agent`)
+- **Offline field access** — saves the current schedule and today’s job packets on-device for read-only use when signal drops
 
 ## Quickstart
 
@@ -140,6 +141,21 @@ columns, and trigger names. Never reset a populated database to adopt UUIDs.
 Run `pnpm test` for migration preservation/rollback checks and real local D1
 workflows, including UUID relations, concurrent record creation, and invoicing.
 Tests create and remove their own databases and never use a remote database.
+
+### Offline field access
+
+After an online visit, the current schedule and today’s full job packets are saved
+in that browser. If connectivity drops, refresh the app to keep reading the saved
+customer, address, notes, checklist, and materials for those jobs. A visible banner
+marks saved data, and create, edit, delete, and week-navigation controls stay disabled
+until live data returns. Jobs outside the saved set say that they must be opened online
+first instead of showing an empty record.
+
+Offline data can contain customer details. While saved data exists, the connection banner
+stays available online so you can use **Clear saved data** before handing a device to
+another person. Clearing also pauses field-data caching across reloads until you choose
+**Enable offline access**. Offline writes are deliberately not queued: a job update must
+reach the server before the app claims it was saved.
 
 ### Appearance
 
