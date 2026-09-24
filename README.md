@@ -153,8 +153,9 @@ first instead of showing an empty record.
 
 Offline data can contain customer details. While saved data exists, the connection banner
 stays available online so you can use **Clear saved data** before handing a device to
-another person. Offline writes are deliberately not queued: a job update must reach the
-server before the app claims it was saved.
+another person. Clearing also pauses field-data caching across reloads until you choose
+**Enable offline access**. Offline writes are deliberately not queued: a job update must
+reach the server before the app claims it was saved.
 
 ### Appearance
 

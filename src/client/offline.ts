@@ -1,8 +1,9 @@
 export const OFFLINE_DATA_EVENT = "openfieldservice:offline-data";
 export const LIVE_DATA_EVENT = "openfieldservice:live-data";
-export const SAVED_DATA_CHANGE_EVENT = "openfieldservice:saved-data-change";
+export const OFFLINE_STORAGE_CHANGE_EVENT = "openfieldservice:offline-storage-change";
 
 const DATA_CACHE = "openfieldservice-data-v1";
+const DISABLED_CACHE = "openfieldservice-data-disabled-v1";
 let savedDataActive = false;
 
 export function isOfflineDataRequest(method: string, path: string): boolean {
@@ -16,14 +17,19 @@ function requestFor(path: string): Request {
 }
 
 export async function cacheOfflineResponse(path: string, response: Response): Promise<void> {
-  if (!("caches" in window)) return;
+  if (!("caches" in window) || !(await isOfflineStorageEnabled())) return;
   const cache = await caches.open(DATA_CACHE);
+  if (!(await isOfflineStorageEnabled())) return;
   await cache.put(requestFor(path), response);
-  window.dispatchEvent(new Event(SAVED_DATA_CHANGE_EVENT));
+  if (!(await isOfflineStorageEnabled())) {
+    await caches.delete(DATA_CACHE);
+    return;
+  }
+  window.dispatchEvent(new Event(OFFLINE_STORAGE_CHANGE_EVENT));
 }
 
 export async function getOfflineResponse(path: string): Promise<Response | undefined> {
-  if (!("caches" in window)) return undefined;
+  if (!("caches" in window) || !(await isOfflineStorageEnabled())) return undefined;
   const cache = await caches.open(DATA_CACHE);
   return cache.match(requestFor(path), { ignoreVary: true });
 }
@@ -49,9 +55,22 @@ export async function hasSavedFieldData(): Promise<boolean> {
   return (await cache.keys()).length > 0;
 }
 
+export async function isOfflineStorageEnabled(): Promise<boolean> {
+  if (!("caches" in window)) return false;
+  return !(await caches.keys()).includes(DISABLED_CACHE);
+}
+
 export async function clearSavedFieldData(): Promise<void> {
-  if ("caches" in window) await caches.delete(DATA_CACHE);
-  window.dispatchEvent(new Event(SAVED_DATA_CHANGE_EVENT));
+  if ("caches" in window) {
+    await caches.open(DISABLED_CACHE);
+    await caches.delete(DATA_CACHE);
+  }
+  window.dispatchEvent(new Event(OFFLINE_STORAGE_CHANGE_EVENT));
+}
+
+export async function enableOfflineStorage(): Promise<void> {
+  if ("caches" in window) await caches.delete(DISABLED_CACHE);
+  window.dispatchEvent(new Event(OFFLINE_STORAGE_CHANGE_EVENT));
 }
 
 export async function prepareOfflineSupport(): Promise<void> {

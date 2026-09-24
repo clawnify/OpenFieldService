@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import {
   cacheOfflineResponse,
   clearSavedFieldData,
+  enableOfflineStorage,
   hasSavedFieldData,
+  isOfflineStorageEnabled,
   isOfflineDataRequest,
-  SAVED_DATA_CHANGE_EVENT,
+  OFFLINE_STORAGE_CHANGE_EVENT,
 } from '../src/client/offline.ts';
 
 test('offline cache is limited to schedule reads and individual job packets', () => {
@@ -21,15 +23,24 @@ test('saved field data can be detected and cleared while online', async () => {
   const originalWindow = globalThis.window;
   const originalCaches = globalThis.caches;
   const entries = new Map();
+  const cacheNames = new Set();
   const cache = {
     keys: async () => [...entries.keys()].map((url) => new Request(url)),
     match: async (request) => entries.get(request.url),
     put: async (request, response) => { entries.set(request.url, response); },
   };
+  const markerCache = { keys: async () => [], match: async () => undefined, put: async () => undefined };
   const cacheStorage = {
-    keys: async () => entries.size > 0 ? ['openfieldservice-data-v1'] : [],
-    open: async () => cache,
-    delete: async () => { entries.clear(); return true; },
+    keys: async () => [...cacheNames],
+    open: async (name) => {
+      cacheNames.add(name);
+      return name === 'openfieldservice-data-v1' ? cache : markerCache;
+    },
+    delete: async (name) => {
+      const existed = cacheNames.delete(name);
+      if (name === 'openfieldservice-data-v1') entries.clear();
+      return existed;
+    },
   };
   const browserWindow = new EventTarget();
   browserWindow.location = { origin: 'https://field.example' };
@@ -38,14 +49,20 @@ test('saved field data can be detected and cleared while online', async () => {
   globalThis.caches = cacheStorage;
 
   let changes = 0;
-  browserWindow.addEventListener(SAVED_DATA_CHANGE_EVENT, () => { changes += 1; });
+  browserWindow.addEventListener(OFFLINE_STORAGE_CHANGE_EVENT, () => { changes += 1; });
   try {
+    assert.equal(await isOfflineStorageEnabled(), true);
     assert.equal(await hasSavedFieldData(), false);
     await cacheOfflineResponse('/api/schedule?start=2026-09-21&end=2026-09-27', new Response('{}'));
     assert.equal(await hasSavedFieldData(), true);
     await clearSavedFieldData();
+    assert.equal(await isOfflineStorageEnabled(), false);
     assert.equal(await hasSavedFieldData(), false);
-    assert.equal(changes, 2);
+    await cacheOfflineResponse('/api/jobs/85bf2f27-6394-4df4-9054-1f15d0065ad1', new Response('{}'));
+    assert.equal(await hasSavedFieldData(), false);
+    await enableOfflineStorage();
+    assert.equal(await isOfflineStorageEnabled(), true);
+    assert.equal(changes, 3);
   } finally {
     if (originalWindow === undefined) Reflect.deleteProperty(globalThis, 'window');
     else globalThis.window = originalWindow;
