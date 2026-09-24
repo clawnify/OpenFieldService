@@ -952,6 +952,10 @@ body {
 .equipment-dialog .form-group { font-size: 12px; font-weight: 600; }
 .equipment-dialog .full-width { grid-column: 1 / -1; }
 .equipment-dialog input, .equipment-dialog select, .equipment-dialog textarea, .equipment-picker input, .equipment-picker select { min-width: 0; width: 100%; }
+.job-form-details { border-top: 1px solid var(--border); padding-top: 12px; }
+.job-form-details summary { color: var(--text); cursor: pointer; font-weight: 500; }
+.job-form-details summary small { margin-left: 8px; color: var(--text-muted); font-size: 12px; font-weight: 400; }
+.job-form-details-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding-top: 14px; }
 .equipment-picker { display: grid; gap: 8px; margin-bottom: 12px; }
 .equipment-section fieldset { border: 0; padding: 0; min-width: 0; }
 .equipment-page { overflow-wrap: anywhere; }
@@ -969,6 +973,8 @@ body {
   .detail-layout { flex-direction: column; }
   .detail-sidebar { width: 100%; }
   .form-grid { grid-template-columns: 1fr; padding: 16px; }
+  .job-form-details summary small { display: block; margin: 2px 0 0 14px; }
+  .job-form-details-grid { grid-template-columns: 1fr; }
   .form-group input, .form-group select, .form-group textarea { min-width: 0; }
   .equipment-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .equipment-actions .btn { min-height: 44px; }
