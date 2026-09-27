@@ -1,4 +1,4 @@
-const SHELL_CACHE = "openfieldservice-shell-v1";
+const SHELL_CACHE = "openfieldservice-shell-v2";
 const DATA_CACHE = "openfieldservice-data-v1";
 const DISABLED_CACHE = "openfieldservice-data-disabled-v1";
 const CACHE_PREFIX = "openfieldservice-";
@@ -74,6 +74,10 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // Only the explicit field-data allowlist may persist API responses. Other
+  // records can contain customer or billing data and must remain network-only.
+  if (url.pathname.startsWith("/api/")) return;
+
   if (request.mode === "navigate") {
     event.respondWith((async () => {
       try {
@@ -91,13 +95,10 @@ self.addEventListener("fetch", (event) => {
   }
 
   event.respondWith((async () => {
-    const cached = await caches.match(request, { ignoreVary: true });
-    if (cached) return cached;
-    const response = await fetch(request);
-    if (response.ok) {
-      const cache = await caches.open(SHELL_CACHE);
-      await cache.put(request, response.clone());
+    try {
+      return await fetch(request);
+    } catch {
+      return (await caches.match(request, { ignoreVary: true })) || Response.error();
     }
-    return response;
   })());
 });
