@@ -168,6 +168,11 @@ const JobSchema = z.object({
   technician_color: z.string().nullable().optional(),
   service_type_name: z.string().nullable().optional(),
   service_type_color: z.string().nullable().optional(),
+  customer_job_count: z.number().int().optional(),
+  customer_lifetime_revenue: z.number().optional(),
+  customer_last_service_id: z.string().uuid().nullable().optional(),
+  customer_last_service_identifier: z.string().nullable().optional(),
+  customer_last_service_date: z.string().nullable().optional(),
   job_notes: z.array(JobNoteSchema).optional(),
   created_at: z.string(),
   updated_at: z.string(),
@@ -328,11 +333,26 @@ app.openapi(getJob, async (c) => {
   const job = await get<z.infer<typeof JobSchema>>(
     `SELECT j.*, c.name as customer_name, c.phone as customer_phone,
        t.name as technician_name, t.color as technician_color,
-       st.name as service_type_name, st.color as service_type_color
+       st.name as service_type_name, st.color as service_type_color,
+       (SELECT COUNT(*) FROM jobs customer_jobs WHERE customer_jobs.customer_id = j.customer_id) as customer_job_count,
+       (SELECT COALESCE(SUM(customer_invoices.total), 0) FROM invoices customer_invoices
+        WHERE customer_invoices.customer_id = j.customer_id AND customer_invoices.status = 'paid') as customer_lifetime_revenue,
+       last_service.id as customer_last_service_id,
+       last_service.identifier as customer_last_service_identifier,
+       last_service.scheduled_date as customer_last_service_date
      FROM jobs j
      LEFT JOIN customers c ON j.customer_id = c.id
      LEFT JOIN technicians t ON j.technician_id = t.id
      LEFT JOIN service_types st ON j.service_type_id = st.id
+     LEFT JOIN jobs last_service ON last_service.id = (
+       SELECT previous_job.id
+       FROM jobs previous_job
+       WHERE previous_job.customer_id = j.customer_id
+         AND previous_job.id != j.id
+         AND previous_job.status = 'completed'
+       ORDER BY previous_job.scheduled_date DESC, previous_job.scheduled_time DESC, previous_job.created_at DESC
+       LIMIT 1
+     )
      WHERE j.id = ?`,
     [id]
   );
