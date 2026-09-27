@@ -1,5 +1,5 @@
 import { reportLocation } from "@clawnify/app/client";
-import { useEffect, useMemo } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import { AppContext } from "./context";
 import { useAppState } from "./hooks/use-app";
 import { useRouter } from "./hooks/use-router";
@@ -17,6 +17,7 @@ import { InvoiceList } from "./components/invoice-list";
 import { InvoiceDetail } from "./components/invoice-detail";
 import { AssetDetail } from "./components/asset-detail";
 import { ErrorBanner } from "./components/error-banner";
+import { OfflineBanner } from "./components/offline-banner";
 
 export function App() {
   const isAgent = useMemo(() => {
@@ -32,22 +33,31 @@ export function App() {
 
   const { view, id, navigate } = useRouter();
   const appState = useAppState(isAgent, navigate);
+  const [detailError, setDetailError] = useState<string | null>(null);
   useEffect(() => { reportLocation(window.location.pathname + window.location.search); }, [view, id]);
 
   // Load detail when URL has an ID
   useEffect(() => {
+    setDetailError(null);
     if (view === "jobs" && id) {
-      appState.selectJob(id);
+      appState.selectJob(id).catch((err) => setDetailError((err as Error).message));
     } else if (view === "customers" && id) {
-      appState.selectCustomer(id);
+      appState.selectCustomer(id).catch((err) => setDetailError((err as Error).message));
     } else if (view === "invoices" && id) {
-      appState.selectInvoice(id);
+      appState.selectInvoice(id).catch((err) => setDetailError((err as Error).message));
     }
   }, [view, id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const renderMain = () => {
     if (view === "assets" && id) return <AssetDetail key={id} id={id} />;
-    if (view === "jobs" && id && appState.selectedJob) return <JobDetail />;
+    if (view === "jobs" && id) {
+      if (appState.selectedJob) return <JobDetail />;
+      return <div class="page"><div class="empty-state" role={detailError ? "alert" : "status"}>
+        <h2>{detailError ? "Job unavailable" : "Loading job…"}</h2>
+        {detailError && <p>{detailError}</p>}
+        {detailError && <button class="btn" onClick={() => navigate("/schedule")}>Back to schedule</button>}
+      </div></div>;
+    }
     if (view === "customers" && id && appState.selectedCustomer) return <CustomerDetail />;
     if (view === "invoices" && id && appState.selectedInvoice) return <InvoiceDetail />;
     switch (view) {
@@ -67,6 +77,7 @@ export function App() {
       <div class="layout">
         <Sidebar currentView={view} />
         <main class="main-content">
+          <OfflineBanner />
           {appState.loading ? (
             <div class="loading-text">Loading...</div>
           ) : (
