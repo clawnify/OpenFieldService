@@ -82,15 +82,6 @@ export function CreateJob({ onClose, initialAsset, initialDate, onCreated }: { o
               </select>
             </div>
             <div class="form-group">
-              <label htmlFor="job-priority">Priority</label>
-              <select id="job-priority" value={priority} onChange={(e) => setPriority((e.target as HTMLSelectElement).value)}>
-                <option value="low">Low</option>
-                <option value="normal">Normal</option>
-                <option value="high">High</option>
-                <option value="urgent">Urgent</option>
-              </select>
-            </div>
-            <div class="form-group">
               <label htmlFor="job-date">Date *</label>
               <input id="job-date" type="date" value={scheduledDate} onChange={(e) => setScheduledDate((e.target as HTMLInputElement).value)} required />
             </div>
@@ -98,17 +89,34 @@ export function CreateJob({ onClose, initialAsset, initialDate, onCreated }: { o
               <label htmlFor="job-time">Time</label>
               <input id="job-time" type="time" value={scheduledTime} onChange={(e) => setScheduledTime((e.target as HTMLInputElement).value)} />
             </div>
-            <div class="form-group full-width">
-              <AssetPicker key={customerId} customerId={customerId} value={assetId} onChange={setAssetId} initialAsset={initialAsset} />
-            </div>
-            <div class="form-group full-width">
-              <label htmlFor="job-address">Address (leave blank to use equipment site or customer address)</label>
-              <input id="job-address" type="text" value={address} onInput={(e) => setAddress((e.target as HTMLInputElement).value)} placeholder="123 Main St, City, ST 12345" />
-            </div>
-            <div class="form-group full-width">
-              <label htmlFor="job-notes">Notes</label>
-              <textarea id="job-notes" rows={3} value={notes} onInput={(e) => setNotes((e.target as HTMLTextAreaElement).value)} placeholder="Job notes..." />
-            </div>
+            <details class="job-form-details full-width" open={!!initialAsset}>
+              <summary>
+                <span>Optional details</span>
+                <small>Equipment, priority, address, and notes</small>
+              </summary>
+              <div class="job-form-details-grid">
+                <div class="form-group">
+                  <label htmlFor="job-priority">Priority</label>
+                  <select id="job-priority" value={priority} onChange={(e) => setPriority((e.target as HTMLSelectElement).value)}>
+                    <option value="low">Low</option>
+                    <option value="normal">Normal</option>
+                    <option value="high">High</option>
+                    <option value="urgent">Urgent</option>
+                  </select>
+                </div>
+                <div class="form-group full-width">
+                  <AssetPicker key={customerId} customerId={customerId} value={assetId} onChange={setAssetId} initialAsset={initialAsset} />
+                </div>
+                <div class="form-group full-width">
+                  <label htmlFor="job-address">Address override</label>
+                  <input id="job-address" type="text" value={address} onInput={(e) => setAddress((e.target as HTMLInputElement).value)} placeholder="Uses the equipment site or customer address" />
+                </div>
+                <div class="form-group full-width">
+                  <label htmlFor="job-notes">Notes</label>
+                  <textarea id="job-notes" rows={3} value={notes} onInput={(e) => setNotes((e.target as HTMLTextAreaElement).value)} placeholder="Job notes..." />
+                </div>
+              </div>
+            </details>
             {error && <p class="equipment-error full-width" role="alert">{error}</p>}
           </fieldset>
           <div class="modal-footer">
