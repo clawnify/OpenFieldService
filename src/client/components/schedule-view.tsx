@@ -3,11 +3,13 @@ import { useState } from "preact/hooks";
 import { ChevronLeft, ChevronRight, Plus } from "lucide-preact";
 import { calendarDate, daysInRange, weekRange } from "../calendar";
 import { CreateJob } from "./create-job";
+import { useConnectivity } from "../hooks/use-connectivity";
 
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export function ScheduleView() {
   const { scheduleJobs, scheduleStart, scheduleEnd, setScheduleRange, navigate } = useApp();
+  const { readOnly } = useConnectivity();
   const [createDate, setCreateDate] = useState<string | null>(null);
 
   const days = daysInRange(scheduleStart, scheduleEnd);
@@ -29,20 +31,20 @@ export function ScheduleView() {
     <div class="page">
       <div class="page-header">
         <h1>Schedule</h1>
-        <button class="btn btn-primary" onClick={() => setCreateDate(todayStr >= scheduleStart && todayStr <= scheduleEnd ? todayStr : scheduleStart)}>
+        <button class="btn btn-primary" disabled={readOnly} onClick={() => setCreateDate(todayStr >= scheduleStart && todayStr <= scheduleEnd ? todayStr : scheduleStart)}>
           <Plus size={16} /> New job
         </button>
       </div>
       <div class="toolbar schedule-toolbar">
         <div class="page-header-right">
-          <button class="btn" onClick={goToday}>Today</button>
-          <button class="btn btn-icon" aria-label="Previous week" onClick={() => shiftWeek(-1)}><ChevronLeft size={16} /></button>
+          <button class="btn" disabled={readOnly} onClick={goToday}>Today</button>
+          <button class="btn btn-icon" disabled={readOnly} aria-label="Previous week" onClick={() => shiftWeek(-1)}><ChevronLeft size={16} /></button>
           <span class="schedule-range" aria-live="polite">
             {new Date(scheduleStart + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}
             {" — "}
             {new Date(scheduleEnd + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
           </span>
-          <button class="btn btn-icon" aria-label="Next week" onClick={() => shiftWeek(1)}><ChevronRight size={16} /></button>
+          <button class="btn btn-icon" disabled={readOnly} aria-label="Next week" onClick={() => shiftWeek(1)}><ChevronRight size={16} /></button>
         </div>
       </div>
 
@@ -75,7 +77,7 @@ export function ScheduleView() {
                   <div class="schedule-empty">No jobs</div>
                 )}
               </div>
-              <button class="btn btn-ghost schedule-add-job" aria-label={`Add job on ${dateObj.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}`} onClick={() => setCreateDate(day)}>
+              <button class="btn btn-ghost schedule-add-job" disabled={readOnly} aria-label={`Add job on ${dateObj.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}`} onClick={() => setCreateDate(day)}>
                 <Plus size={14} /> Add job
               </button>
             </div>

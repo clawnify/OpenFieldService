@@ -4,6 +4,7 @@ import { JobEquipment } from "./asset-picker";
 import { StatusBadge, PriorityBadge } from "./status-badge";
 import { ArrowLeft, Trash2, Send, MapPin, Clock, DollarSign, User, Wrench, Plus, X, CheckSquare, Square, Package, FileText } from "lucide-preact";
 import type { JobStatus } from "../types";
+import { useConnectivity } from "../hooks/use-connectivity";
 
 const ALL_STATUSES: JobStatus[] = ["scheduled", "confirmed", "in_progress", "completed", "cancelled"];
 
@@ -14,6 +15,7 @@ export function JobDetail() {
     addChecklistItem, toggleChecklistItem, deleteChecklistItem,
     addJobMaterial, deleteJobMaterial, materials, createInvoiceFromJob,
   } = useApp();
+  const { readOnly } = useConnectivity();
   const [noteText, setNoteText] = useState("");
   const [checklistText, setChecklistText] = useState("");
   const [showAddMaterial, setShowAddMaterial] = useState(false);
@@ -51,10 +53,10 @@ export function JobDetail() {
           <ArrowLeft size={16} /> Back
         </button>
         <div class="page-header-right">
-          <button class="btn btn-primary" onClick={() => createInvoiceFromJob(job.id)}>
+          <button class="btn btn-primary" disabled={readOnly} onClick={() => createInvoiceFromJob(job.id)}>
             <FileText size={14} /> Create Invoice
           </button>
-          <button class="btn btn-danger" onClick={() => deleteJob(job.id)}>
+          <button class="btn btn-danger" disabled={readOnly} onClick={() => deleteJob(job.id)}>
             <Trash2 size={14} /> Delete
           </button>
         </div>
@@ -130,12 +132,12 @@ export function JobDetail() {
             <div class="checklist-list">
               {(job.checklist || []).map((item) => (
                 <div key={item.id} class="checklist-item">
-                  <button class="checklist-toggle" onClick={() => toggleChecklistItem(item.id)}>
+                  <button class="checklist-toggle" disabled={readOnly} onClick={() => toggleChecklistItem(item.id)}>
                     {item.checked ? <CheckSquare size={16} color="var(--success)" /> : <Square size={16} />}
                   </button>
                   <span class={item.checked ? "checklist-done" : ""}>{item.label}</span>
                   {isAgent && (
-                    <button class="btn-icon danger" onClick={() => deleteChecklistItem(item.id)}>
+                    <button class="btn-icon danger" disabled={readOnly} onClick={() => deleteChecklistItem(item.id)}>
                       <X size={12} />
                     </button>
                   )}
@@ -145,12 +147,13 @@ export function JobDetail() {
             <div class="note-input-row">
               <input
                 type="text"
+                disabled={readOnly}
                 value={checklistText}
                 onInput={(e) => setChecklistText((e.target as HTMLInputElement).value)}
                 placeholder="Add checklist item..."
                 onKeyDown={(e) => e.key === "Enter" && handleAddChecklist()}
               />
-              <button class="btn btn-sm" onClick={handleAddChecklist}>
+              <button class="btn btn-sm" disabled={readOnly} onClick={handleAddChecklist}>
                 <Plus size={14} />
               </button>
             </div>
@@ -173,7 +176,7 @@ export function JobDetail() {
                         <td>${jm.unit_cost.toFixed(2)}</td>
                         <td class="text-bold">${(jm.quantity * jm.unit_cost).toFixed(2)}</td>
                         {isAgent && (
-                          <td><button class="btn-icon danger" onClick={() => deleteJobMaterial(jm.id)}><Trash2 size={12} /></button></td>
+                          <td><button class="btn-icon danger" disabled={readOnly} onClick={() => deleteJobMaterial(jm.id)}><Trash2 size={12} /></button></td>
                         )}
                       </tr>
                     ))}
@@ -183,18 +186,18 @@ export function JobDetail() {
             )}
             {showAddMaterial ? (
               <div class="note-input-row">
-                <select value={materialId} onChange={(e) => setMaterialId((e.target as HTMLSelectElement).value)} style={{ flex: 2 }}>
+                <select disabled={readOnly} value={materialId} onChange={(e) => setMaterialId((e.target as HTMLSelectElement).value)} style={{ flex: 2 }}>
                   <option value="">Select material...</option>
                   {materials.map((m) => (
                     <option key={m.id} value={m.id}>{m.name} (${m.unit_cost}/{m.unit})</option>
                   ))}
                 </select>
-                <input type="number" value={materialQty} onInput={(e) => setMaterialQty((e.target as HTMLInputElement).value)} style={{ width: 70 }} min="0.1" step="0.1" />
-                <button class="btn btn-sm" onClick={handleAddMaterial}>Add</button>
+                <input type="number" disabled={readOnly} value={materialQty} onInput={(e) => setMaterialQty((e.target as HTMLInputElement).value)} style={{ width: 70 }} min="0.1" step="0.1" />
+                <button class="btn btn-sm" disabled={readOnly} onClick={handleAddMaterial}>Add</button>
                 <button class="btn btn-sm" onClick={() => setShowAddMaterial(false)}>Cancel</button>
               </div>
             ) : (
-              <button class="btn btn-sm" onClick={() => setShowAddMaterial(true)}>
+              <button class="btn btn-sm" disabled={readOnly} onClick={() => setShowAddMaterial(true)}>
                 <Plus size={14} /> Add Material
               </button>
             )}
@@ -206,12 +209,13 @@ export function JobDetail() {
             <div class="note-input-row">
               <input
                 type="text"
+                disabled={readOnly}
                 value={noteText}
                 onInput={(e) => setNoteText((e.target as HTMLInputElement).value)}
                 placeholder="Add a note..."
                 onKeyDown={(e) => e.key === "Enter" && handleAddNote()}
               />
-              <button class="btn btn-sm" onClick={handleAddNote}>
+              <button class="btn btn-sm" disabled={readOnly} onClick={handleAddNote}>
                 <Send size={14} />
               </button>
             </div>
@@ -222,7 +226,7 @@ export function JobDetail() {
                   <div class="note-meta">
                     <span>{new Date(note.created_at).toLocaleString()}</span>
                     {isAgent && (
-                      <button class="btn-icon danger" onClick={() => deleteJobNote(note.id)}>
+                      <button class="btn-icon danger" disabled={readOnly} onClick={() => deleteJobNote(note.id)}>
                         <Trash2 size={12} />
                       </button>
                     )}
@@ -240,6 +244,7 @@ export function JobDetail() {
               {ALL_STATUSES.map((s) => (
                 <button
                   key={s}
+                  disabled={readOnly}
                   class={`status-btn ${job.status === s ? "active" : ""}`}
                   onClick={() => handleStatusChange(s)}
                 >
@@ -252,6 +257,7 @@ export function JobDetail() {
           <div class="detail-sidebar-section">
             <h4>Assign Technician</h4>
             <select
+              disabled={readOnly}
               value={job.technician_id || ""}
               onChange={(e) => {
                 const val = (e.target as HTMLSelectElement).value;

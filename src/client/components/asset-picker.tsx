@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import { api } from "../api";
 import { useApp } from "../context";
 import type { Asset, Job } from "../types";
+import { useConnectivity } from "../hooks/use-connectivity";
 
 export function AssetPicker({ customerId, value, onChange, initialAsset }: { customerId: string; value: string | null; onChange: (id: string | null) => void; initialAsset?: Asset }) {
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -34,6 +35,7 @@ export function AssetPicker({ customerId, value, onChange, initialAsset }: { cus
 
 export function JobEquipment({ job }: { job: Job }) {
   const { updateJob, navigate } = useApp();
+  const { readOnly } = useConnectivity();
   const [value, setValue] = useState(job.asset_id);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -42,6 +44,12 @@ export function JobEquipment({ job }: { job: Job }) {
     setBusy(true); setError("");
     try { await updateJob(job.id, { asset_id: value }); } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   };
+  if (readOnly) return <section class="detail-section equipment-section" aria-label="Job equipment"><h3>Equipment</h3>
+    {job.asset_id != null
+      ? <button class="btn" onClick={() => navigate(`/assets/${job.asset_id}`)}>View equipment & history</button>
+      : <p class="text-muted">No equipment linked.</p>}
+    <p class="text-muted">Reconnect to change the equipment link.</p>
+  </section>;
   return <section class="detail-section equipment-section" aria-label="Job equipment"><h3>Equipment</h3>
     <fieldset disabled={busy}><AssetPicker customerId={job.customer_id} value={value} onChange={setValue} /></fieldset>
     <div class="equipment-actions">
