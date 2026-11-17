@@ -1,4 +1,4 @@
-import { AppNav, embedded } from "@clawnify/app/client";
+import { AppNav } from "@clawnify/app/client";
 import { useState } from "preact/hooks";
 import { useApp } from "../context";
 import { PanelLeft, CalendarClock, LayoutDashboard, Briefcase, Users, Wrench, Settings, CalendarDays, FileText, Package } from "lucide-preact";
@@ -20,20 +20,19 @@ export function Sidebar({ currentView }: { currentView: View }) {
 
   const [collapsed, setCollapsed] = useState(false);
 
-  if (embedded) {
-    const icons = ["home", "calendar-days", "briefcase", "users", "settings", "file-text", "package", "settings"];
-    return <AppNav title="Field Service" icon="settings" active={currentView === "assets" ? "customers" : currentView}
-      groups={[{ items: navItems.map((item, index) => ({
-        id: item.view, label: item.label, href: item.path, icon: icons[index],
-        home: item.view === "dashboard",
-        count: item.view === "jobs" ? stats.jobs || undefined
-          : item.view === "customers" ? stats.customers || undefined
-          : item.view === "invoices" ? stats.invoices_outstanding || undefined : undefined,
-      })) }]}
-      onNavigate={item => navigate(item.href ?? "/")} />;
-  }
-
-  return (
+  // One <AppNav>: inside Clawnify the dashboard draws this navigation, and
+  // anywhere else the app's own sidebar below is drawn from it.
+  const icons = ["home", "calendar-days", "briefcase", "users", "settings", "file-text", "package", "settings"];
+  return <AppNav title="Field Service" icon="settings" active={currentView === "assets" ? "customers" : currentView}
+    groups={[{ items: navItems.map((item, index) => ({
+      id: item.view, label: item.label, href: item.path, icon: icons[index],
+      home: item.view === "dashboard",
+      count: item.view === "jobs" ? stats.jobs || undefined
+        : item.view === "customers" ? stats.customers || undefined
+        : item.view === "invoices" ? stats.invoices_outstanding || undefined : undefined,
+    })) }]}
+    onNavigate={item => navigate(item.href ?? "/")}
+    standalone={(nav) => (
     <aside class={`sidebar ${collapsed ? "collapsed" : ""}`}>
       <div class="sidebar-brand">
         <div class="sidebar-brand-icon">
@@ -66,6 +65,7 @@ export function Sidebar({ currentView }: { currentView: View }) {
           </button>
         ))}
       </nav>
+      {nav.card && !collapsed && <div style={{ padding: "0 8px 8px" }}>{nav.card}</div>}
       <div class="sidebar-footer">
         <div class="sidebar-stat">
           <span class="sidebar-stat-value">{stats.today_jobs}</span>
@@ -77,5 +77,5 @@ export function Sidebar({ currentView }: { currentView: View }) {
         </div>
       </div>
     </aside>
-  );
+    )} />;
 }

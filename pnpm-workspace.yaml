@@ -3,5 +3,5 @@ allowBuilds:
   sharp: false
   workerd: true
 minimumReleaseAgeExclude:
-  - '@clawnify/app@0.1.0'
+  - '@clawnify/app@0.1.0 || 0.4.8'
   - '@clawnify/routes@0.2.1'
