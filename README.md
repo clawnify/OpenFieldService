@@ -7,7 +7,9 @@
 
 [![Deploy with Clawnify](https://app.clawnify.com/deploy-button.svg)](https://app.clawnify.com/deploy?repo=clawnify/OpenFieldService)
 
-A field service scheduling and business management app for service companies — pest control, HVAC, plumbing, cleaning, landscaping, and more. Part of the [OpenClaw](https://github.com/openclaw/openclaw) ecosystem. Zero cloud dependencies — runs locally with SQLite.
+A field service scheduling and business management app for service companies — pest control, HVAC, plumbing, cleaning, landscaping, and more. Zero cloud dependencies — runs locally with SQLite.
+
+The app is open source. Deploy it to Clawnify to use it from ChatGPT, Claude, or other MCP-compatible AI chats through the Clawnify connector.
 
 Built with **Preact + Hono + SQLite**. Ships with a clean dashboard UI, weekly calendar view, job management, customer database, invoicing, materials tracking, and technician dispatch.
 
@@ -23,7 +25,7 @@ Conceptual UI illustrations of the app’s main capabilities, with fictional exa
 
 ## What Is It?
 
-OpenFieldService is a production-ready field service management platform designed for the OpenClaw community. Think of it as an open-source alternative to **PestPac**, **ServiceTitan**, **FieldWork**, **Jobber**, or **Housecall Pro** — a complete scheduling and dispatch system you can self-host, customize, and embed in any SaaS product.
+OpenFieldService is a production-ready field service management platform. Think of it as an open-source alternative to **PestPac**, **ServiceTitan**, **FieldWork**, **Jobber**, or **Housecall Pro** — a complete scheduling and dispatch system you can self-host, customize, and embed in any SaaS product.
 
 Unlike PestPac or ServiceTitan, this runs entirely on your own infrastructure. No per-user fees, no contracts, no vendor lock-in. Manage your entire field service operation from scheduling to invoicing.
 
@@ -166,7 +168,7 @@ compact stat tiles. Shared colours, spacing, and radii live in
 `src/client/tokens.css`. Dark mode follows the system appearance. On phones,
 controls grow to touch size and tables scroll within their own region.
 
-### Agent Mode (for OpenClaw / Claude Code)
+### Agent Mode (for coding assistants)
 
 Append `?agent` to the URL:
 
@@ -320,7 +322,7 @@ Open-source field service management software, free pest control scheduling soft
 
 ## Community & Contributions
 
-This project is part of the [OpenClaw](https://github.com/openclaw/openclaw) ecosystem. Contributions are welcome — open an issue or submit a PR.
+Contributions are welcome — open an issue or submit a PR.
 
 ## License
 
